@@ -1,4 +1,5 @@
 import fs from 'fs';
+import os from 'os';
 import path from 'path';
 import type {
   AnalyticsSummary,
@@ -26,7 +27,10 @@ export interface CompanyWorkspaceState {
   storageBytesUsed: number;
 }
 
-const WORKSPACES_DIR = path.resolve(process.cwd(), '.data', 'workspaces');
+const DATA_ROOT =
+  process.env.CHURNSIGHT_DATA_DIR ||
+  (process.env.VERCEL ? path.join(os.tmpdir(), 'churnsight-data') : path.resolve(process.cwd(), '.data'));
+const WORKSPACES_DIR = path.join(DATA_ROOT, 'workspaces');
 
 // Strictly keyed by authenticated companyId
 const companyWorkspaces = new Map<string, CompanyWorkspaceState>();

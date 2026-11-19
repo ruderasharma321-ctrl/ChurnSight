@@ -134,7 +134,18 @@ export const AuthViews: React.FC<AuthViewsProps> = ({ onAuthenticated, sessionNo
           rememberMe,
         }),
       });
-      const data = await res.json();
+      const text = await res.text();
+      let data: Record<string, any> = {};
+      try {
+        data = text ? JSON.parse(text) : {};
+      } catch {
+        setLoginError(
+          res.status === 404
+            ? 'Authentication API route (/api/auth/login) was not found on this deployment. Ensure the backend serverless route or VITE_API_BASE_URL is configured.'
+            : `Authentication server returned an unexpected response (HTTP ${res.status}).`
+        );
+        return;
+      }
       if (!res.ok) {
         setLoginError(data.error || 'Unable to sign in. Please check your credentials.');
         return;
@@ -206,7 +217,18 @@ export const AuthViews: React.FC<AuthViewsProps> = ({ onAuthenticated, sessionNo
           confirmPassword,
         }),
       });
-      const data = await res.json();
+      const text = await res.text();
+      let data: Record<string, any> = {};
+      try {
+        data = text ? JSON.parse(text) : {};
+      } catch {
+        setRegError(
+          res.status === 404
+            ? 'Registration API route (/api/auth/register-company) was not found on this deployment. Ensure the backend serverless route or VITE_API_BASE_URL is configured.'
+            : `Registration server returned an unexpected response (HTTP ${res.status}).`
+        );
+        return;
+      }
       if (!res.ok) {
         setRegError(data.error || 'Company registration failed.');
         return;
@@ -254,7 +276,14 @@ export const AuthViews: React.FC<AuthViewsProps> = ({ onAuthenticated, sessionNo
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ email: forgotEmail.trim() }),
       });
-      const data = await res.json();
+      const text = await res.text();
+      let data: Record<string, any> = {};
+      try {
+        data = text ? JSON.parse(text) : {};
+      } catch {
+        setForgotError(`Server returned an unexpected response (HTTP ${res.status}).`);
+        return;
+      }
       if (!res.ok) {
         setForgotError(data.error || 'Unable to process request.');
         return;

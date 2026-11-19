@@ -1,5 +1,6 @@
 import crypto from 'crypto';
 import fs from 'fs';
+import os from 'os';
 import path from 'path';
 import type {
   BusinessModel,
@@ -78,7 +79,9 @@ export interface AuthContext {
   expiresAt: string;
 }
 
-const DATA_DIR = path.resolve(process.cwd(), '.data');
+const DATA_DIR =
+  process.env.CHURNSIGHT_DATA_DIR ||
+  (process.env.VERCEL ? path.join(os.tmpdir(), 'churnsight-data') : path.resolve(process.cwd(), '.data'));
 const DB_FILE = path.join(DATA_DIR, 'churnsight_auth.json');
 
 const SESSION_SHORT_MS = 8 * 60 * 60 * 1000; // 8 hours

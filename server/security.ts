@@ -1,10 +1,13 @@
 import crypto from 'crypto';
 import fs from 'fs';
+import os from 'os';
 import path from 'path';
 import type { NextFunction, Request, Response } from 'express';
 import type { AuditLogEntry, UserRole } from '../src/types/churn.ts';
 
-const DATA_DIR = path.resolve(process.cwd(), '.data');
+const DATA_DIR =
+  process.env.CHURNSIGHT_DATA_DIR ||
+  (process.env.VERCEL ? path.join(os.tmpdir(), 'churnsight-data') : path.resolve(process.cwd(), '.data'));
 const AUDIT_FILE = path.join(DATA_DIR, 'audit_logs.json');
 const MAX_AUDIT_ENTRIES = 2500;
 

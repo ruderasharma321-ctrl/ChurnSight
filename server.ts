@@ -740,13 +740,35 @@ function escapeCsvCell(val: string): string {
   return safe;
 }
 
-async function startServer() {
+export function createApiApp() {
   const app = express();
-  const httpServer = http.createServer(app);
-  const PORT = Number(process.env.PORT) || 3000;
 
   app.set('trust proxy', 1);
   app.use(express.json({ limit: '25mb' }));
+
+  // Support optional cross-origin requests when frontend is on Vercel and backend is hosted separately
+  app.use('/api', (req, res, next) => {
+    const origin = req.headers.origin;
+    const allowedEnv = [
+      ...(process.env.ALLOWED_ORIGINS || '').split(','),
+      process.env.APP_URL || '',
+    ]
+      .map((s) => s.trim().replace(/\/+$/, ''))
+      .filter(Boolean);
+
+    if (origin && (allowedEnv.length === 0 || allowedEnv.includes(origin))) {
+      res.setHeader('Access-Control-Allow-Origin', origin);
+      res.setHeader('Vary', 'Origin');
+      res.setHeader('Access-Control-Allow-Credentials', 'true');
+      res.setHeader('Access-Control-Allow-Methods', 'GET,POST,PUT,PATCH,DELETE,OPTIONS');
+      res.setHeader('Access-Control-Allow-Headers', 'Content-Type,Authorization');
+    }
+    if (req.method === 'OPTIONS') {
+      res.status(204).end();
+      return;
+    }
+    next();
+  });
 
   app.get('/api/health', (_req, res) => {
     res.json({ status: 'ok' });
@@ -2505,6 +2527,19 @@ async function startServer() {
     }
   );
 
+  // Ensure unknown /api routes always return JSON rather than SPA HTML
+  app.use('/api', (_req, res) => {
+    res.status(404).json({ error: 'API endpoint not found.' });
+  });
+
+  return app;
+}
+
+async function startServer() {
+  const app = createApiApp();
+  const httpServer = http.createServer(app);
+  const PORT = Number(process.env.PORT) || 3000;
+
   // Vite middleware in development, static files in production
   if (process.env.NODE_ENV !== 'production') {
     const vitePromise = import('vite').then(({ createServer: createViteServer }) =>
@@ -2542,4 +2577,6 @@ async function startServer() {
   });
 }
 
-startServer();
+if (!process.env.VERCEL) {
+  startServer();
+}

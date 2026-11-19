@@ -29,6 +29,15 @@ export function setClientSessionToken(token: string | null | undefined): void {
   }
 }
 
+const RAW_API_BASE = (import.meta.env.VITE_API_BASE_URL || '').trim().replace(/\/+$/, '');
+
+export function resolveApiUrl(input: RequestInfo | URL): RequestInfo | URL {
+  if (typeof input === 'string' && input.startsWith('/') && RAW_API_BASE) {
+    return `${RAW_API_BASE}${input}`;
+  }
+  return input;
+}
+
 export async function apiFetch(input: RequestInfo | URL, init: RequestInit = {}): Promise<Response> {
   const headers = new Headers(init.headers);
   const token = getClientSessionToken();
@@ -36,7 +45,7 @@ export async function apiFetch(input: RequestInfo | URL, init: RequestInit = {})
     headers.set('Authorization', `Bearer ${token}`);
   }
 
-  const res = await fetch(input, {
+  const res = await fetch(resolveApiUrl(input), {
     ...init,
     credentials: init.credentials ?? 'include',
     cache: init.cache ?? 'no-store',
