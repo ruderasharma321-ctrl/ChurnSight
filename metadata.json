@@ -1,0 +1,6 @@
+{
+  "name": "ChurnSight — Customer Churn Analysis & Prediction",
+  "description": "Final Year Project: Customer Churn Analysis and Prediction Dashboard for Subscription-Based Businesses Using Machine Learning.",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}

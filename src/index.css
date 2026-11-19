@@ -1,0 +1,126 @@
+@import "tailwindcss";
+
+@layer base {
+  body {
+    font-family: 'DM Sans', -apple-system, BlinkMacSystemFont, sans-serif;
+  }
+
+  h1, h2, h3, .font-display {
+    font-family: 'Sora', 'DM Sans', sans-serif;
+  }
+
+  code, pre, .font-mono {
+    font-family: 'JetBrains Mono', ui-monospace, SFMono-Regular, monospace;
+  }
+}
+
+.font-enterprise {
+  font-family: 'IBM Plex Sans', 'DM Sans', -apple-system, BlinkMacSystemFont, sans-serif;
+}
+
+.tabular-nums {
+  font-variant-numeric: tabular-nums;
+}
+
+@keyframes floatSlow {
+  0%, 100% {
+    transform: translate3d(0px, 0px, 0px) rotate(0deg);
+  }
+  50% {
+    transform: translate3d(0px, -8px, 8px) rotate(1.1deg);
+  }
+}
+
+@keyframes floatReverse {
+  0%, 100% {
+    transform: translate3d(0px, 0px, 0px) rotate(0deg);
+  }
+  50% {
+    transform: translate3d(0px, 7px, 10px) rotate(-1.2deg);
+  }
+}
+
+@keyframes meshDrift {
+  0%, 100% {
+    transform: translate3d(0px, 0px, 0px) scale(1);
+  }
+  33% {
+    transform: translate3d(24px, -18px, 0px) scale(1.06);
+  }
+  66% {
+    transform: translate3d(-18px, 14px, 0px) scale(0.97);
+  }
+}
+
+@keyframes borderShimmer {
+  0% {
+    background-position: 0% 50%;
+  }
+  50% {
+    background-position: 100% 50%;
+  }
+  100% {
+    background-position: 0% 50%;
+  }
+}
+
+@keyframes particleDrift {
+  0%, 100% {
+    transform: translate3d(0, 0, 0) scale(1);
+    opacity: 0.3;
+  }
+  50% {
+    transform: translate3d(8px, -16px, 0) scale(1.25);
+    opacity: 0.8;
+  }
+}
+
+.perspective-1200 {
+  perspective: 1200px;
+}
+
+.preserve-3d {
+  transform-style: preserve-3d;
+}
+
+.animate-float-slow {
+  animation: floatSlow 7s ease-in-out infinite;
+}
+
+.animate-float-delayed {
+  animation: floatSlow 9s ease-in-out 1.4s infinite;
+}
+
+.animate-float-reverse {
+  animation: floatReverse 8s ease-in-out 0.8s infinite;
+}
+
+.animate-mesh-drift {
+  animation: meshDrift 18s ease-in-out infinite;
+}
+
+.animate-mesh-drift-slow {
+  animation: meshDrift 24s ease-in-out 3s infinite reverse;
+}
+
+.animate-border-shimmer {
+  background-size: 200% 200%;
+  animation: borderShimmer 6s ease infinite;
+}
+
+.animate-particle {
+  animation: particleDrift 6.5s ease-in-out infinite;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .animate-float-slow,
+  .animate-float-delayed,
+  .animate-float-reverse,
+  .animate-mesh-drift,
+  .animate-mesh-drift-slow,
+  .animate-border-shimmer,
+  .animate-particle,
+  .animate-pulse {
+    animation: none !important;
+  }
+}
