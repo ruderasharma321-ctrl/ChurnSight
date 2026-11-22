@@ -1,11 +1,8 @@
 import React, { useCallback, useEffect, useRef, useState } from 'react';
 import {
-  BarChart3,
   BrainCircuit,
   Building2,
-  CheckSquare,
   ChevronDown,
-  Cpu,
   Database,
   FileText,
   KeyRound,
@@ -14,23 +11,25 @@ import {
   Menu,
   Settings,
   ShieldCheck,
-  SlidersHorizontal,
   User,
   Users,
   X,
 } from 'lucide-react';
 import { AnimatePresence, motion } from 'motion/react';
 import { AuthViews } from './components/AuthViews';
-import { ChurnPredictionView } from './components/ChurnPredictionView';
+import {
+  ChurnAnalysisSubTab,
+  ChurnAnalysisWorkspaceView,
+} from './components/ChurnAnalysisWorkspaceView';
 import { CustomerDataView } from './components/CustomerDataView';
-import { CustomerIntelligenceView } from './components/CustomerIntelligenceView';
+import {
+  CustomersSubTab,
+  CustomersWorkspaceView,
+} from './components/CustomersWorkspaceView';
 import { DashboardView } from './components/DashboardView';
-import { DataAnalysisView } from './components/DataAnalysisView';
-import { ModelEvaluationView } from './components/ModelEvaluationView';
 import { DashboardLoadingSkeleton } from './components/PremiumUI';
 import { ReportsView } from './components/ReportsView';
 import { SettingsSection, SettingsView } from './components/SettingsView';
-import { TechnicalWorkbenchView } from './components/TechnicalWorkbenchView';
 import {
   AnalyticsSummary,
   AuthSessionPayload,
@@ -42,26 +41,116 @@ import {
   ModelEvaluationResult,
   NavTab,
   PredictionPipelineStatus,
+  SatisfactionScale,
   StagedDatasetImport,
   TrainModelRequest,
+  UploadPathway,
   UserAccount,
   WorkspaceUsageSummary,
 } from './types/churn';
-import { apiFetch, setClientSessionToken } from './utils/apiClient';
+import {
+  apiFetch,
+  getClientSessionToken,
+  setClientSessionToken,
+  subscribeUnauthorized,
+} from './utils/apiClient';
 import { formatRoleLabel, getInitials } from './utils/imageHelpers';
 import { getIndustryTemplate } from './utils/industryConfig';
 
+type PrimaryNavTab =
+  | 'overview'
+  | 'customers'
+  | 'churn_analysis'
+  | 'data'
+  | 'reports'
+  | 'settings';
+
+const VALID_NAV_TABS: NavTab[] = [
+  'overview',
+  'customers',
+  'churn_analysis',
+  'data',
+  'reports',
+  'settings',
+  'intelligence',
+  'value',
+  'analytics',
+  'predictions',
+  'performance',
+  'technical',
+  'platform',
+  'about',
+];
+
+function resolveNavTarget(tab: NavTab | null | undefined): {
+  mainTab: PrimaryNavTab;
+  customersSection?: CustomersSubTab;
+  churnSection?: ChurnAnalysisSubTab;
+  settingsSection?: SettingsSection;
+  hashTab: NavTab;
+} {
+  switch (tab) {
+    case 'customers':
+      return { mainTab: 'customers', customersSection: 'profiles', hashTab: 'customers' };
+    case 'value':
+      return { mainTab: 'customers', customersSection: 'value', hashTab: 'value' };
+    case 'churn_analysis':
+    case 'predictions':
+      return { mainTab: 'churn_analysis', churnSection: 'predictions', hashTab: tab };
+    case 'intelligence':
+    case 'analytics':
+      return { mainTab: 'churn_analysis', churnSection: 'patterns', hashTab: tab };
+    case 'performance':
+      return { mainTab: 'churn_analysis', churnSection: 'performance', hashTab: 'performance' };
+    case 'technical':
+      return { mainTab: 'churn_analysis', churnSection: 'technical', hashTab: 'technical' };
+    case 'data':
+      return { mainTab: 'data', hashTab: 'data' };
+    case 'reports':
+      return { mainTab: 'reports', hashTab: 'reports' };
+    case 'platform':
+      return { mainTab: 'settings', settingsSection: 'platform', hashTab: 'platform' };
+    case 'about':
+      return { mainTab: 'settings', settingsSection: 'about', hashTab: 'about' };
+    case 'settings':
+      return { mainTab: 'settings', hashTab: 'settings' };
+    case 'overview':
+    default:
+      return { mainTab: 'overview', hashTab: 'overview' };
+  }
+}
+
+function getRouteInfoFromLocation(): {
+  authRoute: 'login' | 'register' | 'forgot' | null;
+  tab: NavTab | null;
+} {
+  if (typeof window === 'undefined') return { authRoute: null, tab: null };
+  const hash = window.location.hash.replace(/^#/, '').trim().toLowerCase();
+  const pathSlug = window.location.pathname.replace(/^\/+|\/+$/g, '').toLowerCase();
+  const candidate = hash || pathSlug;
+  if (candidate === 'login' || candidate === 'register' || candidate === 'forgot') {
+    return { authRoute: candidate, tab: null };
+  }
+  if (candidate === 'dashboard') {
+    return { authRoute: null, tab: 'overview' };
+  }
+  if (VALID_NAV_TABS.includes(candidate as NavTab)) {
+    return { authRoute: null, tab: candidate as NavTab };
+  }
+  return { authRoute: null, tab: null };
+}
+
+const AUTH_SYNC_CHANNEL = 'churnsight_auth_sync';
+
 const CUSTOMER_NAV_ITEMS: {
-  id: NavTab;
+  id: PrimaryNavTab;
   label: string;
   icon: React.ComponentType<{ className?: string }>;
 }[] = [
   { id: 'overview', label: 'Overview', icon: LayoutDashboard },
-  { id: 'intelligence', label: 'Customer Intelligence', icon: Cpu },
+  { id: 'customers', label: 'Customers', icon: Users },
+  { id: 'churn_analysis', label: 'Churn Analysis', icon: BrainCircuit },
   { id: 'data', label: 'Data Management', icon: Database },
-  { id: 'analytics', label: 'Business Analytics', icon: BarChart3 },
-  { id: 'predictions', label: 'Churn Predictions', icon: BrainCircuit },
-  { id: 'performance', label: 'Model Performance', icon: CheckSquare },
   { id: 'reports', label: 'Reports', icon: FileText },
   { id: 'settings', label: 'Settings', icon: Settings },
 ];
@@ -71,8 +160,21 @@ export default function App() {
   const [isCheckingAuth, setIsCheckingAuth] = useState(true);
   const [sessionNotice, setSessionNotice] = useState<string | null>(null);
 
-  const [activeTab, setActiveTab] = useState<NavTab>('overview');
-  const [settingsSection, setSettingsSection] = useState<SettingsSection>('company');
+  const initialRoute = getRouteInfoFromLocation();
+  const initialResolved = resolveNavTarget(initialRoute.tab);
+  const pendingTabRef = useRef<NavTab | null>(initialRoute.tab);
+  const authChannelRef = useRef<BroadcastChannel | null>(null);
+
+  const [activeTab, setActiveTab] = useState<PrimaryNavTab>(initialResolved.mainTab);
+  const [customersSection, setCustomersSection] = useState<CustomersSubTab>(
+    initialResolved.customersSection || 'profiles'
+  );
+  const [churnSection, setChurnSection] = useState<ChurnAnalysisSubTab>(
+    initialResolved.churnSection || 'predictions'
+  );
+  const [settingsSection, setSettingsSection] = useState<SettingsSection>(
+    initialResolved.settingsSection || 'company'
+  );
   const [focusPasswordSection, setFocusPasswordSection] = useState(false);
   const [mobileNavOpen, setMobileNavOpen] = useState(false);
   const [profileMenuOpen, setProfileMenuOpen] = useState(false);
@@ -106,6 +208,8 @@ export default function App() {
     setProfileMenuOpen(false);
     setMobileNavOpen(false);
     setActiveTab('overview');
+    setCustomersSection('profiles');
+    setChurnSection('predictions');
   }, []);
 
   const fetchCompanyWorkspaceState = useCallback(async () => {
@@ -117,6 +221,7 @@ export default function App() {
         setAuth(null);
         clearWorkspaceState();
         setSessionNotice('Your session has expired. Please sign in again.');
+        window.history.replaceState(null, '', '#login');
         return;
       }
       if (res.ok) {
@@ -140,30 +245,98 @@ export default function App() {
     }
   }, [clearWorkspaceState]);
 
+  const applyAuthenticatedRoute = useCallback((preferredTab?: NavTab | null) => {
+    const route = getRouteInfoFromLocation();
+    const resolved = resolveNavTarget(preferredTab || route.tab || 'overview');
+    setActiveTab(resolved.mainTab);
+    if (resolved.customersSection) setCustomersSection(resolved.customersSection);
+    if (resolved.churnSection) setChurnSection(resolved.churnSection);
+    if (resolved.settingsSection) setSettingsSection(resolved.settingsSection);
+
+    const targetHash = `#${resolved.hashTab}`;
+    if (
+      route.authRoute !== null ||
+      window.location.hash !== targetHash ||
+      window.location.pathname !== '/'
+    ) {
+      window.history.replaceState({ tab: resolved.hashTab }, '', `/${targetHash}`);
+    }
+  }, []);
+
   const verifyAuthSession = useCallback(
     async (isBackgroundCheck = false) => {
       if (!isBackgroundCheck) setIsCheckingAuth(true);
       try {
-        const res = await apiFetch('/api/auth/me');
-        if (!res.ok) {
+        let res: Response;
+        try {
+          res = await apiFetch('/api/auth/me');
+        } catch (firstNetErr) {
+          if (!isBackgroundCheck) {
+            await new Promise((r) => setTimeout(r, 350));
+            res = await apiFetch('/api/auth/me');
+          } else {
+            throw firstNetErr;
+          }
+        }
+        // Retry once on transient 5xx during initial page load
+        if (!isBackgroundCheck && res.status >= 500) {
+          await new Promise((r) => setTimeout(r, 350));
+          res = await apiFetch('/api/auth/me');
+        }
+        if (res.status === 401 || res.status === 403) {
           setClientSessionToken(null);
-          setAuth(null);
+          setAuth((prevAuth) => {
+            if (prevAuth || isBackgroundCheck) {
+              setSessionNotice('Your session has expired. Please sign in again.');
+            }
+            return null;
+          });
           clearWorkspaceState();
+          const route = getRouteInfoFromLocation();
+          if (route.tab) {
+            pendingTabRef.current = route.tab;
+          }
+          if (!route.authRoute) {
+            window.history.replaceState(null, '', '#login');
+          }
+          return;
+        }
+        if (!res.ok) {
           return;
         }
         const data = (await res.json()) as AuthSessionPayload;
+        const currentToken = getClientSessionToken();
+        if (currentToken) {
+          setClientSessionToken(currentToken, data.rememberMe !== false);
+        }
         setAuth(data);
+        setSessionNotice(null);
+        applyAuthenticatedRoute(pendingTabRef.current);
+        pendingTabRef.current = null;
         if (!isBackgroundCheck) {
           await fetchCompanyWorkspaceState();
         }
       } catch {
-        setAuth(null);
-        clearWorkspaceState();
+        // Keep active authenticated state on transient network glitch during background checks
+        if (!isBackgroundCheck) {
+          setAuth((prevAuth) => {
+            if (prevAuth) return prevAuth;
+            clearWorkspaceState();
+            const route = getRouteInfoFromLocation();
+            if (route.tab) {
+              pendingTabRef.current = route.tab;
+            }
+            if (!route.authRoute) {
+              window.history.replaceState(null, '', '#login');
+            }
+            return null;
+          });
+        }
       } finally {
         if (!isBackgroundCheck) setIsCheckingAuth(false);
       }
     },
-    [clearWorkspaceState, fetchCompanyWorkspaceState]
+    [applyAuthenticatedRoute, clearWorkspaceState, fetchCompanyWorkspaceState]
   );
 
   useEffect(() => {
@@ -171,21 +344,103 @@ export default function App() {
   }, [verifyAuthSession]);
 
   useEffect(() => {
+    const unsubscribe = subscribeUnauthorized(() => {
+      setAuth(null);
+      clearWorkspaceState();
+      setSessionNotice('Your session has expired. Please sign in again.');
+      window.history.replaceState(null, '', '#login');
+    });
+    return unsubscribe;
+  }, [clearWorkspaceState]);
+
+  // Periodically refresh active session while dashboard is open (sliding expiry)
+  useEffect(() => {
+    if (!auth) return;
+    const interval = window.setInterval(() => {
+      apiFetch('/api/auth/refresh', { method: 'POST' })
+        .then((res) => (res.ok ? res.json() : null))
+        .then((data) => {
+          if (data?.expiresAt) {
+            setAuth((prev) => (prev ? { ...prev, expiresAt: data.expiresAt } : prev));
+          }
+        })
+        .catch(() => {
+          // Ignore transient refresh failure; active state stays intact
+        });
+    }, 30 * 60 * 1000);
+    return () => window.clearInterval(interval);
+  }, [auth]);
+
+  useEffect(() => {
+    if (typeof BroadcastChannel === 'undefined') return;
+    const ch = new BroadcastChannel(AUTH_SYNC_CHANNEL);
+    authChannelRef.current = ch;
+    ch.onmessage = (event) => {
+      if (event.data === 'LOGOUT') {
+        setClientSessionToken(null);
+        setAuth(null);
+        clearWorkspaceState();
+        setSessionNotice('You were signed out in another tab.');
+        window.history.replaceState(null, '', '#login');
+      } else if (event.data === 'LOGIN') {
+        verifyAuthSession(false);
+      }
+    };
+    return () => {
+      ch.close();
+      authChannelRef.current = null;
+    };
+  }, [clearWorkspaceState, verifyAuthSession]);
+
+  useEffect(() => {
+    const syncRoute = () => {
+      const route = getRouteInfoFromLocation();
+      if (auth) {
+        // Never allow authenticated users back onto registration, login, or forgot-password routes
+        if (route.authRoute) {
+          window.history.replaceState({ tab: activeTab }, '', `/#${activeTab}`);
+          return;
+        }
+        if (route.tab) {
+          const resolved = resolveNavTarget(route.tab);
+          setActiveTab(resolved.mainTab);
+          if (resolved.customersSection) setCustomersSection(resolved.customersSection);
+          if (resolved.churnSection) setChurnSection(resolved.churnSection);
+          if (resolved.settingsSection) setSettingsSection(resolved.settingsSection);
+        }
+      } else if (route.tab) {
+        // Block unauthenticated access to internal routes and redirect to #login
+        pendingTabRef.current = route.tab;
+        window.history.replaceState(null, '', '#login');
+      }
+    };
+
     const handlePageShow = (event: PageTransitionEvent) => {
       if (event.persisted) {
         verifyAuthSession(true);
       }
     };
+    const handleVisibilityChange = () => {
+      if (document.visibilityState === 'visible' && auth) {
+        verifyAuthSession(true);
+      }
+    };
     const handlePopState = () => {
+      syncRoute();
       verifyAuthSession(true);
     };
+
     window.addEventListener('pageshow', handlePageShow);
     window.addEventListener('popstate', handlePopState);
+    window.addEventListener('hashchange', syncRoute);
+    document.addEventListener('visibilitychange', handleVisibilityChange);
     return () => {
       window.removeEventListener('pageshow', handlePageShow);
       window.removeEventListener('popstate', handlePopState);
+      window.removeEventListener('hashchange', syncRoute);
+      document.removeEventListener('visibilitychange', handleVisibilityChange);
     };
-  }, [verifyAuthSession]);
+  }, [activeTab, auth, verifyAuthSession]);
 
   useEffect(() => {
     if (!profileMenuOpen) return;
@@ -209,31 +464,38 @@ export default function App() {
     tab: NavTab,
     options?: { settingsSection?: SettingsSection; focusPassword?: boolean }
   ) => {
-    if (tab === 'platform') {
-      setActiveTab('settings');
-      setSettingsSection('platform');
-    } else {
-      setActiveTab(tab);
-      if (options?.settingsSection) {
-        setSettingsSection(options.settingsSection);
-      }
+    if (!auth) {
+      pendingTabRef.current = tab;
+      window.history.replaceState(null, '', '#login');
+      return;
+    }
+    const resolved = resolveNavTarget(tab);
+    setActiveTab(resolved.mainTab);
+    if (resolved.customersSection) setCustomersSection(resolved.customersSection);
+    if (resolved.churnSection) setChurnSection(resolved.churnSection);
+    if (options?.settingsSection) {
+      setSettingsSection(options.settingsSection);
+    } else if (resolved.settingsSection) {
+      setSettingsSection(resolved.settingsSection);
     }
     setFocusPasswordSection(Boolean(options?.focusPassword));
     setMobileNavOpen(false);
     setProfileMenuOpen(false);
-    if (auth && window.location.hash !== `#${tab}`) {
-      window.history.pushState({ tab }, '', `#${tab}`);
+    if (window.location.hash !== `#${resolved.hashTab}`) {
+      window.history.pushState({ tab: resolved.hashTab }, '', `#${resolved.hashTab}`);
     }
   };
 
   const handleAuthenticated = async (payload: AuthSessionPayload) => {
     setSessionNotice(null);
     if (payload.sessionToken) {
-      setClientSessionToken(payload.sessionToken);
+      setClientSessionToken(payload.sessionToken, payload.rememberMe !== false);
     }
     setAuth(payload);
-    setActiveTab('overview');
-    window.history.replaceState({ tab: 'overview' }, '', '#overview');
+    const targetTab = pendingTabRef.current || 'overview';
+    pendingTabRef.current = null;
+    applyAuthenticatedRoute(targetTab);
+    authChannelRef.current?.postMessage('LOGIN');
     await fetchCompanyWorkspaceState();
   };
 
@@ -246,6 +508,8 @@ export default function App() {
     setClientSessionToken(null);
     setAuth(null);
     clearWorkspaceState();
+    pendingTabRef.current = null;
+    authChannelRef.current?.postMessage('LOGOUT');
     setSessionNotice('You have signed out securely.');
     window.history.replaceState(null, '', '#login');
   };
@@ -289,7 +553,10 @@ export default function App() {
 
   const handleStageUpload = async (
     fileName: string,
-    payload: { csvText?: string; fileBase64?: string }
+    payload: { csvText?: string; fileBase64?: string },
+    uploadPathway?: UploadPathway,
+    uploadMode?: 'customer' | 'tickets',
+    satisfactionScale?: SatisfactionScale
   ) => {
     setIsDatasetLoading(true);
     setGlobalError(null);
@@ -297,7 +564,13 @@ export default function App() {
       const res = await apiFetch('/api/dataset/stage', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ fileName, ...payload }),
+        body: JSON.stringify({
+          fileName,
+          ...payload,
+          uploadPathway,
+          uploadMode,
+          satisfactionScale,
+        }),
       });
       if (handleAuthErrorIf401(res.status)) return;
       const data = await res.json();
@@ -314,6 +587,8 @@ export default function App() {
     stagedId: string;
     mapping: ColumnMapping;
     churnDefinition: ChurnDefinition;
+    importMode?: 'valid_only' | 'all';
+    satisfactionScale?: SatisfactionScale;
   }) => {
     setIsDatasetLoading(true);
     setIsPipelineRunning(true);
@@ -338,6 +613,9 @@ export default function App() {
       setUsage(data.usage || null);
       setActiveModel(data.activeModel || null);
       setModelHistory(data.modelHistory || []);
+      if (Array.isArray(data.batchScores)) {
+        setBatchScores(data.batchScores);
+      }
       setAutomationStatus(data.automationStatus || null);
     } finally {
       setIsDatasetLoading(false);
@@ -511,6 +789,18 @@ export default function App() {
     if (nextAutomationStatus !== undefined) setAutomationStatus(nextAutomationStatus);
   };
 
+  const handleWorkspaceMutated = (data: Record<string, any>) => {
+    if (data.company) {
+      setAuth((prev) => (prev ? { ...prev, company: data.company } : prev));
+    }
+    if (data.dataset !== undefined) setDataset(data.dataset);
+    if (data.analytics !== undefined) setAnalytics(data.analytics);
+    if (data.activeModel !== undefined) setActiveModel(data.activeModel);
+    if (data.modelHistory !== undefined) setModelHistory(data.modelHistory);
+    if (data.automationStatus !== undefined) setAutomationStatus(data.automationStatus);
+    if (data.usage !== undefined) setUsage(data.usage);
+  };
+
   if (isCheckingAuth) {
     return (
       <div className="min-h-screen bg-[#F5F3FF] p-8 max-w-6xl mx-auto">
@@ -520,7 +810,13 @@ export default function App() {
   }
 
   if (!auth) {
-    return <AuthViews onAuthenticated={handleAuthenticated} sessionNotice={sessionNotice} />;
+    return (
+      <AuthViews
+        onAuthenticated={handleAuthenticated}
+        sessionNotice={sessionNotice}
+        onClearNotice={() => setSessionNotice(null)}
+      />
+    );
   }
 
   const { user, company } = auth;
@@ -531,12 +827,10 @@ export default function App() {
   const tmpl = getIndustryTemplate(company.industry, company.customIndustryName);
 
   const activeNavLabel =
-    activeTab === 'technical'
-      ? 'Technical ML Studio'
-      : CUSTOMER_NAV_ITEMS.find((item) => item.id === activeTab)?.label || 'Overview';
+    CUSTOMER_NAV_ITEMS.find((item) => item.id === activeTab)?.label || 'Overview';
 
   return (
-    <div className="min-h-screen flex bg-[#F5F3FF] text-[#11142B]">
+    <div className="min-h-screen flex bg-[#F5F3FF] text-[#11142B] overflow-x-clip">
       {/* Mobile Sidebar Backdrop */}
       {mobileNavOpen && (
         <div
@@ -573,7 +867,7 @@ export default function App() {
             </button>
           </div>
 
-          {/* Primary Customer-Facing 8-Item Navigation */}
+          {/* Primary Simplified 6-Item Navigation */}
           <nav className="relative p-4 space-y-1.5" aria-label="Customer Navigation">
             {CUSTOMER_NAV_ITEMS.map((item) => {
               const Icon = item.icon;
@@ -624,45 +918,6 @@ export default function App() {
               );
             })}
           </nav>
-
-          {/* Separated Advanced Technical Area */}
-          <div className="relative px-4 pt-3 pb-4 border-t border-white/10 space-y-1.5">
-            <div className="px-3 pb-1 text-[11px] font-semibold uppercase tracking-[0.14em] text-indigo-200/55">
-              Advanced Technical
-            </div>
-            <button
-              type="button"
-              onClick={() => navigateTo('technical')}
-              className={`group relative w-full flex items-center gap-3 px-3.5 py-2.5 rounded-xl text-sm font-medium transition-colors duration-150 cursor-pointer whitespace-nowrap focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[#35C5E8] ${
-                activeTab === 'technical'
-                  ? 'text-white'
-                  : 'text-indigo-100/75 hover:bg-white/[0.06] hover:text-white'
-              }`}
-            >
-              {activeTab === 'technical' && (
-                <motion.div
-                  layoutId="sidebarActivePill"
-                  transition={{ type: 'spring', stiffness: 360, damping: 32 }}
-                  className="absolute inset-0 rounded-xl bg-gradient-to-r from-[#7655E8] via-[#9D50E4] to-[#B84DE0] shadow-lg shadow-[#7655E8]/35 border border-white/15"
-                />
-              )}
-              {activeTab === 'technical' && (
-                <motion.span
-                  layoutId="sidebarActiveGlowBar"
-                  transition={{ type: 'spring', stiffness: 360, damping: 32 }}
-                  className="absolute left-0 top-2 bottom-2 w-1 rounded-r-full bg-[#35C5E8] shadow-[0_0_10px_#35C5E8]"
-                />
-              )}
-              <SlidersHorizontal
-                className={`relative z-10 w-4 h-4 shrink-0 transition-transform duration-150 ${
-                  activeTab === 'technical'
-                    ? 'text-white scale-105'
-                    : 'text-indigo-200/75 group-hover:text-[#35C5E8] group-hover:scale-105'
-                }`}
-              />
-              <span className="relative z-10">Technical ML Studio</span>
-            </button>
-          </div>
         </div>
 
         <div className="p-5 border-t border-white/10 text-xs text-indigo-200/70 space-y-1">
@@ -674,7 +929,7 @@ export default function App() {
       </aside>
 
       {/* Main Content Area */}
-      <div className="flex-1 flex flex-col min-w-0">
+      <div className="flex-1 flex flex-col min-w-0 overflow-x-clip">
         <header className="sticky top-0 z-20 h-16 bg-white/90 backdrop-blur-md border-b border-purple-100/90 px-4 sm:px-8 flex items-center justify-between gap-4 shrink-0">
           <div className="flex items-center gap-3.5 min-w-0">
             <button
@@ -856,7 +1111,7 @@ export default function App() {
           </div>
         </header>
 
-        <main className="flex-1 p-4 sm:p-8 max-w-7xl w-full mx-auto">
+        <main className="flex-1 w-full min-w-0 p-4 sm:p-6 lg:p-8">
           {globalError && (
             <div className="mb-6 bg-[#FF786B]/10 border border-[#FF786B]/40 rounded-2xl p-4 text-sm text-[#9A2E25] flex items-center justify-between">
               <span>{globalError}</span>
@@ -880,6 +1135,7 @@ export default function App() {
                 animate={{ opacity: 1, y: 0 }}
                 exit={{ opacity: 0, y: -4 }}
                 transition={{ duration: 0.16, ease: [0.16, 1, 0.3, 1] }}
+                className="w-full min-w-0"
               >
                 {activeTab === 'overview' && (
                   <DashboardView
@@ -894,20 +1150,43 @@ export default function App() {
                     canGeneratePredictions={canGeneratePredictions}
                     onLoadSample={handleLoadSample}
                     onAutoBuild={handleAutoBuild}
+                    onWorkspaceMutated={handleWorkspaceMutated}
                     onNavigate={(tab) => navigateTo(tab)}
                   />
                 )}
 
-                {activeTab === 'intelligence' && (
-                  <CustomerIntelligenceView
+                {activeTab === 'customers' && (
+                  <CustomersWorkspaceView
+                    company={company}
+                    dataset={dataset}
+                    activeModel={activeModel}
+                    canUploadAndAnalyse={canUploadAndAnalyse}
+                    section={customersSection}
+                    initialSection={customersSection}
+                    onSectionChange={setCustomersSection}
+                    onWorkspaceMutated={handleWorkspaceMutated}
+                    onNavigate={(tab) => navigateTo(tab)}
+                  />
+                )}
+
+                {activeTab === 'churn_analysis' && (
+                  <ChurnAnalysisWorkspaceView
                     company={company}
                     dataset={dataset}
                     analytics={analytics}
                     activeModel={activeModel}
+                    modelHistory={modelHistory}
                     automationStatus={automationStatus}
+                    batchScores={batchScores}
                     isPipelineRunning={isPipelineRunning}
+                    isTraining={isTraining}
                     canGeneratePredictions={canGeneratePredictions}
+                    section={churnSection}
+                    initialSection={churnSection}
+                    onSectionChange={setChurnSection}
                     onAutoBuild={handleAutoBuild}
+                    onBatchScore={handleBatchScore}
+                    onTrainModel={handleTrainModel}
                     onNavigate={(tab) => navigateTo(tab)}
                   />
                 )}
@@ -917,6 +1196,7 @@ export default function App() {
                     company={company}
                     dataset={dataset}
                     analytics={analytics}
+                    activeModel={activeModel}
                     stagedImport={stagedImport}
                     automationStatus={automationStatus}
                     isPipelineRunning={isPipelineRunning}
@@ -932,42 +1212,7 @@ export default function App() {
                     onRecordOutcome={handleRecordOutcome}
                     onAutoBuild={handleAutoBuild}
                     onNavigate={(tab) => navigateTo(tab)}
-                  />
-                )}
-
-                {activeTab === 'analytics' && (
-                  <DataAnalysisView
-                    company={company}
-                    dataset={dataset}
-                    analytics={analytics}
-                    onNavigate={(tab) => navigateTo(tab)}
-                  />
-                )}
-
-                {activeTab === 'predictions' && (
-                  <ChurnPredictionView
-                    company={company}
-                    dataset={dataset}
-                    activeModel={activeModel}
-                    automationStatus={automationStatus}
-                    batchScores={batchScores}
-                    isBuilding={isPipelineRunning}
-                    canGeneratePredictions={canGeneratePredictions}
-                    onAutoBuild={handleAutoBuild}
-                    onBatchScore={handleBatchScore}
-                    onNavigate={(tab) => navigateTo(tab)}
-                  />
-                )}
-
-                {activeTab === 'performance' && (
-                  <ModelEvaluationView
-                    company={company}
-                    activeModel={activeModel}
-                    automationStatus={automationStatus}
-                    isBuilding={isPipelineRunning}
-                    canGeneratePredictions={canGeneratePredictions}
-                    onAutoBuild={handleAutoBuild}
-                    onNavigate={(tab) => navigateTo(tab)}
+                    onWorkspaceMutated={handleWorkspaceMutated}
                   />
                 )}
 
@@ -992,20 +1237,6 @@ export default function App() {
                     onUserUpdated={handleUserUpdated}
                     onCompanyUpdated={handleCompanyUpdated}
                     onUsersChanged={fetchCompanyWorkspaceState}
-                  />
-                )}
-
-                {activeTab === 'technical' && (
-                  <TechnicalWorkbenchView
-                    company={company}
-                    dataset={dataset}
-                    activeModel={activeModel}
-                    modelHistory={modelHistory}
-                    automationStatus={automationStatus}
-                    isTraining={isTraining}
-                    canGeneratePredictions={canGeneratePredictions}
-                    onTrainModel={handleTrainModel}
-                    onNavigate={(tab) => navigateTo(tab)}
                   />
                 )}
               </motion.div>

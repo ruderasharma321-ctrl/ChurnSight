@@ -33,13 +33,28 @@ import { apiFetch } from '../utils/apiClient';
 
 type AuthMode = 'login' | 'register' | 'forgot';
 
+function getInitialAuthMode(): AuthMode {
+  if (typeof window === 'undefined') return 'login';
+  const hash = window.location.hash.replace(/^#/, '').trim().toLowerCase();
+  const path = window.location.pathname.replace(/^\/+|\/+$/g, '').toLowerCase();
+  const candidate = hash || path;
+  if (candidate === 'register') return 'register';
+  if (candidate === 'forgot') return 'forgot';
+  return 'login';
+}
+
 interface AuthViewsProps {
   onAuthenticated: (payload: AuthSessionPayload) => void;
   sessionNotice?: string | null;
+  onClearNotice?: () => void;
 }
 
-export const AuthViews: React.FC<AuthViewsProps> = ({ onAuthenticated, sessionNotice }) => {
-  const [mode, setMode] = useState<AuthMode>('login');
+export const AuthViews: React.FC<AuthViewsProps> = ({
+  onAuthenticated,
+  sessionNotice,
+  onClearNotice,
+}) => {
+  const [mode, setMode] = useState<AuthMode>(() => getInitialAuthMode());
 
   // Login State
   const [loginEmail, setLoginEmail] = useState('');
@@ -47,6 +62,7 @@ export const AuthViews: React.FC<AuthViewsProps> = ({ onAuthenticated, sessionNo
   const [showLoginPw, setShowLoginPw] = useState(false);
   const [rememberMe, setRememberMe] = useState(true);
   const [loginError, setLoginError] = useState<string | null>(null);
+  const [loginNotFoundEmail, setLoginNotFoundEmail] = useState<string | null>(null);
   const [loginSuccess, setLoginSuccess] = useState<string | null>(null);
   const [isLoggingIn, setIsLoggingIn] = useState(false);
 
@@ -69,6 +85,7 @@ export const AuthViews: React.FC<AuthViewsProps> = ({ onAuthenticated, sessionNo
   const [showRegPw, setShowRegPw] = useState(false);
   const [showConfirmPw, setShowConfirmPw] = useState(false);
   const [regError, setRegError] = useState<string | null>(null);
+  const [regDuplicateEmail, setRegDuplicateEmail] = useState<string | null>(null);
   const [isRegistering, setIsRegistering] = useState(false);
 
   // Forgot Password State
@@ -78,14 +95,23 @@ export const AuthViews: React.FC<AuthViewsProps> = ({ onAuthenticated, sessionNo
   const [isSendingReset, setIsSendingReset] = useState(false);
 
   const [hasRegisteredWorkspaces, setHasRegisteredWorkspaces] = useState<boolean | null>(null);
+  const [storageMode, setStorageMode] = useState<'disk' | 'kv' | 'ephemeral_tmp' | null>(null);
 
   useEffect(() => {
     let active = true;
     apiFetch('/api/auth/status')
       .then((res) => (res.ok ? res.json() : null))
       .then((data) => {
-        if (active && data && typeof data.hasRegisteredWorkspaces === 'boolean') {
+        if (!active || !data) return;
+        if (typeof data.hasRegisteredWorkspaces === 'boolean') {
           setHasRegisteredWorkspaces(data.hasRegisteredWorkspaces);
+        }
+        if (
+          data.storageMode === 'disk' ||
+          data.storageMode === 'kv' ||
+          data.storageMode === 'ephemeral_tmp'
+        ) {
+          setStorageMode(data.storageMode);
         }
       })
       .catch(() => {
@@ -99,14 +125,21 @@ export const AuthViews: React.FC<AuthViewsProps> = ({ onAuthenticated, sessionNo
   const switchMode = (nextMode: AuthMode) => {
     setMode(nextMode);
     setLoginError(null);
+    setLoginNotFoundEmail(null);
     setRegError(null);
+    setRegDuplicateEmail(null);
     setForgotError(null);
     setForgotMessage(null);
+    onClearNotice?.();
+    if (typeof window !== 'undefined') {
+      window.history.replaceState(null, '', `#${nextMode}`);
+    }
   };
 
   const handleLoginSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
     setLoginError(null);
+    setLoginNotFoundEmail(null);
     setLoginSuccess(null);
 
     const emailTrimmed = loginEmail.trim();
@@ -147,7 +180,11 @@ export const AuthViews: React.FC<AuthViewsProps> = ({ onAuthenticated, sessionNo
         return;
       }
       if (!res.ok) {
-        setLoginError(data.error || 'Unable to sign in. Please check your credentials.');
+        const msg = data.error || 'Unable to sign in. Please check your credentials.';
+        setLoginError(msg);
+        if (data.code === 'ACCOUNT_NOT_FOUND' || /account not found/i.test(msg)) {
+          setLoginNotFoundEmail(emailTrimmed);
+        }
         return;
       }
       onAuthenticated({
@@ -155,6 +192,7 @@ export const AuthViews: React.FC<AuthViewsProps> = ({ onAuthenticated, sessionNo
         company: data.company,
         expiresAt: data.expiresAt,
         sessionToken: data.sessionToken,
+        rememberMe: Boolean(data.rememberMe ?? rememberMe),
       });
     } catch {
       setLoginError('Unable to reach the authentication server. Please try again.');
@@ -166,6 +204,7 @@ export const AuthViews: React.FC<AuthViewsProps> = ({ onAuthenticated, sessionNo
   const handleRegisterSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
     setRegError(null);
+    setRegDuplicateEmail(null);
 
     if (companyName.trim().length < 2) {
       setRegError('Company name must be at least 2 characters long.');
@@ -230,19 +269,19 @@ export const AuthViews: React.FC<AuthViewsProps> = ({ onAuthenticated, sessionNo
         return;
       }
       if (!res.ok) {
-        setRegError(data.error || 'Company registration failed.');
+        const msg = data.error || 'Company registration failed.';
+        setRegError(msg);
+        if (
+          res.status === 409 ||
+          data.code === 'ACCOUNT_ALREADY_EXISTS' ||
+          /already exists|already registered/i.test(msg)
+        ) {
+          setRegDuplicateEmail((adminEmail || companyEmail).trim());
+        }
         return;
       }
 
-      const registeredEmail = data.user?.email || adminEmail.trim();
-      const registeredCompany = data.company?.name || companyName.trim();
-
       setHasRegisteredWorkspaces(true);
-      setLoginEmail(registeredEmail);
-      setLoginPassword('');
-      setLoginSuccess(
-        `Workspace "${registeredCompany}" and Firm Admin account for ${data.user?.fullName || adminFullName.trim()} were created. Sign in below to launch your workspace.`
-      );
       setCompanyName('');
       setCompanyEmail('');
       setRegistrationNumber('');
@@ -251,6 +290,25 @@ export const AuthViews: React.FC<AuthViewsProps> = ({ onAuthenticated, sessionNo
       setAdminEmail('');
       setRegPassword('');
       setConfirmPassword('');
+
+      if (data.user && data.company && (data.sessionToken || data.expiresAt)) {
+        onAuthenticated({
+          user: data.user,
+          company: data.company,
+          expiresAt: data.expiresAt,
+          sessionToken: data.sessionToken,
+          rememberMe: Boolean(data.rememberMe ?? true),
+        });
+        return;
+      }
+
+      const registeredEmail = data.user?.email || adminEmail.trim();
+      const registeredCompany = data.company?.name || companyName.trim();
+      setLoginEmail(registeredEmail);
+      setLoginPassword('');
+      setLoginSuccess(
+        `Workspace "${registeredCompany}" and Firm Admin account for ${data.user?.fullName || adminFullName.trim()} were created. Sign in below to launch your workspace.`
+      );
       setMode('login');
     } catch {
       setRegError('Network error while creating company workspace.');
@@ -436,24 +494,40 @@ export const AuthViews: React.FC<AuthViewsProps> = ({ onAuthenticated, sessionNo
                 </p>
               </div>
 
-              {hasRegisteredWorkspaces === false && (
+              {storageMode === 'ephemeral_tmp' ? (
                 <div className="bg-amber-50 border border-amber-200 rounded-2xl p-4 flex items-start gap-2.5 text-xs text-amber-950 leading-relaxed">
                   <Info className="w-4 h-4 text-amber-700 shrink-0 mt-0.5" />
-                  <div className="space-y-1.5">
+                  <div className="space-y-1">
                     <p>
-                      <strong>No company workspaces exist on this server yet.</strong> Local
-                      workspace storage is currently empty (for example, after an environment
-                      reset).
+                      <strong>Serverless temporary storage active:</strong> This Vercel deployment
+                      currently has no persistent database attached, so accounts stored in{' '}
+                      <code className="font-mono">/tmp</code> reset across cold starts. Connect{' '}
+                      <code className="font-mono">KV_REST_API_URL</code> &amp;{' '}
+                      <code className="font-mono">KV_REST_API_TOKEN</code> (Upstash/Vercel KV) or
+                      set <code className="font-mono">VITE_API_BASE_URL</code> to persist accounts
+                      permanently.
                     </p>
-                    <button
-                      type="button"
-                      onClick={() => switchMode('register')}
-                      className="font-bold text-[#7655E8] hover:text-[#E84FA8] underline underline-offset-2 cursor-pointer"
-                    >
-                      Register a Company Workspace to create your Firm Admin login →
-                    </button>
                   </div>
                 </div>
+              ) : (
+                hasRegisteredWorkspaces === false && (
+                  <div className="bg-amber-50 border border-amber-200 rounded-2xl p-4 flex items-start gap-2.5 text-xs text-amber-950 leading-relaxed">
+                    <Info className="w-4 h-4 text-amber-700 shrink-0 mt-0.5" />
+                    <div className="space-y-1.5">
+                      <p>
+                        <strong>No company workspaces exist on this server yet.</strong> Register
+                        your company once to create your workspace and Firm Admin login.
+                      </p>
+                      <button
+                        type="button"
+                        onClick={() => switchMode('register')}
+                        className="font-bold text-[#7655E8] hover:text-[#E84FA8] underline underline-offset-2 cursor-pointer"
+                      >
+                        Register a Company Workspace →
+                      </button>
+                    </div>
+                  </div>
+                )
               )}
 
               {loginSuccess && (
@@ -464,9 +538,27 @@ export const AuthViews: React.FC<AuthViewsProps> = ({ onAuthenticated, sessionNo
               )}
 
               {loginError && (
-                <div className="bg-[#FF786B]/12 border border-[#FF786B]/40 rounded-2xl p-3.5 flex items-start gap-2.5 text-xs text-[#9A2E25]">
+                <div className="bg-[#FF786B]/12 border border-[#FF786B]/40 rounded-2xl p-4 flex items-start gap-2.5 text-xs text-[#9A2E25]">
                   <AlertCircle className="w-4 h-4 text-[#E04F44] shrink-0 mt-0.5" />
-                  <span>{loginError}</span>
+                  <div className="space-y-2 flex-1">
+                    <div>{loginError}</div>
+                    {loginNotFoundEmail && (
+                      <button
+                        type="button"
+                        onClick={() => {
+                          setAdminEmail(loginNotFoundEmail);
+                          if (!companyEmail.trim()) {
+                            setCompanyEmail(loginNotFoundEmail);
+                          }
+                          switchMode('register');
+                        }}
+                        className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-lg bg-[#11142B] hover:bg-[#1C2147] text-white font-semibold cursor-pointer"
+                      >
+                        <span>Register Workspace with {loginNotFoundEmail}</span>
+                        <ArrowRight className="w-3.5 h-3.5" />
+                      </button>
+                    )}
+                  </div>
                 </div>
               )}
 
@@ -580,9 +672,40 @@ export const AuthViews: React.FC<AuthViewsProps> = ({ onAuthenticated, sessionNo
               </div>
 
               {regError && (
-                <div className="bg-[#FF786B]/12 border border-[#FF786B]/40 rounded-2xl p-3.5 flex items-start gap-2.5 text-xs text-[#9A2E25]">
+                <div className="bg-[#FF786B]/12 border border-[#FF786B]/40 rounded-2xl p-4 flex items-start gap-2.5 text-xs text-[#9A2E25]">
                   <AlertCircle className="w-4 h-4 text-[#E04F44] shrink-0 mt-0.5" />
-                  <span>{regError}</span>
+                  <div className="space-y-2 flex-1">
+                    <div>{regError}</div>
+                    {regDuplicateEmail && (
+                      <div className="flex flex-wrap items-center gap-3 pt-1">
+                        <button
+                          type="button"
+                          onClick={() => {
+                            setLoginEmail(regDuplicateEmail);
+                            setLoginPassword('');
+                            setLoginSuccess(
+                              `This email (${regDuplicateEmail}) already has an account. Sign in with your password below.`
+                            );
+                            switchMode('login');
+                          }}
+                          className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-lg bg-[#11142B] hover:bg-[#1C2147] text-white font-semibold cursor-pointer"
+                        >
+                          <span>Sign In with {regDuplicateEmail}</span>
+                          <ArrowRight className="w-3.5 h-3.5" />
+                        </button>
+                        <button
+                          type="button"
+                          onClick={() => {
+                            setForgotEmail(regDuplicateEmail);
+                            switchMode('forgot');
+                          }}
+                          className="font-semibold text-[#7655E8] hover:text-[#E84FA8] underline underline-offset-2 cursor-pointer"
+                        >
+                          Forgot password?
+                        </button>
+                      </div>
+                    )}
+                  </div>
                 </div>
               )}
 

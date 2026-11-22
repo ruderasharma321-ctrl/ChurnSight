@@ -203,128 +203,134 @@ export const HeroArtwork: React.FC<HeroArtworkProps> = ({
   activeModel = null,
   tilt = { x: 0, y: 0 },
 }) => {
-  const retainedPct = analytics ? analytics.stayedPercentage : 74;
-  const churnedPct = analytics ? analytics.churnedPercentage : 26;
-  const retainedRatio = retainedPct / 100;
-  const churnedRatio = churnedPct / 100;
+  const hasValidLabels = Boolean(analytics && !analytics.isUnlabeledColdStart);
+  const retainedRatio = hasValidLabels
+    ? analytics!.stayedPercentage / 100
+    : 0.74;
+  const churnedRatio = hasValidLabels
+    ? analytics!.churnedPercentage / 100
+    : 0.26;
 
   const barRatios = useMemo(() => {
     if (analytics?.tenureStats && analytics.tenureStats.length >= 4) {
       const slice = analytics.tenureStats.slice(0, 5);
       const maxRate = Math.max(10, ...slice.map((s) => s.churnRate));
-      return slice.map((s) => Math.max(0.25, s.churnRate / maxRate));
+      return slice.map((s) => Math.max(0.28, s.churnRate / maxRate));
     }
     if (analytics?.contractStats && analytics.contractStats.length >= 2) {
       const slice = analytics.contractStats.slice(0, 5);
       const maxRate = Math.max(10, ...slice.map((s) => s.churnRate));
-      return slice.map((s) => Math.max(0.25, s.churnRate / maxRate));
+      return slice.map((s) => Math.max(0.28, s.churnRate / maxRate));
     }
-    return [0.42, 0.68, 0.52, 0.84, 0.94];
+    return [0.38, 0.62, 0.48, 0.78, 0.9];
   }, [analytics]);
 
   const highRiskCount = activeModel
     ? activeModel.predictions.filter((p) => p.riskCategory === 'Higher Estimated Churn Risk').length
     : null;
 
-  return (
-    <div className="relative w-full h-[310px] sm:h-[340px] flex items-center justify-center select-none">
-      {/* Ambient Volumetric Lighting Behind Canvas */}
-      <div className="absolute w-64 h-64 rounded-full bg-[#397BFF]/25 blur-3xl -top-6 right-4 pointer-events-none" />
-      <div className="absolute w-60 h-60 rounded-full bg-[#E84FA8]/30 blur-3xl bottom-0 left-4 pointer-events-none" />
+  const totalCustomersValue = analytics
+    ? analytics.totalCustomers.toLocaleString()
+    : '—';
+  const totalCustomersNote = analytics
+    ? analytics.isUnlabeledColdStart
+      ? 'Monitored accounts'
+      : 'Analyzed records'
+    : 'No dataset loaded';
 
-      {/* Dedicated Isolated Lazy-Loaded WebGL 3D Canvas Container */}
-      <div className="absolute inset-0">
-        <Suspense
-          fallback={
-            <div className="w-full h-full flex items-center justify-center">
-              <div className="w-40 h-40 rounded-full border-2 border-[#35C5E8]/40 bg-[#7655E8]/15" />
-            </div>
-          }
-        >
-          <LazyHeroScene3D
-            retainedRatio={retainedRatio}
-            churnedRatio={churnedRatio}
-            barRatios={barRatios}
-            pointerTilt={tilt}
-          />
-        </Suspense>
+  const churnRateValue = hasValidLabels
+    ? `${analytics!.churnedPercentage.toFixed(1)}%`
+    : '—';
+  const churnRateNote = hasValidLabels
+    ? `${analytics!.churnedCount.toLocaleString()} churned`
+    : analytics
+      ? 'Awaiting churn labels'
+      : 'No labeled history';
+
+  const highRiskValue = highRiskCount !== null
+    ? highRiskCount.toLocaleString()
+    : '—';
+  const highRiskNote = highRiskCount !== null
+    ? 'Flagged for retention'
+    : analytics
+      ? 'Prediction pending'
+      : 'Model not active';
+
+  return (
+    <div className="relative w-full flex flex-col justify-between gap-4 select-none">
+      {/* Unobstructed 3D Orbital Visualization Stage */}
+      <div className="relative w-full h-[250px] sm:h-[285px] flex items-center justify-center">
+        {/* Ambient Blue & Purple Volumetric Glow */}
+        <div
+          className="absolute w-64 h-64 rounded-full bg-[#38BDF8]/18 blur-3xl -top-4 right-8 pointer-events-none"
+          aria-hidden="true"
+        />
+        <div
+          className="absolute w-64 h-64 rounded-full bg-[#7655E8]/26 blur-3xl bottom-0 left-8 pointer-events-none"
+          aria-hidden="true"
+        />
+
+        <div className="absolute inset-0">
+          <Suspense
+            fallback={
+              <div className="w-full h-full flex items-center justify-center">
+                <div className="w-36 h-36 rounded-full border border-[#38BDF8]/35 bg-[#7655E8]/10" />
+              </div>
+            }
+          >
+            <LazyHeroScene3D
+              retainedRatio={retainedRatio}
+              churnedRatio={churnedRatio}
+              barRatios={barRatios}
+              pointerTilt={tilt}
+            />
+          </Suspense>
+        </div>
       </div>
 
-      {/* Crisp Perimeter Floating Glass HUD Cards (No backdrop-blur over WebGL; unobstructed center) */}
-      <div className="relative z-10 w-full h-full pointer-events-none">
-        {/* Top-Left Telemetry Card */}
-        <div
-          className="animate-float-slow absolute top-1 left-0 sm:left-2 rounded-xl bg-[#11142B]/85 border border-white/20 shadow-2xl px-3.5 py-2.5 space-y-0.5"
-          style={{
-            transform: `translate3d(${tilt.x * -8}px, ${tilt.y * -6}px, 0)`,
-          }}
-        >
-          <div className="text-[10px] uppercase tracking-[0.14em] text-[#35C5E8] font-semibold">
-            {analytics ? 'Retention Share' : '3D Analytics Engine'}
+      {/* Three Grounded Real-Data Metric Cards (No backdrop-blur over WebGL, max 3 metrics) */}
+      <div
+        className="grid grid-cols-1 sm:grid-cols-3 gap-3"
+        style={{
+          transform: `translate3d(${tilt.x * 4}px, ${tilt.y * 3}px, 0)`,
+          transition: 'transform 220ms cubic-bezier(0.16, 1, 0.3, 1)',
+        }}
+      >
+        <div className="rounded-xl bg-[#0D112B]/90 border border-white/12 px-4 py-3 shadow-lg">
+          <div className="text-[11px] font-medium text-slate-400 whitespace-nowrap">
+            Total Customers
           </div>
-          <div className="text-lg font-bold font-mono tabular-nums text-white">
-            {analytics ? `${retainedPct.toFixed(1)}%` : 'Live Model'}
+          <div className="mt-1 text-xl font-bold font-mono tabular-nums text-white leading-tight">
+            {totalCustomersValue}
           </div>
-        </div>
-
-        {/* Top-Right Churn Indicator Card */}
-        <div
-          className="animate-float-reverse absolute top-3 right-0 sm:right-2 rounded-xl bg-[#11142B]/85 border border-[#E84FA8]/35 shadow-2xl px-3.5 py-2.5 space-y-0.5"
-          style={{
-            transform: `translate3d(${tilt.x * 10}px, ${tilt.y * -8}px, 0)`,
-          }}
-        >
-          <div className="text-[10px] uppercase tracking-[0.14em] text-[#FF9AC8] font-semibold">
-            {analytics ? 'Attrition Rate' : 'Risk Scoring'}
-          </div>
-          <div className="text-lg font-bold font-mono tabular-nums text-white">
-            {analytics ? `${churnedPct.toFixed(1)}%` : 'Logistic & Tree'}
+          <div className="mt-0.5 text-[11px] text-slate-400 truncate">
+            {totalCustomersNote}
           </div>
         </div>
 
-        {/* Bottom-Left Customer Risk Indicator Card */}
-        <div
-          className="animate-float-delayed absolute bottom-2 left-0 sm:left-2 rounded-xl bg-[#11142B]/85 border border-white/20 shadow-2xl px-3.5 py-2.5 flex items-center gap-2.5"
-          style={{
-            transform: `translate3d(${tilt.x * -6}px, ${tilt.y * 8}px, 0)`,
-          }}
-        >
-          <div className="w-7 h-7 rounded-lg bg-gradient-to-br from-[#397BFF] to-[#7655E8] flex items-center justify-center text-white shrink-0 border border-white/25">
-            <svg viewBox="0 0 24 24" className="w-3.5 h-3.5" fill="none" stroke="currentColor" strokeWidth="2">
-              <circle cx="12" cy="8" r="3.5" />
-              <path d="M5 19c1.5-3.2 4-4.5 7-4.5s5.5 1.3 7 4.5" strokeLinecap="round" />
-            </svg>
+        <div className="rounded-xl bg-[#0D112B]/90 border border-white/12 px-4 py-3 shadow-lg">
+          <div className="text-[11px] font-medium text-slate-400 whitespace-nowrap">
+            Customer Churn Rate
           </div>
-          <div>
-            <div className="text-[10px] uppercase tracking-[0.12em] text-indigo-200/75 font-semibold">
-              {highRiskCount !== null ? 'High-Risk Flagged' : 'Dataset Scope'}
-            </div>
-            <div className="text-xs font-bold font-mono tabular-nums text-white">
-              {highRiskCount !== null
-                ? `${highRiskCount.toLocaleString()} Accounts`
-                : analytics
-                  ? `${analytics.totalCustomers.toLocaleString()} Records`
-                  : 'Ready for CSV'}
-            </div>
+          <div className="mt-1 text-xl font-bold font-mono tabular-nums text-[#38BDF8] leading-tight">
+            {churnRateValue}
+          </div>
+          <div className="mt-0.5 text-[11px] text-slate-400 truncate">
+            {churnRateNote}
           </div>
         </div>
 
-        {/* Bottom-Right Model Precision Card */}
-        {activeModel && (
-          <div
-            className="animate-float-slow absolute bottom-2 right-0 sm:right-2 rounded-xl bg-[#11142B]/85 border border-[#35C5E8]/35 shadow-2xl px-3.5 py-2.5 space-y-0.5"
-            style={{
-              transform: `translate3d(${tilt.x * 8}px, ${tilt.y * 6}px, 0)`,
-            }}
-          >
-            <div className="text-[10px] uppercase tracking-[0.12em] text-[#35C5E8] font-semibold">
-              Test Accuracy
-            </div>
-            <div className="text-sm font-bold font-mono tabular-nums text-white">
-              {activeModel.accuracy.toFixed(1)}%
-            </div>
+        <div className="rounded-xl bg-[#0D112B]/90 border border-white/12 px-4 py-3 shadow-lg">
+          <div className="text-[11px] font-medium text-slate-400 whitespace-nowrap">
+            High-Risk Customers
           </div>
-        )}
+          <div className="mt-1 text-xl font-bold font-mono tabular-nums text-[#C084FC] leading-tight">
+            {highRiskValue}
+          </div>
+          <div className="mt-0.5 text-[11px] text-slate-400 truncate">
+            {highRiskNote}
+          </div>
+        </div>
       </div>
     </div>
   );
@@ -334,7 +340,9 @@ interface TiltKpiCardProps {
   title: string;
   value: number;
   decimals?: number;
+  prefix?: string;
   suffix?: string;
+  displayText?: string;
   subtitle: string;
   gradientClass: string;
   shadowClass: string;
@@ -346,7 +354,9 @@ export const TiltKpiCard: React.FC<TiltKpiCardProps> = ({
   title,
   value,
   decimals = 0,
+  prefix = '',
   suffix = '',
+  displayText,
   subtitle,
   gradientClass,
   shadowClass,
@@ -414,7 +424,11 @@ export const TiltKpiCard: React.FC<TiltKpiCardProps> = ({
                 {title}
               </div>
               <div className="mt-3 text-3xl sm:text-[36px] font-extrabold font-display tabular-nums tracking-tight leading-none drop-shadow-xs">
-                <AnimatedNumber value={value} decimals={decimals} suffix={suffix} />
+                {displayText ? (
+                  <span className="text-2xl sm:text-[28px]">{displayText}</span>
+                ) : (
+                  <AnimatedNumber value={value} decimals={decimals} prefix={prefix} suffix={suffix} />
+                )}
               </div>
               <div className="mt-3 text-xs text-white/85 truncate">{subtitle}</div>
             </div>

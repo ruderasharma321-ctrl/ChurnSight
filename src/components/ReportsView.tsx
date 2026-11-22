@@ -254,6 +254,49 @@ export const ReportsView: React.FC<ReportsViewProps> = ({
               <FileSpreadsheet className="w-3.5 h-3.5 text-[#0E9F6E]" />
               <span>Schema Audit CSV</span>
             </button>
+            <button
+              type="button"
+              onClick={() => onNavigate('customers')}
+              className="text-xs font-semibold text-[#7655E8] hover:text-[#E84FA8] cursor-pointer px-2"
+            >
+              View Customer Profiles →
+            </button>
+          </div>
+        </div>
+
+        {/* 5. Customer Value & Revenue Exposure CSV */}
+        <div className="bg-white border border-purple-100/90 rounded-2xl shadow-sm p-6 flex flex-col justify-between space-y-5 md:col-span-2">
+          <div className="space-y-2">
+            <div className="text-xs font-semibold text-[#7655E8]">Customer Value &amp; Financial Exposure</div>
+            <h2 className="font-display text-lg font-bold text-[#11142B]">
+              Customer Value Intelligence &amp; Exposure Report
+            </h2>
+            <p className="text-xs text-slate-600 leading-relaxed">
+              Exports customer value scores, High/Medium/Low value tiers, Value &times; Churn Risk Matrix quadrants,
+              expected annual revenue exposure, and traceable evidence columns from your workspace dataset.
+            </p>
+          </div>
+          <div className="flex flex-wrap items-center gap-2.5 pt-2 border-t border-purple-100">
+            <button
+              type="button"
+              onClick={() =>
+                handleProtectedDownload(
+                  '/api/value-intelligence/export-csv',
+                  'customer_value_intelligence.csv'
+                )
+              }
+              className="inline-flex items-center gap-1.5 px-3.5 py-2 rounded-xl border border-purple-200 bg-[#F5F3FF]/60 hover:bg-[#F5F3FF] text-xs font-semibold text-[#11142B] cursor-pointer"
+            >
+              <Download className="w-3.5 h-3.5 text-[#7655E8]" />
+              <span>Customer Value &amp; Exposure CSV</span>
+            </button>
+            <button
+              type="button"
+              onClick={() => onNavigate('value')}
+              className="text-xs font-semibold text-[#7655E8] hover:text-[#E84FA8] cursor-pointer px-2"
+            >
+              Open Value Intelligence →
+            </button>
           </div>
         </div>
       </div>

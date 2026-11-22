@@ -7,9 +7,12 @@ import {
   Download,
   Eye,
   FileSpreadsheet,
+  HelpCircle,
   Info,
+  LifeBuoy,
   Search,
   SlidersHorizontal,
+  Table2,
   Upload,
   X,
 } from 'lucide-react';
@@ -23,10 +26,14 @@ import {
   CompanyWorkspaceInfo,
   DatasetState,
   IndustryKey,
+  ModelEvaluationResult,
   NavTab,
   PredictionPipelineStatus,
   ReportingPeriod,
+  SatisfactionScale,
   StagedDatasetImport,
+  TemplateColumnTier,
+  UploadPathway,
 } from '../types/churn';
 import { apiFetch, downloadProtectedCsv } from '../utils/apiClient';
 import {
@@ -49,6 +56,7 @@ interface CustomerDataViewProps {
   company: CompanyWorkspaceInfo;
   dataset: DatasetState | null;
   analytics?: AnalyticsSummary | null;
+  activeModel?: ModelEvaluationResult | null;
   stagedImport: StagedDatasetImport | null;
   automationStatus?: PredictionPipelineStatus | null;
   isPipelineRunning?: boolean;
@@ -58,12 +66,17 @@ interface CustomerDataViewProps {
   onLoadSample: () => void;
   onStageUpload: (
     fileName: string,
-    payload: { csvText?: string; fileBase64?: string }
+    payload: { csvText?: string; fileBase64?: string },
+    uploadPathway?: UploadPathway,
+    uploadMode?: 'customer' | 'tickets',
+    satisfactionScale?: SatisfactionScale
   ) => Promise<void>;
   onCommitStaged: (req: {
     stagedId: string;
     mapping: ColumnMapping;
     churnDefinition: ChurnDefinition;
+    importMode?: 'valid_only' | 'all';
+    satisfactionScale?: SatisfactionScale;
   }) => Promise<void>;
   onCancelStaged: () => void;
   onUpdateMapping: (mapping: Partial<ColumnMapping>) => Promise<void>;
@@ -73,7 +86,142 @@ interface CustomerDataViewProps {
   ) => Promise<void>;
   onAutoBuild?: () => void;
   onNavigate?: (tab: NavTab) => void;
+  onWorkspaceMutated?: (data: Record<string, any>) => void;
 }
+
+interface PredictionTemplateMeta {
+  available: boolean;
+  modelVersion: string | null;
+  modelName: string | null;
+  columns: { name: string; kind: string; exampleValue: string; acceptedValues: string }[];
+  reason: string | null;
+}
+
+const PATHWAY_LABELS: Record<UploadPathway, string> = {
+  new_business: 'Option 1 · New Business (No Historical Churn Outcomes)',
+  established_historical: 'Option 2 · Established Business (Historical Churn Data)',
+  current_prediction: 'Option 3 · Current Customers (Churn Risk Scoring)',
+  existing_custom: 'Option 4 · Existing Spreadsheet (Custom Mapping)',
+};
+
+const SATISFACTION_SCALE_OPTIONS: { value: SatisfactionScale; label: string; rangeHint: string }[] = [
+  { value: '1-5', label: '1 to 5 (CSAT)', rangeHint: '1.0 – 5.0' },
+  { value: '1-10', label: '1 to 10 (Rating)', rangeHint: '1.0 – 10.0' },
+  { value: '0-100', label: '0 to 100 (Index)', rangeHint: '0 – 100' },
+  { value: 'nps', label: 'NPS (-100 to +100)', rangeHint: '-100 to +100' },
+];
+
+const IMPORT_FIELD_CATEGORIES: {
+  category: string;
+  usedFor: string;
+  fields: { name: string; requirement: 'Required' | 'Recommended' | 'Optional'; format: string; example: string }[];
+}[] = [
+  {
+    category: '1. Customer Identification',
+    usedFor: 'Deduplication, multi-sheet ticket linking, and customer traceability',
+    fields: [
+      { name: 'customer_id', requirement: 'Required', format: 'Unique string/ID', example: 'CUST-1001' },
+      { name: 'customer_name', requirement: 'Recommended', format: 'Text name or company', example: '[Example] Acme Horizon Corp' },
+      { name: 'email', requirement: 'Optional', format: 'Valid email address', example: 'contact@acme.test' },
+    ],
+  },
+  {
+    category: '2. Subscription & Lifecycle',
+    usedFor: 'Cohort retention curves, contract risk breakdown, and status monitoring',
+    fields: [
+      { name: 'registration_date / observation_date', requirement: 'Required', format: 'YYYY-MM-DD', example: '2026-08-31' },
+      { name: 'subscription_end_date', requirement: 'Optional', format: 'YYYY-MM-DD', example: '2027-06-30' },
+      { name: 'customer_status', requirement: 'Recommended', format: 'Active, Trial, Paused, At-Risk', example: 'Active' },
+      { name: 'contract_type / plan_tier', requirement: 'Recommended', format: 'Consistent category text', example: 'Month-to-month' },
+      { name: 'tenure_months', requirement: 'Recommended', format: 'Non-negative number', example: '14' },
+    ],
+  },
+  {
+    category: '3. Revenue & Customer Value',
+    usedFor: 'Customer Value Intelligence, revenue at risk, and margin analysis (profit never assumed)',
+    fields: [
+      { name: 'monthly_charges / mrr', requirement: 'Recommended', format: 'Non-negative decimal', example: '129.00' },
+      { name: 'total_revenue', requirement: 'Recommended', format: 'Non-negative decimal', example: '1548.00' },
+      { name: 'cost / profit / profit_margin', requirement: 'Optional', format: 'Numeric (only if cost data exists)', example: '38.5' },
+      { name: 'payment_status / payment_method', requirement: 'Optional', format: 'Paid, Late, Overdue / Card, Autopay', example: 'Paid' },
+    ],
+  },
+  {
+    category: '4. Usage & Engagement',
+    usedFor: 'Inactivity watchlists, cold-start behaviour baselines, and leading attrition drivers',
+    fields: [
+      { name: 'engagement_frequency / monthly_transactions', requirement: 'Recommended', format: 'Non-negative number', example: '12' },
+      { name: 'last_activity_date', requirement: 'Recommended', format: 'YYYY-MM-DD', example: '2026-09-20' },
+    ],
+  },
+  {
+    category: '5. Support, Complaints & Experience',
+    usedFor: 'Customer friction alerts, resolution SLA impact, and CSAT correlation analysis',
+    fields: [
+      { name: 'customer_satisfaction_score', requirement: 'Recommended', format: 'Matches selected workspace scale', example: '4.4' },
+      { name: 'total_complaints', requirement: 'Recommended', format: 'Non-negative integer', example: '1' },
+      { name: 'total_tickets_raised', requirement: 'Optional', format: 'Auto-synced from Ticket_Data if uploaded', example: '3' },
+      { name: 'average_resolution_days', requirement: 'Optional', format: 'Non-negative decimal days', example: '2.4' },
+    ],
+  },
+  {
+    category: '6. Historical Churn Outcomes',
+    usedFor: 'Supervised ML model training and validated churn rate reporting (excluded in Cold-Start)',
+    fields: [
+      { name: 'churn_status / churn', requirement: 'Required', format: 'Churned / Retained / Yes / No / 1 / 0', example: 'Retained' },
+      { name: 'churn_date', requirement: 'Optional', format: 'YYYY-MM-DD (blank when retained)', example: '2026-09-12' },
+    ],
+  },
+  {
+    category: '7. Ticket_Data Sheet (Multi-Sheet or Standalone)',
+    usedFor: 'Automatic per-customer ticket roll-up without double-counting customer summary columns',
+    fields: [
+      { name: 'Ticket_ID', requirement: 'Required', format: 'Unique ticket identifier', example: 'TKT-9001' },
+      { name: 'Customer_ID', requirement: 'Required', format: 'Matches Customer_Data ID', example: 'CUST-1001' },
+      { name: 'Ticket_Status', requirement: 'Required', format: 'Open, In Progress, Resolved, Closed', example: 'Resolved' },
+      { name: 'Resolution_Days', requirement: 'Optional', format: 'Non-negative decimal', example: '2.5' },
+    ],
+  },
+];
+
+const SAMPLE_PREVIEW_RECORDS = [
+  {
+    customer_id: 'CUST-1001',
+    customer_name: '[Example] Acme Horizon Corp',
+    customer_status: 'At-Risk',
+    tenure_months: '4',
+    customer_satisfaction_score: '2.1',
+    total_complaints: '3',
+    total_tickets_raised: '4',
+    average_resolution_days: '6.5',
+    total_revenue: '358.00',
+    churn_status: 'Churned',
+  },
+  {
+    customer_id: 'CUST-1002',
+    customer_name: '[Example] Meridian Retail Group',
+    customer_status: 'Active',
+    tenure_months: '36',
+    customer_satisfaction_score: '4.7',
+    total_complaints: '0',
+    total_tickets_raised: '1',
+    average_resolution_days: '1.2',
+    total_revenue: '4644.00',
+    churn_status: 'Retained',
+  },
+  {
+    customer_id: 'CUST-1003',
+    customer_name: '[Example] Crestline Logistics',
+    customer_status: 'Active',
+    tenure_months: '19',
+    customer_satisfaction_score: '4.2',
+    total_complaints: '1',
+    total_tickets_raised: '2',
+    average_resolution_days: '2.0',
+    total_revenue: '1824.00',
+    churn_status: 'Retained',
+  },
+];
 
 function readFileAsBase64(file: File): Promise<string> {
   return new Promise((resolve, reject) => {
@@ -94,6 +242,7 @@ export const CustomerDataView: React.FC<CustomerDataViewProps> = ({
   company,
   dataset,
   analytics = null,
+  activeModel = null,
   stagedImport,
   automationStatus = null,
   isPipelineRunning = false,
@@ -109,6 +258,7 @@ export const CustomerDataView: React.FC<CustomerDataViewProps> = ({
   onRecordOutcome,
   onAutoBuild,
   onNavigate,
+  onWorkspaceMutated,
 }) => {
   const tmpl = getIndustryTemplate(company.industry, company.customIndustryName);
   const fileInputRef = useRef<HTMLInputElement | null>(null);
@@ -116,18 +266,35 @@ export const CustomerDataView: React.FC<CustomerDataViewProps> = ({
   const [uploadError, setUploadError] = useState<string | null>(null);
   const [isCommitting, setIsCommitting] = useState(false);
 
-  // Pre-upload Churn Definition & Industry Template Centre states
+  // Pre-upload Churn Definition, Upload Mode, Satisfaction Scale & Pathway states
   const [preUploadChurnDef, setPreUploadChurnDef] = useState<ChurnDefinition>(
     company.churnDefinition || buildDefaultChurnDefinition(company.industry)
   );
   const [isSavingChurnDef, setIsSavingChurnDef] = useState(false);
   const [churnDefMessage, setChurnDefMessage] = useState<string | null>(null);
   const [showPreDefEditor, setShowPreDefEditor] = useState(
-    !company.churnDefinition?.confirmedByUser || !dataset
+    !company.churnDefinition?.confirmedByUser && !dataset
   );
+  const [selectedPathway, setSelectedPathway] = useState<UploadPathway>(
+    dataset?.uploadPathway || 'established_historical'
+  );
+  const [uploadMode, setUploadMode] = useState<'customer' | 'tickets'>('customer');
+  const [satisfactionScale, setSatisfactionScale] = useState<SatisfactionScale>(
+    company.satisfactionScale || dataset?.satisfactionScale || '1-5'
+  );
+  const [isSavingScale, setIsSavingScale] = useState(false);
+  const [scaleMessage, setScaleMessage] = useState<string | null>(null);
+  const [importMode, setImportMode] = useState<'valid_only' | 'all'>('valid_only');
+  const [showSampleModal, setShowSampleModal] = useState(false);
+  const [showRequirementsModal, setShowRequirementsModal] = useState(false);
+
   const [templateIndustry, setTemplateIndustry] = useState<IndustryKey>(company.industry);
-  const [templateMode, setTemplateMode] = useState<'labeled' | 'cold_start'>('labeled');
-  const [showTemplateSpec, setShowTemplateSpec] = useState(!dataset);
+  const [referenceMode, setReferenceMode] = useState<'new_business' | 'established_historical'>(
+    'established_historical'
+  );
+  const [showTemplateSpec, setShowTemplateSpec] = useState(false);
+  const [predictionTemplateMeta, setPredictionTemplateMeta] =
+    useState<PredictionTemplateMeta | null>(null);
 
   // Staged import review states
   const [stagedMapping, setStagedMapping] = useState<ColumnMapping | null>(null);
@@ -146,7 +313,38 @@ export const CustomerDataView: React.FC<CustomerDataViewProps> = ({
   useEffect(() => {
     setPreUploadChurnDef(company.churnDefinition || buildDefaultChurnDefinition(company.industry));
     setTemplateIndustry(company.industry);
-  }, [company.churnDefinition, company.industry]);
+    if (company.satisfactionScale) {
+      setSatisfactionScale(company.satisfactionScale);
+    }
+  }, [company.churnDefinition, company.industry, company.satisfactionScale]);
+
+  useEffect(() => {
+    if (selectedPathway === 'new_business') {
+      setReferenceMode('new_business');
+    } else if (selectedPathway === 'established_historical') {
+      setReferenceMode('established_historical');
+    }
+  }, [selectedPathway]);
+
+  useEffect(() => {
+    let cancelled = false;
+    const fetchPredictionMeta = async () => {
+      try {
+        const res = await apiFetch('/api/dataset/prediction-template?meta=1');
+        if (!res.ok) return;
+        const data = (await res.json()) as PredictionTemplateMeta;
+        if (!cancelled) {
+          setPredictionTemplateMeta(data);
+        }
+      } catch {
+        // Ignore transient lookup error
+      }
+    };
+    fetchPredictionMeta();
+    return () => {
+      cancelled = true;
+    };
+  }, [activeModel?.version, automationStatus?.predictionAvailable]);
 
   useEffect(() => {
     if (stagedImport) {
@@ -198,6 +396,32 @@ export const CustomerDataView: React.FC<CustomerDataViewProps> = ({
     };
   }, [dataset, page, searchQuery]);
 
+  const handleSaveSatisfactionScale = async (nextScale: SatisfactionScale) => {
+    setSatisfactionScale(nextScale);
+    setScaleMessage(null);
+    if (!canUploadAndAnalyse) return;
+    setIsSavingScale(true);
+    try {
+      const res = await apiFetch('/api/company/satisfaction-scale', {
+        method: 'PUT',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ satisfactionScale: nextScale }),
+      });
+      const data = await res.json();
+      if (!res.ok) {
+        throw new Error(data.error || 'Failed to update satisfaction scale.');
+      }
+      if (data.company && onWorkspaceMutated) {
+        onWorkspaceMutated({ company: data.company });
+      }
+      setScaleMessage(`Satisfaction validation range set to ${nextScale.toUpperCase()}.`);
+    } catch (err: unknown) {
+      setUploadError(err instanceof Error ? err.message : 'Unable to update satisfaction scale.');
+    } finally {
+      setIsSavingScale(false);
+    }
+  };
+
   const handleFile = async (file: File) => {
     setUploadError(null);
     const lower = file.name.toLowerCase();
@@ -214,12 +438,25 @@ export const CustomerDataView: React.FC<CustomerDataViewProps> = ({
     }
 
     try {
+      setImportMode('valid_only');
       if (isExcel) {
         const fileBase64 = await readFileAsBase64(file);
-        await onStageUpload(file.name, { fileBase64 });
+        await onStageUpload(
+          file.name,
+          { fileBase64 },
+          selectedPathway,
+          uploadMode,
+          satisfactionScale
+        );
       } else {
         const csvText = await file.text();
-        await onStageUpload(file.name, { csvText });
+        await onStageUpload(
+          file.name,
+          { csvText },
+          selectedPathway,
+          uploadMode,
+          satisfactionScale
+        );
       }
       setPage(1);
       setSearchQuery('');
@@ -235,9 +472,14 @@ export const CustomerDataView: React.FC<CustomerDataViewProps> = ({
     if (file) handleFile(file);
   };
 
+  const canCommitWithoutChurnDef =
+    stagedImport?.uploadMode === 'tickets' ||
+    stagedImport?.uploadPathway === 'current_prediction' ||
+    stagedImport?.uploadPathway === 'new_business';
+
   const handleCommitStaged = async () => {
     if (!stagedImport || !stagedMapping || !stagedChurnDef) return;
-    if (!stagedChurnDef.confirmedByUser) {
+    if (!canCommitWithoutChurnDef && !stagedChurnDef.confirmedByUser) {
       setUploadError(
         'Please confirm that the configured churn definition accurately represents your dataset before importing.'
       );
@@ -251,9 +493,13 @@ export const CustomerDataView: React.FC<CustomerDataViewProps> = ({
         mapping: stagedMapping,
         churnDefinition: {
           ...stagedChurnDef,
-          confirmedByUser: true,
-          confirmedAt: new Date().toISOString(),
+          confirmedByUser: canCommitWithoutChurnDef
+            ? Boolean(company.churnDefinition?.confirmedByUser || stagedChurnDef.confirmedByUser)
+            : true,
+          confirmedAt: stagedChurnDef.confirmedAt || new Date().toISOString(),
         },
+        importMode,
+        satisfactionScale,
       });
       setPage(1);
       setSearchQuery('');
@@ -305,21 +551,71 @@ export const CustomerDataView: React.FC<CustomerDataViewProps> = ({
     }
   };
 
-  const handleDownloadTemplate = (format: 'csv' | 'xlsx') => {
+  const activeTemplateMode: 'new_business' | 'established_historical' =
+    selectedPathway === 'new_business'
+      ? 'new_business'
+      : selectedPathway === 'established_historical'
+        ? 'established_historical'
+        : referenceMode;
+
+  const handleDownloadTemplate = (
+    format: 'csv' | 'xlsx',
+    explicitMode?: 'new_business' | 'established_historical' | 'tickets',
+    scope: 'comprehensive' | 'tickets' | 'pathway' = 'comprehensive'
+  ) => {
     setUploadError(null);
+    const modeToUse = explicitMode || activeTemplateMode;
     const ext = format === 'xlsx' ? 'xlsx' : 'csv';
     const url = `/api/dataset/template?industry=${encodeURIComponent(
       templateIndustry
-    )}&format=${format}&mode=${templateMode}`;
-    downloadProtectedCsv(
-      url,
-      `churnsight_${templateIndustry}_${templateMode}_template.${ext}`
-    ).catch((err: unknown) => {
+    )}&format=${format}&mode=${modeToUse}&scope=${scope}`;
+    const filenameSlug =
+      scope === 'tickets' || modeToUse === 'tickets'
+        ? `churnsight_${templateIndustry}_ticket_import_template.${ext}`
+        : `churnsight_${templateIndustry}_${modeToUse}_import_template.${ext}`;
+    downloadProtectedCsv(url, filenameSlug).catch((err: unknown) => {
       setUploadError(err instanceof Error ? err.message : 'Failed to download template.');
     });
   };
 
-  const templateColumns = getIndustryDataTemplateColumns(templateIndustry);
+  const handleDownloadPredictionTemplate = (format: 'csv' | 'xlsx') => {
+    setUploadError(null);
+    const ext = format === 'xlsx' ? 'xlsx' : 'csv';
+    const versionTag = activeModel?.version || 'active';
+    downloadProtectedCsv(
+      `/api/dataset/prediction-template?format=${format}`,
+      `churnsight_${company.industry}_prediction_input_${versionTag}.${ext}`
+    ).catch((err: unknown) => {
+      setUploadError(
+        err instanceof Error ? err.message : 'Failed to download prediction input template.'
+      );
+    });
+  };
+
+  const templateColumns = getIndustryDataTemplateColumns(templateIndustry, activeTemplateMode);
+  const templateGroups: { tier: TemplateColumnTier; label: string; summary: string }[] = [
+    {
+      tier: 'required',
+      label: 'Required Columns',
+      summary:
+        activeTemplateMode === 'new_business'
+          ? 'Core customer identifiers, start date, live customer status, and segment/revenue structure.'
+          : 'Core identifiers, point-in-time observation snapshot date, segment/revenue/tenure, and historical churn outcome.',
+    },
+    {
+      tier: 'recommended',
+      label: 'Recommended Columns',
+      summary: 'Behavioural engagement, satisfaction, complaints, and activity timestamps that strengthen baselines and risk separation.',
+    },
+    {
+      tier: 'optional',
+      label: 'Optional Columns',
+      summary:
+        activeTemplateMode === 'established_historical'
+          ? 'Secondary profile fields plus audit-only churn_date (automatically excluded from model training features).'
+          : 'Additional contextual customer attributes for segment slicing.',
+    },
+  ];
   const visibleHeaders = dataset ? dataset.columns.slice(0, 7).map((c) => c.name) : [];
 
   const stagedTargetUniqueValues = (() => {
@@ -335,59 +631,228 @@ export const CustomerDataView: React.FC<CustomerDataViewProps> = ({
     return Array.from(vals);
   })();
 
+  const selectedScaleSpec =
+    SATISFACTION_SCALE_OPTIONS.find((opt) => opt.value === satisfactionScale) ||
+    SATISFACTION_SCALE_OPTIONS[0];
+
   return (
-    <div className="space-y-6">
-      {/* Header */}
-      <div className="flex flex-col sm:flex-row sm:items-center sm:justify-between gap-4">
-        <div>
-          <h1 className="text-2xl font-bold text-[#15152F] tracking-tight">Data Management</h1>
-          <p className="text-sm text-slate-600 mt-0.5">
-            Import CSV or Excel files for{' '}
-            <span className="font-semibold text-[#15152F]">{tmpl.label}</span>, verify data quality,
-            and confirm your churn definition to trigger Managed prediction setup
+    <div className="w-full min-w-0 space-y-6">
+      {/* A. Full-Width Page Heading & B. Template Downloads Toolbar */}
+      <section className="bg-white border border-purple-100/90 rounded-2xl shadow-sm shadow-purple-950/[0.04] p-5 sm:p-6 space-y-5">
+        {/* A. Page Heading & Description (Full-Width, Never Squeezed) */}
+        <div className="w-full min-w-0 space-y-2">
+          <div className="text-xs font-medium text-slate-500 flex flex-wrap items-center gap-2">
+            <span className="font-semibold text-[#7655E8]">{company.name}</span>
+            <span aria-hidden="true">·</span>
+            <span>{tmpl.label}</span>
+            <span aria-hidden="true">·</span>
+            <span>Multi-Tenant Workspace Import</span>
+          </div>
+          <h1 className="font-display text-2xl sm:text-3xl font-extrabold text-[#15152F] tracking-tight">
+            Customer Data Import Centre
+          </h1>
+          <p className="text-sm text-slate-600 leading-relaxed max-w-4xl">
+            Upload your customer information in bulk to understand customer behaviour, identify
+            churn risks and discover opportunities to improve customer retention.
           </p>
         </div>
 
-        <div className="flex flex-wrap items-center gap-2.5">
-          {dataset && (
+        {/* B. Template Downloads & Sample Data Toolbar */}
+        <div className="pt-4 border-t border-purple-100 space-y-3">
+          <div className="flex flex-wrap items-center justify-between gap-2">
+            <div className="text-xs font-bold uppercase tracking-[0.12em] text-[#4C4A6E]">
+              Template Downloads &amp; Sample Data
+            </div>
             <button
               type="button"
-              onClick={() => exportDatasetSummaryCsv(company, dataset)}
-              className="inline-flex items-center gap-1.5 px-3.5 py-2 bg-white hover:bg-[#F6F3FF] text-[#15152F] border border-purple-200 text-xs font-semibold rounded-xl shadow-xs transition-colors whitespace-nowrap shrink-0 cursor-pointer"
+              onClick={() => setShowRequirementsModal(true)}
+              className="inline-flex items-center gap-1.5 text-xs font-semibold text-[#7655E8] hover:text-[#E84FA8] transition-colors whitespace-nowrap shrink-0 cursor-pointer"
+            >
+              <HelpCircle className="w-3.5 h-3.5" />
+              <span>View Data Requirements</span>
+            </button>
+          </div>
+
+          <div className="flex flex-wrap items-center gap-2.5">
+            <button
+              type="button"
+              onClick={() => handleDownloadTemplate('xlsx', undefined, 'comprehensive')}
+              className="inline-flex items-center gap-2 px-4 py-2.5 bg-[#11142B] hover:bg-[#1C2147] text-white text-xs font-bold rounded-xl shadow-sm transition-colors whitespace-nowrap shrink-0 cursor-pointer"
+            >
+              <FileSpreadsheet className="w-4 h-4 text-[#35C5E8]" />
+              <span>Download Excel Template (.xlsx)</span>
+            </button>
+
+            <button
+              type="button"
+              onClick={() => setShowSampleModal(true)}
+              className="inline-flex items-center gap-1.5 px-3.5 py-2 bg-[#F6F3FF] hover:bg-purple-100 text-[#5B3AD6] border border-purple-200/80 text-xs font-semibold rounded-xl transition-colors whitespace-nowrap shrink-0 cursor-pointer"
+            >
+              <Table2 className="w-3.5 h-3.5" />
+              <span>View Sample Dataset</span>
+            </button>
+
+            <button
+              type="button"
+              disabled={!dataset}
+              title={
+                dataset
+                  ? 'Export active column schema and missing value audit as CSV'
+                  : 'Upload or load a dataset first to export its schema CSV'
+              }
+              onClick={() => dataset && exportDatasetSummaryCsv(company, dataset)}
+              className="inline-flex items-center gap-1.5 px-3.5 py-2 bg-white hover:bg-[#F6F3FF] text-[#15152F] border border-purple-200 text-xs font-semibold rounded-xl transition-colors whitespace-nowrap shrink-0 disabled:opacity-45 disabled:cursor-not-allowed cursor-pointer"
             >
               <FileSpreadsheet className="w-3.5 h-3.5 text-[#397BFF]" />
               <span>Export Schema CSV</span>
             </button>
-          )}
-          <button
-            type="button"
-            onClick={() => {
-              downloadProtectedCsv(
-                '/api/dataset/sample-csv',
-                `${company.industry}_sample_churn_250.csv`
-              ).catch((err: unknown) => {
-                setUploadError(
-                  err instanceof Error ? err.message : 'Failed to download sample CSV.'
-                );
-              });
-            }}
-            className="inline-flex items-center gap-1.5 px-3.5 py-2 bg-white hover:bg-[#F6F3FF] text-[#15152F] border border-purple-200 text-xs font-semibold rounded-xl shadow-xs transition-colors whitespace-nowrap shrink-0 cursor-pointer"
-          >
-            <Download className="w-3.5 h-3.5 text-[#7655E8]" />
-            <span>Download Sample CSV</span>
-          </button>
-          {canUploadAndAnalyse && (
+
             <button
               type="button"
-              onClick={onLoadSample}
-              disabled={isLoading}
-              className="inline-flex items-center gap-1.5 px-4 py-2 bg-gradient-to-r from-[#7655E8] to-[#E84FA8] hover:opacity-95 text-white text-xs font-semibold rounded-xl shadow-sm shadow-[#7655E8]/25 transition-all disabled:opacity-50 cursor-pointer whitespace-nowrap shrink-0"
+              onClick={() => {
+                downloadProtectedCsv(
+                  '/api/dataset/sample-csv',
+                  `${company.industry}_sample_churn_250.csv`
+                ).catch((err: unknown) => {
+                  setUploadError(
+                    err instanceof Error ? err.message : 'Failed to download sample CSV.'
+                  );
+                });
+              }}
+              className="inline-flex items-center gap-1.5 px-3.5 py-2 bg-white hover:bg-[#F6F3FF] text-[#15152F] border border-purple-200 text-xs font-semibold rounded-xl transition-colors whitespace-nowrap shrink-0 cursor-pointer"
             >
-              <Database className="w-3.5 h-3.5" />
-              <span>{isLoading ? 'Loading...' : tmpl.demoDatasetLabel}</span>
+              <Download className="w-3.5 h-3.5 text-[#7655E8]" />
+              <span>Download Sample CSV</span>
             </button>
-          )}
+
+            {canUploadAndAnalyse && (
+              <button
+                type="button"
+                onClick={onLoadSample}
+                disabled={isLoading}
+                className="inline-flex items-center gap-1.5 px-3.5 py-2 bg-gradient-to-r from-[#7655E8] to-[#E84FA8] hover:opacity-95 text-white text-xs font-semibold rounded-xl shadow-xs transition-all disabled:opacity-50 cursor-pointer whitespace-nowrap shrink-0"
+              >
+                <Database className="w-3.5 h-3.5" />
+                <span>{isLoading ? 'Loading...' : tmpl.demoDatasetLabel}</span>
+              </button>
+            )}
+          </div>
+
+          <p className="text-xs text-slate-500 leading-relaxed">
+            Recommended: Downloads a single consolidated Excel workbook containing{' '}
+            <span className="font-mono font-semibold text-[#15152F]">Customer_Data</span> (1 row per
+            customer with all supported fields) and{' '}
+            <span className="font-mono font-semibold text-[#15152F]">Ticket_Data</span> (linked via{' '}
+            <span className="font-mono font-semibold text-[#15152F]">Customer_ID</span>). Existing{' '}
+            <span className="font-mono">.csv</span> files remain fully supported for upload below.
+          </p>
         </div>
+      </section>
+
+      {/* C. Satisfaction Score Scale Configuration & D. Upload Mode Selection */}
+      <div className="grid grid-cols-1 lg:grid-cols-2 gap-5 items-stretch">
+        {/* C. Satisfaction Score Scale Configuration */}
+        <section className="bg-white border border-purple-100/90 rounded-2xl shadow-sm shadow-purple-950/[0.04] p-5 flex flex-col justify-between space-y-4 min-w-0">
+          <div className="space-y-1">
+            <div className="text-[11px] font-bold uppercase tracking-[0.14em] text-[#7655E8]">
+              Satisfaction Configuration
+            </div>
+            <h2 className="text-sm sm:text-base font-bold text-[#15152F]">
+              Satisfaction Score Scale
+            </h2>
+            <p className="text-xs text-slate-600 leading-relaxed">
+              Specify the scoring scale used in your spreadsheets so ChurnSight validates values
+              accurately ({selectedScaleSpec.rangeHint}).
+            </p>
+          </div>
+
+          <div className="space-y-2.5">
+            <label
+              htmlFor="satisfaction-scale-select"
+              className="block text-xs font-semibold text-[#4C4A6E]"
+            >
+              Active Validation Scale
+            </label>
+            <select
+              id="satisfaction-scale-select"
+              value={satisfactionScale}
+              disabled={isSavingScale || !canUploadAndAnalyse}
+              onChange={(e) => handleSaveSatisfactionScale(e.target.value as SatisfactionScale)}
+              className="w-full rounded-xl border border-purple-200 bg-[#F6F3FF]/60 px-3.5 py-2.5 text-xs font-semibold text-[#15152F] disabled:opacity-60 focus:outline-none focus:border-[#7655E8] focus:ring-2 focus:ring-[#7655E8]/20"
+            >
+              {SATISFACTION_SCALE_OPTIONS.map((opt) => (
+                <option key={opt.value} value={opt.value}>
+                  {opt.label} — Valid range: {opt.rangeHint}
+                </option>
+              ))}
+            </select>
+            {scaleMessage && (
+              <div className="bg-[#16C995]/10 border border-[#16C995]/30 rounded-xl px-3.5 py-2 text-xs text-[#065F46]">
+                {scaleMessage}
+              </div>
+            )}
+          </div>
+        </section>
+
+        {/* D. Upload Mode Selection */}
+        <section className="bg-white border border-purple-100/90 rounded-2xl shadow-sm shadow-purple-950/[0.04] p-5 flex flex-col justify-between space-y-4 min-w-0">
+          <div className="space-y-1">
+            <div className="text-[11px] font-bold uppercase tracking-[0.14em] text-[#397BFF]">
+              Upload Mode Selection
+            </div>
+            <h2 className="text-sm sm:text-base font-bold text-[#15152F]">
+              Choose Data Upload Workflow
+            </h2>
+            <p className="text-xs text-slate-600 leading-relaxed">
+              Import primary customer accounts and lifecycle records, or upload standalone support
+              ticket history to enrich existing customers.
+            </p>
+          </div>
+
+          <div className="grid grid-cols-1 sm:grid-cols-2 gap-2.5" role="radiogroup" aria-label="Upload mode">
+            <button
+              type="button"
+              onClick={() => setUploadMode('customer')}
+              className={`px-3.5 py-2.5 rounded-xl border text-left transition-all cursor-pointer ${
+                uploadMode === 'customer'
+                  ? 'border-[#7655E8] bg-[#7655E8]/[0.08] text-[#15152F] ring-1 ring-[#7655E8]/30'
+                  : 'border-purple-200 bg-[#F5F3FF]/40 text-slate-600 hover:bg-[#F5F3FF]'
+              }`}
+            >
+              <div
+                className={`text-xs font-bold whitespace-nowrap ${
+                  uploadMode === 'customer' ? 'text-[#7655E8]' : 'text-[#15152F]'
+                }`}
+              >
+                Customer Data Upload
+              </div>
+              <div className="text-[11px] text-slate-500 mt-0.5">
+                Consolidated .xlsx (Customer_Data + Ticket_Data) or .csv
+              </div>
+            </button>
+
+            <button
+              type="button"
+              onClick={() => setUploadMode('tickets')}
+              className={`px-3.5 py-2.5 rounded-xl border text-left transition-all cursor-pointer ${
+                uploadMode === 'tickets'
+                  ? 'border-[#397BFF] bg-[#397BFF]/[0.08] text-[#15152F] ring-1 ring-[#397BFF]/30'
+                  : 'border-purple-200 bg-[#F5F3FF]/40 text-slate-600 hover:bg-[#F5F3FF]'
+              }`}
+            >
+              <div
+                className={`text-xs font-bold whitespace-nowrap ${
+                  uploadMode === 'tickets' ? 'text-[#397BFF]' : 'text-[#15152F]'
+                }`}
+              >
+                Ticket / Support History Upload
+              </div>
+              <div className="text-[11px] text-slate-500 mt-0.5">
+                Optional standalone ticket .csv/.xlsx by Customer_ID
+              </div>
+            </button>
+          </div>
+        </section>
       </div>
 
       {/* STEP 1 (PRE-UPLOAD): DEFINE CHURN BEFORE UPLOADING */}
@@ -546,11 +1011,47 @@ export const CustomerDataView: React.FC<CustomerDataViewProps> = ({
                 </div>
               )}
 
+              <div>
+                <label className="block text-xs font-semibold text-[#4C4A6E] mb-1">
+                  Churn Status / Event Column Hint
+                </label>
+                <input
+                  type="text"
+                  value={preUploadChurnDef.churnStatusColumnHint || ''}
+                  onChange={(e) =>
+                    setPreUploadChurnDef((p) => ({
+                      ...p,
+                      churnStatusColumnHint: e.target.value || null,
+                    }))
+                  }
+                  placeholder="e.g. churn_status, cancelled, lapsed"
+                  className="w-full rounded-xl border border-purple-200 bg-[#F6F3FF]/40 px-3 py-2 text-xs font-mono text-[#15152F]"
+                />
+              </div>
+
+              <div>
+                <label className="block text-xs font-semibold text-[#4C4A6E] mb-1">
+                  Cancellation / Closure Date Hint
+                </label>
+                <input
+                  type="text"
+                  value={preUploadChurnDef.cancellationDateColumnHint || ''}
+                  onChange={(e) =>
+                    setPreUploadChurnDef((p) => ({
+                      ...p,
+                      cancellationDateColumnHint: e.target.value || null,
+                    }))
+                  }
+                  placeholder="e.g. churn_date, cancel_date (audit only)"
+                  className="w-full rounded-xl border border-purple-200 bg-[#F6F3FF]/40 px-3 py-2 text-xs font-mono text-[#15152F]"
+                />
+              </div>
+
               <div
                 className={
                   preUploadChurnDef.triggerType === 'inactivity'
-                    ? 'sm:col-span-3'
-                    : 'sm:col-span-4'
+                    ? 'sm:col-span-2 lg:col-span-3'
+                    : 'sm:col-span-2 lg:col-span-2'
                 }
               >
                 <label className="block text-xs font-semibold text-[#4C4A6E] mb-1">
@@ -588,136 +1089,340 @@ export const CustomerDataView: React.FC<CustomerDataViewProps> = ({
         )}
       </section>
 
-      {/* STEP 2: INDUSTRY-SPECIFIC DATA TEMPLATES (CSV & EXCEL) */}
-      <section className="bg-white border border-purple-100/90 rounded-2xl shadow-sm shadow-purple-950/[0.04] p-5 space-y-4">
+      {/* STEP 2: THREE DATA UPLOAD PATHWAYS & INDUSTRY-SPECIFIC TEMPLATES */}
+      <section className="bg-white border border-purple-100/90 rounded-2xl shadow-sm shadow-purple-950/[0.04] p-5 space-y-5 min-w-0">
         <div className="flex flex-col lg:flex-row lg:items-center lg:justify-between gap-3">
-          <div className="space-y-0.5">
+          <div className="space-y-0.5 min-w-0 flex-1">
             <div className="text-[11px] font-bold uppercase tracking-[0.14em] text-[#397BFF]">
-              Step 2 · Industry Data Templates (CSV &amp; Excel)
+              Step 2 · Choose Customer Data Pathway
             </div>
             <h2 className="text-sm sm:text-base font-bold text-[#15152F]">
-              Prepare Your Spreadsheet Without Rigid Header Lock-In
+              Industry-Aware Data Templates &amp; Flexible Ingestion
             </h2>
             <p className="text-xs text-slate-600">
-              Download pre-formatted CSV or Excel templates with sample rows and accepted date/number
-              formats, or upload your own schema—our mapper adapts automatically.
+              Select the pathway matching your business stage. Download tailored CSV or Excel templates
+              or upload your own customer spreadsheet directly.
             </p>
           </div>
 
-          <div className="flex flex-wrap items-center gap-2 shrink-0">
-            <button
-              type="button"
-              onClick={() => handleDownloadTemplate('csv')}
-              className="inline-flex items-center gap-1.5 px-3.5 py-2 rounded-xl border border-purple-200 bg-white hover:bg-[#F5F3FF] text-xs font-semibold text-[#11142B] cursor-pointer whitespace-nowrap"
-            >
-              <Download className="w-3.5 h-3.5 text-[#7655E8]" />
-              <span>CSV Template</span>
-            </button>
-            <button
-              type="button"
-              onClick={() => handleDownloadTemplate('xlsx')}
-              className="inline-flex items-center gap-1.5 px-3.5 py-2 rounded-xl bg-[#11142B] hover:bg-[#1C2147] text-white text-xs font-semibold cursor-pointer whitespace-nowrap"
-            >
-              <FileSpreadsheet className="w-3.5 h-3.5 text-[#35C5E8]" />
-              <span>Excel (.xlsx) Template</span>
-            </button>
+          <div className="flex flex-wrap items-center gap-2.5">
+            <div className="flex items-center gap-2">
+              <label className="text-xs font-semibold text-[#4C4A6E]">Industry:</label>
+              <select
+                value={templateIndustry}
+                onChange={(e) => setTemplateIndustry(e.target.value as IndustryKey)}
+                className="rounded-xl border border-purple-200 bg-[#F6F3FF]/40 px-3 py-1.5 text-xs font-semibold text-[#15152F]"
+              >
+                {INDUSTRY_OPTIONS.map((opt) => (
+                  <option key={opt.key} value={opt.key}>
+                    {opt.label}
+                  </option>
+                ))}
+              </select>
+            </div>
             <button
               type="button"
               onClick={() => setShowTemplateSpec((p) => !p)}
-              className="px-3 py-2 rounded-xl border border-purple-100 text-xs font-semibold text-slate-600 hover:bg-[#F5F3FF] cursor-pointer whitespace-nowrap"
+              className="px-3 py-1.5 rounded-xl border border-purple-200 text-xs font-semibold text-[#5B3AD6] hover:bg-[#F5F3FF] cursor-pointer whitespace-nowrap shrink-0"
             >
               {showTemplateSpec ? 'Hide Schema Guide' : 'View Schema Guide'}
             </button>
           </div>
         </div>
 
-        <div className="flex flex-wrap items-center gap-3 pt-1">
-          <div className="flex items-center gap-2">
-            <label className="text-xs font-semibold text-[#4C4A6E]">Industry Template:</label>
-            <select
-              value={templateIndustry}
-              onChange={(e) => setTemplateIndustry(e.target.value as IndustryKey)}
-              className="rounded-xl border border-purple-200 bg-[#F6F3FF]/40 px-3 py-1.5 text-xs font-semibold text-[#15152F]"
-            >
-              {INDUSTRY_OPTIONS.map((opt) => (
-                <option key={opt.key} value={opt.key}>
-                  {opt.label}
-                </option>
-              ))}
-            </select>
-          </div>
+        {/* Four Explicit Upload Pathways */}
+        <div className="grid grid-cols-1 sm:grid-cols-2 xl:grid-cols-4 gap-4">
+          {/* Option 1: New Business — No Historical Churn Data */}
+          <button
+            type="button"
+            onClick={() => {
+              setSelectedPathway('new_business');
+              setUploadMode('customer');
+            }}
+            className={`text-left rounded-xl border p-4 transition-all cursor-pointer flex flex-col justify-between space-y-3 ${
+              selectedPathway === 'new_business'
+                ? 'border-[#397BFF] bg-[#397BFF]/[0.06] ring-1 ring-[#397BFF]/30'
+                : 'border-purple-100 bg-white hover:border-purple-200'
+            }`}
+          >
+            <div className="space-y-1.5">
+              <div className="text-[11px] font-mono font-bold text-[#397BFF]">
+                OPTION 1 · NEW BUSINESS
+              </div>
+              <div className="text-sm font-bold text-[#11142B]">
+                No Historical Churn Data Yet
+              </div>
+              <p className="text-xs text-slate-600 leading-relaxed">
+                Upload active, trial, or paused customers without fabricated churn labels. Enables
+                behaviour monitoring, status tracking, and baseline collection.
+              </p>
+            </div>
+            <div className="text-[11px] font-mono text-slate-500 pt-2 border-t border-purple-100/80">
+              Behaviour Monitoring &amp; Baselines
+            </div>
+          </button>
 
-          <div className="inline-flex rounded-xl border border-purple-200 bg-[#F5F3FF]/60 p-0.5 text-xs">
-            <button
-              type="button"
-              onClick={() => setTemplateMode('labeled')}
-              className={`px-3 py-1 rounded-lg font-semibold cursor-pointer transition-colors ${
-                templateMode === 'labeled'
-                  ? 'bg-white text-[#7655E8] shadow-xs'
-                  : 'text-slate-600'
-              }`}
-            >
-              Full Historical (With Labels)
-            </button>
-            <button
-              type="button"
-              onClick={() => setTemplateMode('cold_start')}
-              className={`px-3 py-1 rounded-lg font-semibold cursor-pointer transition-colors ${
-                templateMode === 'cold_start'
-                  ? 'bg-white text-[#397BFF] shadow-xs'
-                  : 'text-slate-600'
-              }`}
-            >
-              Cold-Start (No Labels)
-            </button>
+          {/* Option 2: Established Business — Historical Data Available */}
+          <button
+            type="button"
+            onClick={() => {
+              setSelectedPathway('established_historical');
+              setUploadMode('customer');
+            }}
+            className={`text-left rounded-xl border p-4 transition-all cursor-pointer flex flex-col justify-between space-y-3 ${
+              selectedPathway === 'established_historical'
+                ? 'border-[#7655E8] bg-[#7655E8]/[0.06] ring-1 ring-[#7655E8]/30'
+                : 'border-purple-100 bg-white hover:border-purple-200'
+            }`}
+          >
+            <div className="space-y-1.5">
+              <div className="text-[11px] font-mono font-bold text-[#7655E8]">
+                OPTION 2 · ESTABLISHED BUSINESS
+              </div>
+              <div className="text-sm font-bold text-[#11142B]">
+                Historical Churn Outcomes Available
+              </div>
+              <p className="text-xs text-slate-600 leading-relaxed">
+                Upload point-in-time snapshots (<span className="font-mono">observation_date</span>)
+                for customers who stayed and left to train and validate your churn model.
+              </p>
+            </div>
+            <div className="text-[11px] font-mono text-slate-500 pt-2 border-t border-purple-100/80">
+              Analytics + Automated ML Training
+            </div>
+          </button>
+
+          {/* Option 3: Current Customers — Predict Churn Risk */}
+          <button
+            type="button"
+            onClick={() => {
+              setSelectedPathway('current_prediction');
+              setUploadMode('customer');
+            }}
+            className={`text-left rounded-xl border p-4 transition-all cursor-pointer flex flex-col justify-between space-y-3 ${
+              selectedPathway === 'current_prediction'
+                ? 'border-[#0E9F6E] bg-[#0E9F6E]/[0.06] ring-1 ring-[#0E9F6E]/30'
+                : 'border-purple-100 bg-white hover:border-purple-200'
+            }`}
+          >
+            <div className="space-y-1.5">
+              <div className="text-[11px] font-mono font-bold text-[#0E9F6E]">
+                OPTION 3 · CURRENT SCORING
+              </div>
+              <div className="text-sm font-bold text-[#11142B]">
+                Score Current Active Customers
+              </div>
+              <p className="text-xs text-slate-600 leading-relaxed">
+                Upload current customers without churn labels, verify feature compatibility against
+                your active model, and score churn probability &amp; revenue exposure.
+              </p>
+            </div>
+            <div className="text-[11px] font-mono text-slate-500 pt-2 border-t border-purple-100/80">
+              Model Compatibility + Batch Risk Scoring
+            </div>
+          </button>
+
+          {/* Option 4: I Already Have Customer Data */}
+          <button
+            type="button"
+            onClick={() => {
+              setSelectedPathway('existing_custom');
+              setUploadMode('customer');
+            }}
+            className={`text-left rounded-xl border p-4 transition-all cursor-pointer flex flex-col justify-between space-y-3 ${
+              selectedPathway === 'existing_custom'
+                ? 'border-[#11142B] bg-[#F5F3FF] ring-1 ring-[#11142B]/20'
+                : 'border-purple-100 bg-white hover:border-purple-200'
+            }`}
+          >
+            <div className="space-y-1.5">
+              <div className="text-[11px] font-mono font-bold text-[#11142B]">
+                OPTION 4 · CUSTOM SPREADSHEET
+              </div>
+              <div className="text-sm font-bold text-[#11142B]">
+                I Already Have Customer Data
+              </div>
+              <p className="text-xs text-slate-600 leading-relaxed">
+                Upload any CRM, billing, or support export. ChurnSight inspects columns, maps
+                fields automatically, and flags row errors before import.
+              </p>
+            </div>
+            <div className="text-[11px] font-mono text-slate-500 pt-2 border-t border-purple-100/80">
+              Flexible Column Mapping + Validation
+            </div>
+          </button>
+        </div>
+
+        {/* Cold-Start Honest Notice for New Business Pathway */}
+        {selectedPathway === 'new_business' && (
+          <div className="bg-amber-50 border border-amber-300 rounded-xl p-4 flex items-start gap-3 text-xs text-amber-950">
+            <AlertTriangle className="w-4 h-4 text-amber-700 shrink-0 mt-0.5" />
+            <p className="leading-relaxed font-medium">
+              Your business does not yet have sufficient historical churn outcomes for a validated
+              company-specific churn prediction model. You can still use customer analytics and
+              behaviour monitoring while ChurnSight helps you build your historical data.
+            </p>
+          </div>
+        )}
+
+        {/* Active Pathway Details & Template Download Controls */}
+        <div className="border-t border-purple-100 pt-4 flex flex-col lg:flex-row lg:items-center lg:justify-between gap-4">
+          {selectedPathway === 'new_business' && (
+            <div className="space-y-1 min-w-0 flex-1 max-w-3xl">
+              <div className="text-xs font-bold text-[#11142B]">
+                New Business Monitoring Template — Guided Capabilities
+              </div>
+              <p className="text-xs text-slate-600 leading-relaxed">
+                Monitor customer activity, track subscription and lifecycle status, establish engagement
+                baselines, and begin collecting outcomes over time.{' '}
+                <strong className="text-[#11142B]">
+                  Supervised churn prediction models will not be trained until valid historical churn
+                  outcomes are present.
+                </strong>
+              </p>
+            </div>
+          )}
+
+          {selectedPathway === 'established_historical' && (
+            <div className="space-y-1 min-w-0 flex-1 max-w-3xl">
+              <div className="text-xs font-bold text-[#11142B]">
+                Established Business Historical Template — Point-In-Time Discipline
+              </div>
+              <p className="text-xs text-slate-600 leading-relaxed">
+                Ensure attributes, revenue, and usage reflect customer behaviour at{' '}
+                <span className="font-mono font-semibold text-[#11142B]">observation_date</span> before churn
+                occurred. Optional{' '}
+                <span className="font-mono font-semibold text-[#11142B]">churn_date</span> is retained
+                for audit and automatically excluded from ML model training features.
+              </p>
+            </div>
+          )}
+
+          {selectedPathway === 'current_prediction' && (
+            <div className="space-y-1 min-w-0 flex-1 max-w-3xl">
+              <div className="text-xs font-bold text-[#11142B]">
+                Current Customer Risk Scoring — Active Model Compatibility Check
+              </div>
+              <p className="text-xs text-slate-600 leading-relaxed">
+                {activeModel
+                  ? `Scores active customers using ${activeModel.modelName} (${activeModel.version}) while keeping your trained model intact and updating Value Intelligence exposure.`
+                  : 'Train or activate a historical churn model first, then upload current customer spreadsheets here to score churn risk in bulk.'}
+              </p>
+            </div>
+          )}
+
+          {selectedPathway === 'existing_custom' && (
+            <div className="space-y-1 min-w-0 flex-1 max-w-3xl">
+              <div className="text-xs font-bold text-[#11142B]">
+                Custom File Auto-Inspection &amp; Mapping Confirmation
+              </div>
+              <p className="text-xs text-slate-600 leading-relaxed">
+                Upload your CRM, billing, or ERP export below. ChurnSight detects identifiers, snapshot
+                dates, revenue, usage, satisfaction, support tickets, and optional churn outcomes, then
+                lets you inspect validation rows before importing.
+              </p>
+            </div>
+          )}
+
+          <div className="flex flex-wrap items-center gap-2">
+            {selectedPathway === 'current_prediction' && predictionTemplateMeta?.available ? (
+              <button
+                type="button"
+                onClick={() => handleDownloadPredictionTemplate('xlsx')}
+                className="inline-flex items-center gap-1.5 px-3.5 py-2 rounded-xl bg-[#11142B] hover:bg-[#1C2147] text-white text-xs font-semibold cursor-pointer whitespace-nowrap"
+              >
+                <FileSpreadsheet className="w-3.5 h-3.5 text-[#35C5E8]" />
+                <span>Download Prediction Excel (.xlsx)</span>
+              </button>
+            ) : selectedPathway === 'existing_custom' ? (
+              <div className="inline-flex rounded-xl border border-purple-200 bg-[#F5F3FF]/60 p-0.5 text-xs">
+                <button
+                  type="button"
+                  onClick={() => setReferenceMode('established_historical')}
+                  className={`px-3 py-1 rounded-lg font-semibold cursor-pointer transition-colors whitespace-nowrap ${
+                    referenceMode === 'established_historical'
+                      ? 'bg-white text-[#7655E8] shadow-xs'
+                      : 'text-slate-600'
+                  }`}
+                >
+                  Historical Reference
+                </button>
+                <button
+                  type="button"
+                  onClick={() => setReferenceMode('new_business')}
+                  className={`px-3 py-1 rounded-lg font-semibold cursor-pointer transition-colors whitespace-nowrap ${
+                    referenceMode === 'new_business'
+                      ? 'bg-white text-[#397BFF] shadow-xs'
+                      : 'text-slate-600'
+                  }`}
+                >
+                  New Business Reference
+                </button>
+              </div>
+            ) : (
+              <button
+                type="button"
+                onClick={() => handleDownloadTemplate('xlsx')}
+                className="inline-flex items-center gap-1.5 px-3.5 py-2 rounded-xl bg-[#11142B] hover:bg-[#1C2147] text-white text-xs font-semibold cursor-pointer whitespace-nowrap"
+              >
+                <FileSpreadsheet className="w-3.5 h-3.5 text-[#35C5E8]" />
+                <span>
+                  {selectedPathway === 'new_business'
+                    ? 'Download New Business Excel (.xlsx)'
+                    : 'Download Historical Excel (.xlsx)'}
+                </span>
+              </button>
+            )}
           </div>
         </div>
 
+        {/* Grouped Required / Recommended / Optional Schema Breakdown */}
         {showTemplateSpec && (
-          <div className="overflow-x-auto border border-purple-100 rounded-xl">
-            <table className="w-full text-left border-collapse text-xs">
-              <thead className="bg-[#F5F3FF] text-[#4C4A6E] border-b border-purple-100">
-                <tr>
-                  <th className="py-2 px-3">Column</th>
-                  <th className="py-2 px-3">Importance</th>
-                  <th className="py-2 px-3">Accepted Formats</th>
-                  <th className="py-2 px-3">Example</th>
-                  <th className="py-2 px-3">Description</th>
-                </tr>
-              </thead>
-              <tbody className="divide-y divide-purple-50">
-                {templateColumns.map((col) => {
-                  const tierColor =
-                    col.tier === 'required'
-                      ? 'text-[#7655E8] font-bold'
-                      : col.tier === 'recommended'
-                        ? 'text-[#397BFF] font-semibold'
-                        : 'text-slate-500 font-medium';
-                  return (
-                    <tr key={col.name} className="hover:bg-[#F5F3FF]/40">
-                      <td className="py-2 px-3 font-mono font-semibold text-[#11142B] whitespace-nowrap">
-                        {col.name}
-                      </td>
-                      <td className={`py-2 px-3 uppercase text-[10px] tracking-wider ${tierColor}`}>
-                        {col.tier}
-                      </td>
-                      <td className="py-2 px-3 text-slate-600">{col.acceptedFormats}</td>
-                      <td className="py-2 px-3 font-mono text-slate-700 whitespace-nowrap">
-                        {col.exampleValue}
-                      </td>
-                      <td className="py-2 px-3 text-slate-600">
-                        {col.description}
-                        {templateMode === 'cold_start' && col.coldStartNote && (
-                          <span className="block text-[11px] text-[#397BFF] mt-0.5">
-                            Cold-Start: {col.coldStartNote}
-                          </span>
-                        )}
-                      </td>
-                    </tr>
-                  );
-                })}
-              </tbody>
-            </table>
+          <div className="space-y-4 pt-2 border-t border-purple-100">
+            {templateGroups.map((group) => {
+              const cols = templateColumns.filter((c) => c.tier === group.tier);
+              if (cols.length === 0) return null;
+              return (
+                <div key={group.tier} className="space-y-2">
+                  <div className="flex flex-col sm:flex-row sm:items-baseline sm:justify-between gap-1">
+                    <div className="text-xs font-bold text-[#11142B]">
+                      {group.label} ({cols.length})
+                    </div>
+                    <div className="text-[11px] text-slate-500">{group.summary}</div>
+                  </div>
+                  <div className="overflow-x-auto border border-purple-100 rounded-xl">
+                    <table className="w-full text-left border-collapse text-xs">
+                      <thead className="bg-[#F5F3FF] text-[#4C4A6E] border-b border-purple-100">
+                        <tr>
+                          <th className="py-2 px-3">Column</th>
+                          <th className="py-2 px-3">Role</th>
+                          <th className="py-2 px-3">Accepted Formats</th>
+                          <th className="py-2 px-3">Example</th>
+                          <th className="py-2 px-3">Description</th>
+                        </tr>
+                      </thead>
+                      <tbody className="divide-y divide-purple-50">
+                        {cols.map((col) => (
+                          <tr key={col.name} className="hover:bg-[#F5F3FF]/40">
+                            <td className="py-2 px-3 font-mono font-semibold text-[#11142B] whitespace-nowrap">
+                              {col.name}
+                            </td>
+                            <td className="py-2 px-3 font-mono text-[11px] text-[#5B3AD6] whitespace-nowrap">
+                              {col.semanticRole}
+                            </td>
+                            <td className="py-2 px-3 text-slate-600">{col.acceptedFormats}</td>
+                            <td className="py-2 px-3 font-mono text-slate-700 whitespace-nowrap">
+                              {col.exampleValue || <span className="text-slate-400 italic">blank when retained</span>}
+                            </td>
+                            <td className="py-2 px-3 text-slate-600">{col.description}</td>
+                          </tr>
+                        ))}
+                      </tbody>
+                    </table>
+                  </div>
+                </div>
+              );
+            })}
           </div>
         )}
       </section>
@@ -748,12 +1453,17 @@ export const CustomerDataView: React.FC<CustomerDataViewProps> = ({
               e.target.value = '';
             }}
           />
-          <div className="max-w-lg mx-auto space-y-2.5">
+          <div className="max-w-xl mx-auto space-y-2.5">
             <div className="w-11 h-11 rounded-2xl bg-gradient-to-br from-[#7655E8] to-[#E84FA8] text-white flex items-center justify-center mx-auto shadow-md shadow-[#7655E8]/25">
               <Upload className="w-5 h-5" />
             </div>
+            <div className="text-[11px] font-mono font-semibold text-[#7655E8]">
+              {uploadMode === 'tickets'
+                ? 'Active Mode: Support Ticket History Enrichment (Links Ticket_Data to Customer_ID)'
+                : `Active Pathway: ${PATHWAY_LABELS[selectedPathway]} · Scale: ${satisfactionScale.toUpperCase()}`}
+            </div>
             <div className="text-sm font-semibold text-[#15152F]">
-              Drag and drop a CSV or Excel (.xlsx / .xls) file here, or{' '}
+              Drag and drop an Excel (.xlsx / .xls) workbook or CSV file here, or{' '}
               <button
                 type="button"
                 onClick={() => fileInputRef.current?.click()}
@@ -763,9 +1473,15 @@ export const CustomerDataView: React.FC<CustomerDataViewProps> = ({
               </button>
             </div>
             <p className="text-xs text-slate-500">
-              Both labeled historical files and active/cold-start datasets without churn outcomes are
-              accepted. Uploads stage into a schema preview first for automatic mapping &amp; quality
-              checks.
+              {uploadMode === 'tickets'
+                ? 'Uploads standalone Ticket_Data (.csv or .xlsx), deduplicates Ticket_IDs, validates Customer_ID links, and aggregates ticket metrics without double-counting.'
+                : selectedPathway === 'new_business'
+                  ? 'Automatically detects Customer_Data & Ticket_Data worksheets in Excel (.xlsx) or reads existing CSV uploads for active monitoring.'
+                  : selectedPathway === 'current_prediction'
+                    ? 'Validates feature schema compatibility against your active model (supports Excel .xlsx & CSV) for batch churn scoring.'
+                    : selectedPathway === 'established_historical'
+                      ? 'Automatically reads & validates Customer_Data and Ticket_Data worksheets separately in .xlsx workbooks (existing .csv files also supported).'
+                      : 'Auto-inspects any .xlsx or .csv spreadsheet schema, validates customers & embedded tickets separately, and previews records before commit.'}
             </p>
           </div>
         </div>
@@ -778,6 +1494,66 @@ export const CustomerDataView: React.FC<CustomerDataViewProps> = ({
             records below or ask your Firm Administrator to enable upload permissions.
           </div>
         </div>
+      )}
+
+      {/* Template 3: Current Customer Prediction Input Template */}
+      {!stagedImport && (
+        <section className="bg-white border border-purple-100/90 rounded-2xl shadow-sm shadow-purple-950/[0.04] p-5 space-y-3 min-w-0">
+          <div className="flex flex-col lg:flex-row lg:items-center lg:justify-between gap-4">
+            <div className="space-y-1 min-w-0 flex-1">
+              <div className="text-[11px] font-bold uppercase tracking-[0.14em] text-[#0E9F6E]">
+                Prediction Input Template · Active Model Schema
+              </div>
+              <h2 className="text-sm sm:text-base font-bold text-[#15152F]">
+                Current Customer Prediction Template
+                {predictionTemplateMeta?.available && predictionTemplateMeta.modelVersion
+                  ? ` (${predictionTemplateMeta.modelName} ${predictionTemplateMeta.modelVersion})`
+                  : ''}
+              </h2>
+              <p className="text-xs text-slate-600 max-w-3xl leading-relaxed">
+                {predictionTemplateMeta?.available
+                  ? `Generated directly from your validated workspace model. Includes customer ID and exact trained input features while excluding Churn_Status and Churn_Date.`
+                  : predictionTemplateMeta?.reason ||
+                    'This model-driven scoring template unlocks once your workspace has an active validated churn prediction model.'}
+              </p>
+            </div>
+
+            {predictionTemplateMeta?.available ? (
+              <div className="flex flex-wrap items-center gap-2">
+                <button
+                  type="button"
+                  onClick={() => handleDownloadPredictionTemplate('xlsx')}
+                  className="inline-flex items-center gap-1.5 px-3.5 py-2 rounded-xl bg-[#11142B] hover:bg-[#1C2147] text-white text-xs font-semibold cursor-pointer whitespace-nowrap shrink-0"
+                >
+                  <FileSpreadsheet className="w-3.5 h-3.5 text-[#35C5E8]" />
+                  <span>Download Prediction Excel (.xlsx)</span>
+                </button>
+                {onNavigate && (
+                  <button
+                    type="button"
+                    onClick={() => onNavigate('predictions')}
+                    className="px-3.5 py-2 rounded-xl border border-purple-200 bg-[#F5F3FF] hover:bg-purple-100 text-xs font-semibold text-[#5B3AD6] cursor-pointer whitespace-nowrap shrink-0"
+                  >
+                    Score in Churn Predictions →
+                  </button>
+                )}
+              </div>
+            ) : (
+              <div className="text-xs font-mono text-amber-800 bg-amber-50 border border-amber-200 rounded-xl px-3.5 py-2 self-start lg:self-auto">
+                Locked until validated model is active
+              </div>
+            )}
+          </div>
+
+          {predictionTemplateMeta?.available && predictionTemplateMeta.columns.length > 0 && (
+            <div className="text-[11px] font-mono text-slate-600 pt-2 border-t border-purple-100/80 break-words">
+              Required input columns ({predictionTemplateMeta.columns.length}):{' '}
+              <span className="text-[#11142B] font-semibold">
+                {predictionTemplateMeta.columns.map((c) => c.name).join(', ')}
+              </span>
+            </div>
+          )}
+        </section>
       )}
 
       {uploadError && (
@@ -801,13 +1577,13 @@ export const CustomerDataView: React.FC<CustomerDataViewProps> = ({
       {/* STAGED SPREADSHEET IMPORT REVIEW & CHURN DEFINITION CONFIRMATION      */}
       {/* ===================================================================== */}
       {stagedImport && stagedMapping && stagedChurnDef && (
-        <div className="bg-white border-2 border-[#7655E8]/50 rounded-2xl shadow-xl shadow-[#7655E8]/10 p-6 space-y-6">
+        <div className="bg-white border-2 border-[#7655E8]/50 rounded-2xl shadow-xl shadow-[#7655E8]/10 p-5 sm:p-6 space-y-6 min-w-0">
           <div className="flex flex-col sm:flex-row sm:items-start sm:justify-between gap-4 border-b border-purple-100 pb-4">
-            <div className="space-y-1">
+            <div className="space-y-1 min-w-0 flex-1">
               <div className="text-[11px] font-bold uppercase tracking-[0.18em] text-[#7655E8]">
                 Step 2 of 2 · Staging Review &amp; Churn Definition Confirmation
               </div>
-              <h2 className="text-lg font-bold text-[#15152F]">
+              <h2 className="text-lg font-bold text-[#15152F] break-words">
                 Review &ldquo;{stagedImport.fileName}&rdquo; ({stagedImport.sourceFormat.toUpperCase()})
               </h2>
               <p className="text-xs text-slate-600 font-mono tabular-nums">
@@ -821,6 +1597,9 @@ export const CustomerDataView: React.FC<CustomerDataViewProps> = ({
                 <div className="text-xs font-mono font-semibold text-[#7655E8] pt-1">
                   Staged Readiness: {stagedImport.readiness.overallLabel} (
                   {stagedImport.readiness.readinessScore}/100)
+                  {stagedImport.uploadPathway
+                    ? ` · ${PATHWAY_LABELS[stagedImport.uploadPathway]}`
+                    : ''}
                 </div>
               )}
             </div>
@@ -835,15 +1614,274 @@ export const CustomerDataView: React.FC<CustomerDataViewProps> = ({
             </button>
           </div>
 
-          {!stagedImport.hasValidChurnLabels && stagedImport.churnReadinessMessage && (
-            <div className="bg-amber-50 border border-amber-300 rounded-xl p-4 flex items-start gap-3 text-xs text-amber-950">
-              <AlertTriangle className="w-4 h-4 text-amber-700 shrink-0 mt-0.5" />
-              <div>
-                <div className="font-bold">Churn Label Readiness Warning</div>
-                <p className="mt-0.5 leading-relaxed">{stagedImport.churnReadinessMessage}</p>
+          {/* Row-Level Validation Summary Grid + Rejected CSV Download */}
+          {stagedImport.rowValidation && (
+            <div className="space-y-4">
+              <div className="flex flex-col sm:flex-row sm:items-center sm:justify-between gap-3">
+                <div>
+                  <h3 className="text-sm font-bold text-[#15152F]">
+                    Row-Level Validation Summary
+                  </h3>
+                  <p className="text-xs text-slate-500">
+                    Inspected all {stagedImport.rowValidation.totalRows.toLocaleString()} uploaded rows
+                    across mapped customer &amp; support fields
+                  </p>
+                </div>
+
+                {stagedImport.rowValidation.hasRejectedRowsCsv && (
+                  <button
+                    type="button"
+                    onClick={() => {
+                      downloadProtectedCsv(
+                        '/api/dataset/staged-rejected-csv',
+                        `rejected_rows_${stagedImport.stagedId}.csv`
+                      ).catch((err: unknown) => {
+                        setUploadError(
+                          err instanceof Error ? err.message : 'Failed to download rejected rows CSV.'
+                        );
+                      });
+                    }}
+                    className="inline-flex items-center gap-1.5 px-3.5 py-2 rounded-xl border border-[#FF786B]/50 bg-[#FF786B]/10 hover:bg-[#FF786B]/20 text-xs font-semibold text-[#9A2E25] cursor-pointer whitespace-nowrap self-start sm:self-auto"
+                  >
+                    <Download className="w-3.5 h-3.5" />
+                    <span>Download Rejected Rows CSV</span>
+                  </button>
+                )}
+              </div>
+
+              <div className="grid grid-cols-2 sm:grid-cols-4 lg:grid-cols-8 gap-2.5">
+                <div className="rounded-xl border border-purple-100 bg-[#F5F3FF]/40 p-3">
+                  <div className="text-[10px] font-semibold uppercase tracking-wider text-slate-500">Total Rows</div>
+                  <div className="text-lg font-extrabold font-mono tabular-nums text-[#15152F] mt-0.5">
+                    {stagedImport.rowValidation.totalRows.toLocaleString()}
+                  </div>
+                </div>
+                <div className="rounded-xl border border-[#16C995]/30 bg-[#16C995]/10 p-3">
+                  <div className="text-[10px] font-semibold uppercase tracking-wider text-[#065F46]">Valid Rows</div>
+                  <div className="text-lg font-extrabold font-mono tabular-nums text-[#0E9F6E] mt-0.5">
+                    {stagedImport.rowValidation.validCount.toLocaleString()}
+                  </div>
+                </div>
+                <div className="rounded-xl border border-amber-200 bg-amber-50 p-3">
+                  <div className="text-[10px] font-semibold uppercase tracking-wider text-amber-800">Warnings</div>
+                  <div className="text-lg font-extrabold font-mono tabular-nums text-amber-700 mt-0.5">
+                    {stagedImport.rowValidation.warningCount.toLocaleString()}
+                  </div>
+                </div>
+                <div className="rounded-xl border border-[#FF786B]/40 bg-[#FF786B]/10 p-3">
+                  <div className="text-[10px] font-semibold uppercase tracking-wider text-[#9A2E25]">Errors</div>
+                  <div className="text-lg font-extrabold font-mono tabular-nums text-[#E04F44] mt-0.5">
+                    {stagedImport.rowValidation.errorCount.toLocaleString()}
+                  </div>
+                </div>
+                <div className="rounded-xl border border-purple-100 bg-white p-3">
+                  <div className="text-[10px] font-semibold uppercase tracking-wider text-slate-500">Duplicate IDs</div>
+                  <div className="text-lg font-extrabold font-mono tabular-nums text-[#15152F] mt-0.5">
+                    {(
+                      stagedImport.rowValidation.duplicateCustomerIds +
+                      stagedImport.rowValidation.duplicateTicketIds
+                    ).toLocaleString()}
+                  </div>
+                </div>
+                <div className="rounded-xl border border-purple-100 bg-white p-3">
+                  <div className="text-[10px] font-semibold uppercase tracking-wider text-slate-500">Missing Values</div>
+                  <div className="text-lg font-extrabold font-mono tabular-nums text-[#15152F] mt-0.5">
+                    {stagedImport.rowValidation.missingValuesCount.toLocaleString()}
+                  </div>
+                </div>
+                <div className="rounded-xl border border-purple-100 bg-white p-3">
+                  <div className="text-[10px] font-semibold uppercase tracking-wider text-slate-500">Mapped Cols</div>
+                  <div className="text-lg font-extrabold font-mono tabular-nums text-[#7655E8] mt-0.5">
+                    {stagedImport.rowValidation.mappedFieldsCount}
+                  </div>
+                </div>
+                <div className="rounded-xl border border-purple-100 bg-white p-3">
+                  <div className="text-[10px] font-semibold uppercase tracking-wider text-slate-500">Unmapped Cols</div>
+                  <div className="text-lg font-extrabold font-mono tabular-nums text-slate-700 mt-0.5">
+                    {stagedImport.rowValidation.unmappedColumns.length}
+                  </div>
+                </div>
+              </div>
+
+              {stagedImport.rowValidation.issuesSummary.length > 0 && (
+                <div className="rounded-xl border border-purple-100 bg-[#F5F3FF]/40 p-3.5 text-xs space-y-1.5">
+                  <div className="font-bold text-[#15152F]">Detected Row Validation Checks</div>
+                  <div className="flex flex-wrap gap-x-5 gap-y-1">
+                    {stagedImport.rowValidation.issuesSummary.map((item, idx) => (
+                      <span
+                        key={idx}
+                        className={`font-mono text-[11px] font-semibold ${
+                          item.severity === 'error' ? 'text-[#E04F44]' : 'text-amber-800'
+                        }`}
+                      >
+                        {item.label}: {item.count}
+                      </span>
+                    ))}
+                  </div>
+                </div>
+              )}
+            </div>
+          )}
+
+          {/* Ticket Aggregation & Separate Ticket Validation Summary Card */}
+          {stagedImport.ticketAggregation && (
+            <div className="bg-[#397BFF]/[0.06] border border-[#397BFF]/30 rounded-xl p-4 space-y-3 text-xs text-[#11142B]">
+              <div className="flex items-start gap-3">
+                <LifeBuoy className="w-4 h-4 text-[#397BFF] shrink-0 mt-0.5" />
+                <div className="space-y-1.5 flex-1 min-w-0">
+                  <div className="font-bold flex flex-wrap items-center gap-2">
+                    <span>
+                      {stagedImport.ticketAggregation.source === 'standalone_ticket_upload'
+                        ? 'Standalone Ticket_Data Validation & Linking'
+                        : 'Ticket_Data Worksheet Validated & Linked Separately'}
+                    </span>
+                    <span className="font-mono text-[11px] text-[#397BFF]">
+                      {stagedImport.ticketAggregation.ticketRowsCount} ticket rows ·{' '}
+                      {stagedImport.ticketAggregation.matchedCustomersCount} unique customer(s) linked
+                      {stagedImport.ticketAggregation.duplicateTicketIds > 0
+                        ? ` · ${stagedImport.ticketAggregation.duplicateTicketIds} duplicate Ticket_IDs skipped`
+                        : ''}
+                    </span>
+                  </div>
+                  <p className="text-slate-700 leading-relaxed">
+                    {stagedImport.ticketAggregation.note}{' '}
+                    {stagedImport.ticketAggregation.doubleCountingPrevented
+                      ? 'Multiple tickets per Customer_ID are aggregated cleanly into customer metrics without duplicating customer rows or double-counting.'
+                      : ''}
+                  </p>
+                </div>
+              </div>
+
+              {(typeof stagedImport.ticketAggregation.validTicketRows === 'number' ||
+                (stagedImport.ticketAggregation.unmatchedTicketRowsCount ?? 0) > 0) && (
+                <div className="grid grid-cols-2 sm:grid-cols-5 gap-2 pt-1">
+                  <div className="rounded-lg border border-[#397BFF]/20 bg-white/80 px-3 py-2">
+                    <div className="text-[10px] font-semibold uppercase tracking-wider text-slate-500">
+                      Ticket Rows
+                    </div>
+                    <div className="font-mono font-bold text-sm text-[#15152F]">
+                      {stagedImport.ticketAggregation.ticketRowsCount.toLocaleString()}
+                    </div>
+                  </div>
+                  <div className="rounded-lg border border-[#16C995]/30 bg-[#16C995]/10 px-3 py-2">
+                    <div className="text-[10px] font-semibold uppercase tracking-wider text-[#065F46]">
+                      Clean Tickets
+                    </div>
+                    <div className="font-mono font-bold text-sm text-[#0E9F6E]">
+                      {(stagedImport.ticketAggregation.validTicketRows ?? stagedImport.ticketAggregation.ticketRowsCount).toLocaleString()}
+                    </div>
+                  </div>
+                  <div className="rounded-lg border border-amber-200 bg-amber-50 px-3 py-2">
+                    <div className="text-[10px] font-semibold uppercase tracking-wider text-amber-800">
+                      Ticket Warnings
+                    </div>
+                    <div className="font-mono font-bold text-sm text-amber-700">
+                      {(stagedImport.ticketAggregation.warningTicketRows ?? 0).toLocaleString()}
+                    </div>
+                  </div>
+                  <div className="rounded-lg border border-[#FF786B]/40 bg-[#FF786B]/10 px-3 py-2">
+                    <div className="text-[10px] font-semibold uppercase tracking-wider text-[#9A2E25]">
+                      Ticket Errors
+                    </div>
+                    <div className="font-mono font-bold text-sm text-[#E04F44]">
+                      {(stagedImport.ticketAggregation.errorTicketRows ?? 0).toLocaleString()}
+                    </div>
+                  </div>
+                  <div className="rounded-lg border border-purple-100 bg-white/80 px-3 py-2">
+                    <div className="text-[10px] font-semibold uppercase tracking-wider text-slate-500">
+                      Unmatched Customer_ID
+                    </div>
+                    <div className="font-mono font-bold text-sm text-[#15152F]">
+                      {(stagedImport.ticketAggregation.unmatchedTicketRowsCount ?? 0).toLocaleString()}
+                    </div>
+                  </div>
+                </div>
+              )}
+
+              {stagedImport.ticketAggregation.ticketIssues &&
+                stagedImport.ticketAggregation.ticketIssues.length > 0 && (
+                  <div className="rounded-lg border border-amber-200 bg-amber-50/70 p-3 space-y-1">
+                    <div className="font-bold text-[11px] text-amber-900">
+                      Ticket_Data Validation Findings (First {Math.min(6, stagedImport.ticketAggregation.ticketIssues.length)})
+                    </div>
+                    <ul className="space-y-0.5 text-[11px] text-amber-950 font-mono">
+                      {stagedImport.ticketAggregation.ticketIssues.slice(0, 6).map((ti, i) => (
+                        <li key={i}>
+                          Row {ti.rowIndex} ({ti.customerId}) [{ti.status.toUpperCase()}]:{' '}
+                          <span className="font-sans">{ti.messages.join(' ')}</span>
+                        </li>
+                      ))}
+                    </ul>
+                  </div>
+                )}
+            </div>
+          )}
+
+          {/* Model Compatibility Report for Current Customer Scoring */}
+          {stagedImport.modelCompatibility && (
+            <div
+              className={`border rounded-xl p-4 flex items-start gap-3 text-xs ${
+                stagedImport.modelCompatibility.compatible
+                  ? 'bg-[#16C995]/10 border-[#16C995]/35 text-[#065F46]'
+                  : 'bg-amber-50 border-amber-300 text-amber-950'
+              }`}
+            >
+              <CheckCircle2 className="w-4 h-4 shrink-0 mt-0.5" />
+              <div className="space-y-1">
+                <div className="font-bold">
+                  Model Schema Compatibility
+                  {stagedImport.modelCompatibility.modelName
+                    ? ` · ${stagedImport.modelCompatibility.modelName} (${stagedImport.modelCompatibility.modelVersion})`
+                    : ''}
+                </div>
+                <p className="leading-relaxed">{stagedImport.modelCompatibility.message}</p>
+                {stagedImport.modelCompatibility.missingFeatures.length > 0 && (
+                  <p className="font-mono text-[11px]">
+                    Missing features: {stagedImport.modelCompatibility.missingFeatures.join(', ')}
+                  </p>
+                )}
               </div>
             </div>
           )}
+
+          {stagedImport.readiness?.datasetProfile.classImbalanceWarning && (
+            <div className="bg-amber-50 border border-amber-300 rounded-xl p-4 flex items-start gap-3 text-xs text-amber-950">
+              <AlertTriangle className="w-4 h-4 text-amber-700 shrink-0 mt-0.5" />
+              <div>
+                <div className="font-bold">Class Imbalance Detected</div>
+                <p className="mt-0.5 leading-relaxed">
+                  {stagedImport.readiness.datasetProfile.classImbalanceWarning}
+                </p>
+              </div>
+            </div>
+          )}
+
+          {stagedImport.readiness?.datasetProfile.leakageColumnsExcluded &&
+            stagedImport.readiness.datasetProfile.leakageColumnsExcluded.length > 0 && (
+              <div className="bg-[#F5F3FF] border border-purple-200 rounded-xl p-4 flex items-start gap-3 text-xs text-[#15152F]">
+                <Info className="w-4 h-4 text-[#7655E8] shrink-0 mt-0.5" />
+                <div>
+                  <div className="font-bold">Target Leakage Protection Active</div>
+                  <p className="mt-0.5 leading-relaxed">
+                    Post-outcome columns ({stagedImport.readiness.datasetProfile.leakageColumnsExcluded.join(', ')}) are
+                    preserved for audit visibility and excluded from supervised ML training features.
+                  </p>
+                </div>
+              </div>
+            )}
+
+          {!stagedImport.hasValidChurnLabels &&
+            stagedImport.churnReadinessMessage &&
+            stagedImport.uploadMode !== 'tickets' &&
+            stagedImport.uploadPathway !== 'current_prediction' && (
+              <div className="bg-amber-50 border border-amber-300 rounded-xl p-4 flex items-start gap-3 text-xs text-amber-950">
+                <AlertTriangle className="w-4 h-4 text-amber-700 shrink-0 mt-0.5" />
+                <div>
+                  <div className="font-bold">Churn Label Readiness Notice</div>
+                  <p className="mt-0.5 leading-relaxed">{stagedImport.churnReadinessMessage}</p>
+                </div>
+              </div>
+            )}
 
           {stagedImport.issues.length > 0 && (
             <div className="space-y-2">
@@ -865,7 +1903,8 @@ export const CustomerDataView: React.FC<CustomerDataViewProps> = ({
             </div>
           )}
 
-          {/* Staged Column Mapping Editor */}
+          {/* Customer Column Mapping Editor (shown for customer uploads, hidden for standalone tickets) */}
+          {stagedImport.uploadMode !== 'tickets' && (
           <div className="space-y-4">
             <div>
               <h3 className="text-sm font-bold text-[#15152F]">
@@ -1073,12 +2112,109 @@ export const CustomerDataView: React.FC<CustomerDataViewProps> = ({
                   ))}
                 </select>
               </div>
+
+              <div>
+                <label className="block text-xs font-semibold text-[#4C4A6E] mb-1">
+                  Customer Status Column (Operational)
+                </label>
+                <select
+                  value={stagedMapping.statusColumn || ''}
+                  onChange={(e) =>
+                    setStagedMapping((prev) =>
+                      prev ? { ...prev, statusColumn: e.target.value || null } : prev
+                    )
+                  }
+                  className="w-full rounded-xl border border-purple-200 bg-[#F6F3FF]/40 px-3 py-2 text-xs font-medium text-[#15152F]"
+                >
+                  <option value="">Not mapped</option>
+                  {stagedImport.columns.map((c) => (
+                    <option key={c.name} value={c.name}>
+                      {c.name}
+                    </option>
+                  ))}
+                </select>
+              </div>
+
+              <div>
+                <label className="block text-xs font-semibold text-[#4C4A6E] mb-1">
+                  Observation Snapshot Date
+                </label>
+                <select
+                  value={stagedMapping.observationDateColumn || ''}
+                  onChange={(e) =>
+                    setStagedMapping((prev) =>
+                      prev ? { ...prev, observationDateColumn: e.target.value || null } : prev
+                    )
+                  }
+                  className="w-full rounded-xl border border-purple-200 bg-[#F6F3FF]/40 px-3 py-2 text-xs font-medium text-[#15152F]"
+                >
+                  <option value="">Not mapped</option>
+                  {stagedImport.columns.map((c) => (
+                    <option key={c.name} value={c.name}>
+                      {c.name}
+                    </option>
+                  ))}
+                </select>
+              </div>
+
+              <div>
+                <label className="block text-xs font-semibold text-[#4C4A6E] mb-1">
+                  Registration / Join Date
+                </label>
+                <select
+                  value={stagedMapping.registrationDateColumn || ''}
+                  onChange={(e) =>
+                    setStagedMapping((prev) =>
+                      prev ? { ...prev, registrationDateColumn: e.target.value || null } : prev
+                    )
+                  }
+                  className="w-full rounded-xl border border-purple-200 bg-[#F6F3FF]/40 px-3 py-2 text-xs font-medium text-[#15152F]"
+                >
+                  <option value="">Not mapped</option>
+                  {stagedImport.columns.map((c) => (
+                    <option key={c.name} value={c.name}>
+                      {c.name}
+                    </option>
+                  ))}
+                </select>
+              </div>
+
+              <div>
+                <label className="block text-xs font-semibold text-[#4C4A6E] mb-1">
+                  Churn / Cancellation Date (Audit Only)
+                </label>
+                <select
+                  value={stagedMapping.churnDateColumn || ''}
+                  onChange={(e) => {
+                    const nextChurnDate = e.target.value || null;
+                    setStagedMapping((prev) =>
+                      prev
+                        ? {
+                            ...prev,
+                            churnDateColumn: nextChurnDate,
+                            featureColumns: nextChurnDate
+                              ? prev.featureColumns.filter((c) => c !== nextChurnDate)
+                              : prev.featureColumns,
+                          }
+                        : prev
+                    );
+                  }}
+                  className="w-full rounded-xl border border-purple-200 bg-[#F6F3FF]/40 px-3 py-2 text-xs font-medium text-[#15152F]"
+                >
+                  <option value="">Not present (safe)</option>
+                  {stagedImport.columns.map((c) => (
+                    <option key={c.name} value={c.name}>
+                      {c.name}
+                    </option>
+                  ))}
+                </select>
+              </div>
             </div>
 
             <div>
               <label className="block text-xs font-semibold text-[#4C4A6E] mb-2">
                 Prepared Customer Attributes ({stagedMapping.featureColumns.length} selected for
-                Customer data preparation)
+                Customer data preparation — target &amp; post-outcome dates excluded)
               </label>
               <div className="flex flex-wrap gap-2">
                 {stagedImport.columns
@@ -1086,6 +2222,7 @@ export const CustomerDataView: React.FC<CustomerDataViewProps> = ({
                     (c) =>
                       c.name !== stagedMapping.targetColumn &&
                       c.name !== stagedMapping.idColumn &&
+                      c.name !== stagedMapping.churnDateColumn &&
                       c.dataType !== 'identifier' &&
                       c.dataType !== 'date'
                   )
@@ -1141,16 +2278,20 @@ export const CustomerDataView: React.FC<CustomerDataViewProps> = ({
               </div>
             )}
           </div>
+          )}
 
-          {/* Churn Definition Builder */}
+          {/* Churn Definition Builder (Required for Historical/Custom, Optional for Tickets/Current/Cold-Start) */}
+          {stagedImport.uploadMode !== 'tickets' && (
           <div className="pt-4 border-t border-purple-100 space-y-4">
-            <div>
-              <h3 className="text-sm font-bold text-[#15152F]">
-                2. Confirm Business Churn Definition
-              </h3>
-              <p className="text-xs text-slate-500">
-                Defines how churn rate and attrition formulas are explained across reports and KPIs.
-              </p>
+            <div className="flex flex-col sm:flex-row sm:items-center sm:justify-between gap-2">
+              <div>
+                <h3 className="text-sm font-bold text-[#15152F]">
+                  2. {canCommitWithoutChurnDef ? 'Workspace Churn Definition (Optional for this upload)' : 'Confirm Business Churn Definition'}
+                </h3>
+                <p className="text-xs text-slate-500">
+                  Defines how churn rate and attrition formulas are explained across reports and KPIs.
+                </p>
+              </div>
             </div>
 
             <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-3.5">
@@ -1291,6 +2432,40 @@ export const CustomerDataView: React.FC<CustomerDataViewProps> = ({
                   className="w-full rounded-xl border border-purple-200 bg-[#F6F3FF]/40 px-3 py-2 text-xs text-[#15152F]"
                 />
               </div>
+
+              <div className="sm:col-span-2">
+                <label className="block text-xs font-semibold text-[#4C4A6E] mb-1">
+                  Expected Churn Status Column Hint (Optional)
+                </label>
+                <input
+                  type="text"
+                  value={stagedChurnDef.churnStatusColumnHint || ''}
+                  onChange={(e) =>
+                    setStagedChurnDef((prev) =>
+                      prev ? { ...prev, churnStatusColumnHint: e.target.value } : prev
+                    )
+                  }
+                  placeholder="e.g. churn_status, exited, discontinued"
+                  className="w-full rounded-xl border border-purple-200 bg-[#F6F3FF]/40 px-3 py-2 text-xs font-mono text-[#15152F]"
+                />
+              </div>
+
+              <div className="sm:col-span-2">
+                <label className="block text-xs font-semibold text-[#4C4A6E] mb-1">
+                  Cancellation / Churn Date Column Hint (Optional)
+                </label>
+                <input
+                  type="text"
+                  value={stagedChurnDef.cancellationDateColumnHint || ''}
+                  onChange={(e) =>
+                    setStagedChurnDef((prev) =>
+                      prev ? { ...prev, cancellationDateColumnHint: e.target.value } : prev
+                    )
+                  }
+                  placeholder="e.g. churn_date, cancellation_date"
+                  className="w-full rounded-xl border border-purple-200 bg-[#F6F3FF]/40 px-3 py-2 text-xs font-mono text-[#15152F]"
+                />
+              </div>
             </div>
 
             <div className="bg-[#F5F3FF] border border-purple-200/80 rounded-xl p-3.5 text-xs text-[#15152F] space-y-2">
@@ -1300,26 +2475,90 @@ export const CustomerDataView: React.FC<CustomerDataViewProps> = ({
               </div>
             </div>
 
-            <label className="flex items-start gap-2.5 text-xs text-[#15152F] cursor-pointer pt-1">
-              <input
-                type="checkbox"
-                checked={stagedChurnDef.confirmedByUser}
-                onChange={(e) =>
-                  setStagedChurnDef((prev) =>
-                    prev ? { ...prev, confirmedByUser: e.target.checked } : prev
-                  )
-                }
-                className="mt-0.5 rounded border-purple-300 accent-[#7655E8]"
-              />
-              <span className="font-semibold">
-                I confirm this churn definition and column mapping accurately represent our
-                organization&apos;s dataset.
-              </span>
-            </label>
+            {!canCommitWithoutChurnDef && (
+              <label className="flex items-start gap-2.5 text-xs text-[#15152F] cursor-pointer pt-1">
+                <input
+                  type="checkbox"
+                  checked={stagedChurnDef.confirmedByUser}
+                  onChange={(e) =>
+                    setStagedChurnDef((prev) =>
+                      prev ? { ...prev, confirmedByUser: e.target.checked } : prev
+                    )
+                  }
+                  className="mt-0.5 rounded border-purple-300 accent-[#7655E8]"
+                />
+                <span className="font-semibold">
+                  I confirm this churn definition and column mapping accurately represent our
+                  organization&apos;s dataset.
+                </span>
+              </label>
+            )}
           </div>
+          )}
 
-          {/* Staged Sample Rows Preview */}
-          {stagedImport.previewRows.length > 0 && (
+          {/* Customer-Centric Staged Validation Preview Table */}
+          {stagedImport.rowValidation && stagedImport.rowValidation.previewRecords.length > 0 ? (
+            <div className="pt-4 border-t border-purple-100 space-y-2">
+              <div className="flex items-center justify-between gap-2">
+                <div className="text-xs font-bold text-[#15152F]">
+                  Customer Validation Preview (First {stagedImport.rowValidation.previewRecords.length} Records)
+                </div>
+                <span className="text-[11px] font-mono text-slate-500">
+                  Scale: {satisfactionScale.toUpperCase()}
+                </span>
+              </div>
+              <div className="overflow-x-auto border border-purple-100 rounded-xl">
+                <table className="w-full text-left border-collapse text-xs">
+                  <thead className="bg-[#F5F3FF] text-[#4C4A6E] border-b border-purple-100">
+                    <tr>
+                      <th className="py-2 px-3 whitespace-nowrap font-semibold">Customer ID</th>
+                      <th className="py-2 px-3 whitespace-nowrap font-semibold">Customer Name</th>
+                      <th className="py-2 px-3 whitespace-nowrap font-semibold">Status</th>
+                      <th className="py-2 px-3 whitespace-nowrap font-semibold text-right">Tenure</th>
+                      <th className="py-2 px-3 whitespace-nowrap font-semibold text-right">Satisfaction</th>
+                      <th className="py-2 px-3 whitespace-nowrap font-semibold text-right">Complaints</th>
+                      <th className="py-2 px-3 whitespace-nowrap font-semibold text-right">Tickets</th>
+                      <th className="py-2 px-3 whitespace-nowrap font-semibold text-right">Avg Resolution</th>
+                      <th className="py-2 px-3 whitespace-nowrap font-semibold text-right">Revenue</th>
+                      <th className="py-2 px-3 whitespace-nowrap font-semibold">Churn Status</th>
+                      <th className="py-2 px-3 whitespace-nowrap font-semibold">Validation</th>
+                      <th className="py-2 px-3 whitespace-nowrap font-semibold">Notes</th>
+                    </tr>
+                  </thead>
+                  <tbody className="divide-y divide-purple-50 font-mono tabular-nums">
+                    {stagedImport.rowValidation.previewRecords.map((rec) => {
+                      const statusColor =
+                        rec.validationStatus === 'Error'
+                          ? 'text-[#E04F44] font-bold'
+                          : rec.validationStatus === 'Warning'
+                            ? 'text-amber-700 font-bold'
+                            : 'text-[#0E9F6E] font-semibold';
+                      return (
+                        <tr key={`${rec.rowIndex}-${rec.customerId}`} className="hover:bg-[#F5F3FF]/50">
+                          <td className="py-2 px-3 whitespace-nowrap font-semibold text-[#15152F]">{rec.customerId}</td>
+                          <td className="py-2 px-3 whitespace-nowrap font-sans text-slate-700">{rec.customerName}</td>
+                          <td className="py-2 px-3 whitespace-nowrap font-sans text-slate-700">{rec.subscriptionStatus}</td>
+                          <td className="py-2 px-3 whitespace-nowrap text-right text-slate-700">{rec.tenure}</td>
+                          <td className="py-2 px-3 whitespace-nowrap text-right text-slate-700">{rec.satisfactionScore}</td>
+                          <td className="py-2 px-3 whitespace-nowrap text-right text-slate-700">{rec.complaints}</td>
+                          <td className="py-2 px-3 whitespace-nowrap text-right text-slate-700">{rec.ticketsRaised}</td>
+                          <td className="py-2 px-3 whitespace-nowrap text-right text-slate-700">{rec.avgResolutionTime}</td>
+                          <td className="py-2 px-3 whitespace-nowrap text-right text-slate-700">{rec.revenue}</td>
+                          <td className="py-2 px-3 whitespace-nowrap font-sans text-slate-700">{rec.churnStatus}</td>
+                          <td className={`py-2 px-3 whitespace-nowrap font-sans ${statusColor}`}>
+                            {rec.validationStatus}
+                          </td>
+                          <td className="py-2 px-3 font-sans text-[11px] text-slate-600 min-w-[200px]">
+                            {rec.validationNotes.length > 0 ? rec.validationNotes.join('; ') : 'Passed'}
+                          </td>
+                        </tr>
+                      );
+                    })}
+                  </tbody>
+                </table>
+              </div>
+            </div>
+          ) : stagedImport.previewRows.length > 0 ? (
             <div className="pt-4 border-t border-purple-100 space-y-2">
               <div className="text-xs font-bold text-[#15152F]">
                 Sample Preview (First {Math.min(5, stagedImport.previewRows.length)} Rows)
@@ -1349,25 +2588,78 @@ export const CustomerDataView: React.FC<CustomerDataViewProps> = ({
                 </table>
               </div>
             </div>
-          )}
+          ) : null}
 
-          <div className="flex flex-wrap items-center justify-end gap-3 pt-2">
-            <button
-              type="button"
-              onClick={onCancelStaged}
-              className="px-4 py-2 border border-purple-200 rounded-xl text-xs font-semibold text-slate-600 hover:bg-[#F5F3FF] cursor-pointer"
-            >
-              Cancel
-            </button>
-            <button
-              type="button"
-              disabled={isCommitting || !stagedChurnDef.confirmedByUser}
-              onClick={handleCommitStaged}
-              className="inline-flex items-center gap-2 px-5 py-2.5 bg-gradient-to-r from-[#7655E8] to-[#E84FA8] hover:opacity-95 text-white text-xs font-bold rounded-xl shadow-md shadow-[#7655E8]/25 disabled:opacity-45 cursor-pointer"
-            >
-              <CheckCircle2 className="w-4 h-4" />
-              <span>{isCommitting ? 'Importing Dataset...' : 'Confirm & Import Dataset'}</span>
-            </button>
+          {/* Import Commit Mode Selector & Confirmation Actions */}
+          <div className="flex flex-col sm:flex-row sm:items-center sm:justify-between gap-4 pt-3 border-t border-purple-100">
+            {stagedImport.uploadMode !== 'tickets' &&
+            stagedImport.rowValidation &&
+            stagedImport.rowValidation.errorCount > 0 ? (
+              <div className="flex flex-wrap items-center gap-3 text-xs">
+                <span className="font-semibold text-[#15152F]">Commit Scope:</span>
+                <label className="inline-flex items-center gap-1.5 cursor-pointer">
+                  <input
+                    type="radio"
+                    name="importMode"
+                    checked={importMode === 'valid_only'}
+                    onChange={() => setImportMode('valid_only')}
+                    className="accent-[#7655E8]"
+                  />
+                  <span className="font-semibold text-[#0E9F6E]">
+                    Import Valid Rows Only ({stagedImport.rowValidation.validCount + stagedImport.rowValidation.warningCount} clean/warning rows)
+                  </span>
+                </label>
+                <label className="inline-flex items-center gap-1.5 cursor-pointer">
+                  <input
+                    type="radio"
+                    name="importMode"
+                    checked={importMode === 'all'}
+                    onChange={() => setImportMode('all')}
+                    className="accent-[#7655E8]"
+                  />
+                  <span className="text-slate-600">
+                    Include Flagged Error Rows ({stagedImport.rowValidation.totalRows} total)
+                  </span>
+                </label>
+              </div>
+            ) : (
+              <div className="text-xs text-slate-500">
+                {stagedImport.uploadMode === 'tickets'
+                  ? 'Links deduplicated Ticket_Data metrics onto matching existing customers.'
+                  : 'Ready to commit validated records into your workspace.'}
+              </div>
+            )}
+
+            <div className="flex flex-wrap items-center justify-end gap-3">
+              <button
+                type="button"
+                onClick={onCancelStaged}
+                className="px-4 py-2 border border-purple-200 rounded-xl text-xs font-semibold text-slate-600 hover:bg-[#F5F3FF] cursor-pointer"
+              >
+                Cancel
+              </button>
+              <button
+                type="button"
+                disabled={
+                  isCommitting ||
+                  (!canCommitWithoutChurnDef && !stagedChurnDef.confirmedByUser) ||
+                  (stagedImport.uploadMode === 'tickets' && !dataset)
+                }
+                onClick={handleCommitStaged}
+                className="inline-flex items-center gap-2 px-5 py-2.5 bg-gradient-to-r from-[#7655E8] to-[#E84FA8] hover:opacity-95 text-white text-xs font-bold rounded-xl shadow-md shadow-[#7655E8]/25 disabled:opacity-45 cursor-pointer"
+              >
+                <CheckCircle2 className="w-4 h-4" />
+                <span>
+                  {isCommitting
+                    ? 'Importing Dataset...'
+                    : stagedImport.uploadMode === 'tickets'
+                      ? 'Confirm & Link Ticket History'
+                      : stagedImport.uploadPathway === 'current_prediction'
+                        ? 'Confirm & Score Current Customers'
+                        : 'Confirm & Import Dataset'}
+                </span>
+              </button>
+            </div>
           </div>
         </div>
       )}
@@ -1384,9 +2676,9 @@ export const CustomerDataView: React.FC<CustomerDataViewProps> = ({
           />
 
           {/* Validation & Data Quality Report */}
-          <div className="bg-white border border-purple-100/90 rounded-2xl shadow-sm shadow-purple-950/[0.04] p-6 space-y-4">
-            <div className="flex flex-col sm:flex-row sm:items-center sm:justify-between gap-2">
-              <div>
+          <div className="bg-white border border-purple-100/90 rounded-2xl shadow-sm shadow-purple-950/[0.04] p-5 sm:p-6 space-y-4 min-w-0">
+            <div className="flex flex-col sm:flex-row sm:items-center sm:justify-between gap-3">
+              <div className="min-w-0 flex-1">
                 <h2 className="text-base font-bold text-[#15152F]">
                   Data Validation & Quality Report
                 </h2>
@@ -1656,12 +2948,100 @@ export const CustomerDataView: React.FC<CustomerDataViewProps> = ({
                       ))}
                     </select>
                   </div>
+
+                  <div>
+                    <label className="block text-xs font-semibold text-[#4C4A6E] mb-1">
+                      Customer Status Column (Operational)
+                    </label>
+                    <select
+                      value={dataset.mapping.statusColumn || ''}
+                      onChange={(e) =>
+                        onUpdateMapping({
+                          statusColumn: e.target.value ? e.target.value : null,
+                        })
+                      }
+                      className="w-full rounded-xl border border-purple-200 bg-[#F6F3FF]/40 px-3 py-2 text-sm text-[#15152F] focus:outline-none focus:border-[#7655E8]"
+                    >
+                      <option value="">Not mapped</option>
+                      {dataset.columns.map((c) => (
+                        <option key={c.name} value={c.name}>
+                          {c.name}
+                        </option>
+                      ))}
+                    </select>
+                  </div>
+
+                  <div>
+                    <label className="block text-xs font-semibold text-[#4C4A6E] mb-1">
+                      Observation Snapshot Date
+                    </label>
+                    <select
+                      value={dataset.mapping.observationDateColumn || ''}
+                      onChange={(e) =>
+                        onUpdateMapping({
+                          observationDateColumn: e.target.value ? e.target.value : null,
+                        })
+                      }
+                      className="w-full rounded-xl border border-purple-200 bg-[#F6F3FF]/40 px-3 py-2 text-sm text-[#15152F] focus:outline-none focus:border-[#7655E8]"
+                    >
+                      <option value="">Not mapped</option>
+                      {dataset.columns.map((c) => (
+                        <option key={c.name} value={c.name}>
+                          {c.name}
+                        </option>
+                      ))}
+                    </select>
+                  </div>
+
+                  <div>
+                    <label className="block text-xs font-semibold text-[#4C4A6E] mb-1">
+                      Registration Date
+                    </label>
+                    <select
+                      value={dataset.mapping.registrationDateColumn || ''}
+                      onChange={(e) =>
+                        onUpdateMapping({
+                          registrationDateColumn: e.target.value ? e.target.value : null,
+                        })
+                      }
+                      className="w-full rounded-xl border border-purple-200 bg-[#F6F3FF]/40 px-3 py-2 text-sm text-[#15152F] focus:outline-none focus:border-[#7655E8]"
+                    >
+                      <option value="">Not mapped</option>
+                      {dataset.columns.map((c) => (
+                        <option key={c.name} value={c.name}>
+                          {c.name}
+                        </option>
+                      ))}
+                    </select>
+                  </div>
+
+                  <div>
+                    <label className="block text-xs font-semibold text-[#4C4A6E] mb-1">
+                      Churn / Cancellation Date (Audit Only)
+                    </label>
+                    <select
+                      value={dataset.mapping.churnDateColumn || ''}
+                      onChange={(e) =>
+                        onUpdateMapping({
+                          churnDateColumn: e.target.value ? e.target.value : null,
+                        })
+                      }
+                      className="w-full rounded-xl border border-purple-200 bg-[#F6F3FF]/40 px-3 py-2 text-sm text-[#15152F] focus:outline-none focus:border-[#7655E8]"
+                    >
+                      <option value="">Not present (safe)</option>
+                      {dataset.columns.map((c) => (
+                        <option key={c.name} value={c.name}>
+                          {c.name}
+                        </option>
+                      ))}
+                    </select>
+                  </div>
                 </div>
 
                 <div>
                   <label className="block text-xs font-semibold text-[#4C4A6E] mb-2">
                     Prepared Customer Attributes ({dataset.mapping.featureColumns.length}{' '}
-                    selected for Customer data preparation)
+                    selected for Customer data preparation — target &amp; post-outcome dates excluded)
                   </label>
                   <div className="flex flex-wrap gap-2">
                     {dataset.columns
@@ -1669,6 +3049,7 @@ export const CustomerDataView: React.FC<CustomerDataViewProps> = ({
                         (c) =>
                           c.name !== dataset.mapping.targetColumn &&
                           c.name !== dataset.mapping.idColumn &&
+                          c.name !== dataset.mapping.churnDateColumn &&
                           c.dataType !== 'identifier' &&
                           c.dataType !== 'date'
                       )
@@ -1700,7 +3081,7 @@ export const CustomerDataView: React.FC<CustomerDataViewProps> = ({
           </div>
 
           {/* Column Schema Summary */}
-          <div className="bg-white border border-purple-100/90 rounded-2xl shadow-sm shadow-purple-950/[0.04] p-6 space-y-4">
+          <div className="bg-white border border-purple-100/90 rounded-2xl shadow-sm shadow-purple-950/[0.04] p-5 sm:p-6 space-y-4 min-w-0">
             <div>
               <h2 className="text-base font-bold text-[#15152F]">
                 Detected Column Schema & Missing Values
@@ -1785,7 +3166,7 @@ export const CustomerDataView: React.FC<CustomerDataViewProps> = ({
           </div>
 
           {/* Customer Records Table */}
-          <div className="bg-white border border-purple-100/90 rounded-2xl shadow-sm shadow-purple-950/[0.04] p-6 space-y-4">
+          <div className="bg-white border border-purple-100/90 rounded-2xl shadow-sm shadow-purple-950/[0.04] p-5 sm:p-6 space-y-4 min-w-0">
             <div className="flex flex-col sm:flex-row sm:items-center sm:justify-between gap-3">
               <div>
                 <h2 className="text-base font-bold text-[#15152F]">
@@ -1913,6 +3294,134 @@ export const CustomerDataView: React.FC<CustomerDataViewProps> = ({
             </div>
           </div>
         </>
+      )}
+
+      {/* Sample Dataset Preview Modal */}
+      {showSampleModal && (
+        <div className="fixed inset-0 z-50 bg-[#15152F]/55 backdrop-blur-xs flex items-center justify-center p-4">
+          <div className="bg-white border border-purple-100 rounded-2xl shadow-2xl max-w-5xl w-full max-h-[85vh] flex flex-col">
+            <div className="px-6 py-4 border-b border-purple-100 flex items-center justify-between gap-4">
+              <div>
+                <h3 className="text-base font-bold text-[#15152F]">
+                  Sample Customer Dataset Preview ({tmpl.label})
+                </h3>
+                <p className="text-xs text-slate-500 mt-0.5">
+                  Rows marked with [Example] show expected formatting before you replace them with real customer records.
+                </p>
+              </div>
+              <button
+                type="button"
+                onClick={() => setShowSampleModal(false)}
+                className="p-1.5 rounded-lg text-slate-400 hover:text-[#15152F] hover:bg-[#F6F3FF] cursor-pointer transition-colors"
+              >
+                <X className="w-4 h-4" />
+              </button>
+            </div>
+            <div className="p-6 overflow-auto space-y-4">
+              <div className="overflow-x-auto border border-purple-100 rounded-xl">
+                <table className="w-full text-left border-collapse text-xs">
+                  <thead className="bg-[#F5F3FF] text-[#4C4A6E] border-b border-purple-100">
+                    <tr>
+                      <th className="py-2.5 px-3 whitespace-nowrap">customer_id</th>
+                      <th className="py-2.5 px-3 whitespace-nowrap">customer_name</th>
+                      <th className="py-2.5 px-3 whitespace-nowrap">customer_status</th>
+                      <th className="py-2.5 px-3 whitespace-nowrap text-right">tenure_months</th>
+                      <th className="py-2.5 px-3 whitespace-nowrap text-right">satisfaction</th>
+                      <th className="py-2.5 px-3 whitespace-nowrap text-right">complaints</th>
+                      <th className="py-2.5 px-3 whitespace-nowrap text-right">tickets</th>
+                      <th className="py-2.5 px-3 whitespace-nowrap text-right">avg_res_days</th>
+                      <th className="py-2.5 px-3 whitespace-nowrap text-right">total_revenue</th>
+                      <th className="py-2.5 px-3 whitespace-nowrap">churn_status</th>
+                    </tr>
+                  </thead>
+                  <tbody className="divide-y divide-purple-50 font-mono tabular-nums">
+                    {SAMPLE_PREVIEW_RECORDS.map((row) => (
+                      <tr key={row.customer_id}>
+                        <td className="py-2 px-3 font-semibold text-[#15152F]">{row.customer_id}</td>
+                        <td className="py-2 px-3 font-sans text-slate-700">{row.customer_name}</td>
+                        <td className="py-2 px-3 font-sans text-slate-700">{row.customer_status}</td>
+                        <td className="py-2 px-3 text-right">{row.tenure_months}</td>
+                        <td className="py-2 px-3 text-right">{row.customer_satisfaction_score}</td>
+                        <td className="py-2 px-3 text-right">{row.total_complaints}</td>
+                        <td className="py-2 px-3 text-right">{row.total_tickets_raised}</td>
+                        <td className="py-2 px-3 text-right">{row.average_resolution_days}</td>
+                        <td className="py-2 px-3 text-right">${row.total_revenue}</td>
+                        <td className="py-2 px-3 font-sans font-semibold">{row.churn_status}</td>
+                      </tr>
+                    ))}
+                  </tbody>
+                </table>
+              </div>
+              <div className="flex flex-wrap items-center justify-end gap-2.5">
+                <button
+                  type="button"
+                  onClick={() => handleDownloadTemplate('xlsx', undefined, 'comprehensive')}
+                  className="inline-flex items-center gap-1.5 px-4 py-2 rounded-xl bg-[#11142B] text-white text-xs font-bold hover:bg-[#1C2147] cursor-pointer"
+                >
+                  <FileSpreadsheet className="w-3.5 h-3.5 text-[#35C5E8]" />
+                  <span>Download Excel Template (.xlsx)</span>
+                </button>
+              </div>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* Data Requirements & 7-Category Schema Modal */}
+      {showRequirementsModal && (
+        <div className="fixed inset-0 z-50 bg-[#15152F]/55 backdrop-blur-xs flex items-center justify-center p-4">
+          <div className="bg-white border border-purple-100 rounded-2xl shadow-2xl max-w-4xl w-full max-h-[85vh] flex flex-col">
+            <div className="px-6 py-4 border-b border-purple-100 flex items-center justify-between gap-4">
+              <div>
+                <h3 className="text-base font-bold text-[#15152F]">
+                  ChurnSight Import Centre · 7-Category Data Requirements
+                </h3>
+                <p className="text-xs text-slate-500 mt-0.5">
+                  Multi-sheet .xlsx exports include Customer_Data, Ticket_Data, Field_Guide, and Instructions tabs.
+                </p>
+              </div>
+              <button
+                type="button"
+                onClick={() => setShowRequirementsModal(false)}
+                className="p-1.5 rounded-lg text-slate-400 hover:text-[#15152F] hover:bg-[#F6F3FF] cursor-pointer transition-colors"
+              >
+                <X className="w-4 h-4" />
+              </button>
+            </div>
+            <div className="p-6 overflow-y-auto space-y-5">
+              {IMPORT_FIELD_CATEGORIES.map((group) => (
+                <div key={group.category} className="space-y-2">
+                  <div className="flex flex-col sm:flex-row sm:items-baseline sm:justify-between gap-1">
+                    <h4 className="text-xs font-bold text-[#15152F]">{group.category}</h4>
+                    <span className="text-[11px] text-slate-500">{group.usedFor}</span>
+                  </div>
+                  <div className="overflow-x-auto border border-purple-100 rounded-xl">
+                    <table className="w-full text-left border-collapse text-xs">
+                      <thead className="bg-[#F5F3FF] text-[#4C4A6E] border-b border-purple-100">
+                        <tr>
+                          <th className="py-2 px-3">Field Name</th>
+                          <th className="py-2 px-3">Tier</th>
+                          <th className="py-2 px-3">Accepted Format</th>
+                          <th className="py-2 px-3">Example</th>
+                        </tr>
+                      </thead>
+                      <tbody className="divide-y divide-purple-50">
+                        {group.fields.map((f) => (
+                          <tr key={f.name}>
+                            <td className="py-2 px-3 font-mono font-semibold text-[#15152F]">{f.name}</td>
+                            <td className="py-2 px-3 font-medium text-[#7655E8]">{f.requirement}</td>
+                            <td className="py-2 px-3 text-slate-600">{f.format}</td>
+                            <td className="py-2 px-3 font-mono text-slate-700">{f.example}</td>
+                          </tr>
+                        ))}
+                      </tbody>
+                    </table>
+                  </div>
+                </div>
+              ))}
+            </div>
+          </div>
+        </div>
       )}
 
       {/* Customer Attribute Detail Modal */}

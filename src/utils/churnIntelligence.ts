@@ -348,5 +348,65 @@ export function deriveCustomerIntelligence(
     });
   }
 
+  // 6. Support Friction & Satisfaction Signals (when complaint, ticket, or satisfaction columns exist)
+  const comparisons = analytics.numericComparisons || [];
+  const satComp = comparisons.find((c) =>
+    /(satisfaction|csat|nps|feedback_score)/i.test(c.column)
+  );
+  if (satComp && satComp.stayedAvg !== satComp.churnedAvg) {
+    const gap = satComp.stayedAvg - satComp.churnedAvg;
+    insights.push({
+      id: 'satisfaction-gap-signal',
+      category: 'Customer Satisfaction',
+      title:
+        gap > 0
+          ? `Lower "${satComp.column}" Linked to Churn`
+          : `"${satComp.column}" Variance Across Outcomes`,
+      statLabel: 'Retained vs Churned Mean',
+      statValue: `${satComp.stayedAvg.toFixed(1)} vs ${satComp.churnedAvg.toFixed(1)}`,
+      explanation: `Retained ${entityLower} averaged ${satComp.stayedAvg.toFixed(
+        2
+      )} on "${satComp.column}", compared with ${satComp.churnedAvg.toFixed(
+        2
+      )} among churned ${entityLower}.`,
+      recommendation:
+        'Trigger proactive account reviews immediately whenever satisfaction survey responses dip below your workspace baseline.',
+      tone: 'purple',
+      meterPercent: Math.min(100, Math.max(20, Math.abs(gap) * 15)),
+    });
+  }
+
+  const frictionComp = comparisons.find((c) =>
+    /(complaint|unresolved_ticket|open_ticket|total_tickets_raised|average_resolution_days)/i.test(
+      c.column
+    )
+  );
+  if (frictionComp && frictionComp.churnedAvg > frictionComp.stayedAvg) {
+    insights.push({
+      id: 'service-friction-signal',
+      category: 'Complaints & Support Friction',
+      title: `Elevated "${frictionComp.column}" Precedes Attrition`,
+      statLabel: 'Churned vs Retained Mean',
+      statValue: `${frictionComp.churnedAvg.toFixed(1)} vs ${frictionComp.stayedAvg.toFixed(1)}`,
+      explanation: `Churned ${entityLower} logged an average of ${frictionComp.churnedAvg.toFixed(
+        2
+      )} on "${frictionComp.column}", compared with ${frictionComp.stayedAvg.toFixed(
+        2
+      )} for retained ${entityLower}.`,
+      recommendation:
+        'Escalate accounts with repeat complaints or open unresolved tickets to priority SLA resolution queues.',
+      tone: 'danger',
+      meterPercent: Math.min(
+        100,
+        Math.max(
+          22,
+          frictionComp.churnedAvg > 0
+            ? (frictionComp.churnedAvg / (frictionComp.churnedAvg + Math.max(0.5, frictionComp.stayedAvg))) * 100
+            : 40
+        )
+      ),
+    });
+  }
+
   return insights;
 }

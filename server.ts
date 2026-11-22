@@ -12,6 +12,7 @@ import type {
   ColumnMapping,
   CompanyWorkspaceInfo,
   CustomerRelationshipType,
+  CustomerValueConfig,
   DataPrivacySettings,
   DatasetState,
   IndustryKey,
@@ -21,23 +22,33 @@ import type {
   PredictionPipelineStatus,
   PredictionPipelineStep,
   RegisterCompanyRequest,
+  RowValidationReport,
+  SatisfactionScale,
   SplitStrategy,
+  StagedDatasetImport,
   SubscriptionPlanTier,
+  TicketAggregationSummary,
   TrainModelRequest,
+  UploadPathway,
   UserPermissions,
   UserRole,
   WorkspaceUsageSummary,
 } from './src/types/churn.ts';
 import {
   authenticateUser,
+  AuthServiceError,
   changeOwnPassword,
   checkEmailRegisteredForReset,
   createCompanyUser,
+  createSessionForUser,
+  ensureAuthHydrated,
+  flushPendingAuthWrites,
   getCompanyById,
   getSessionContext,
   hasAnyRegisteredUsers,
   listAllCompanies,
   listCompanyUsers,
+  refreshSessionIfNeeded,
   registerCompanyAndAdmin,
   revokeSession,
   updateCompanyProfile,
@@ -53,6 +64,7 @@ import {
   computeDatasetQualityStats,
   detectPositiveClass,
   evaluateChurnReadiness,
+  extractCustomerNameFromRow,
   getUniqueColumnValues,
   isMissingValue,
   parseSpreadsheetUpload,
@@ -64,17 +76,36 @@ import {
 } from './server/mlEngine.ts';
 import {
   generateIndustryTemplateExport,
+  generatePredictionInputTemplateExport,
+  normalizeTemplateMode,
+  type LegacyCompatibleTemplateMode,
   type TemplateFormat,
-  type TemplateMode,
 } from './server/industryTemplates.ts';
+import {
+  aggregateTicketsByCustomer,
+  checkModelCompatibility,
+  mergeTicketsIntoCustomerRows,
+  parseMultiSheetSpreadsheetUpload,
+  validateCustomerImportRows,
+} from './server/importEngine.ts';
+import {
+  computeCustomerValueIntelligence,
+  DEFAULT_CUSTOMER_VALUE_CONFIG,
+  normalizeValueConfig,
+} from './server/valueEngine.ts';
 import { generateSampleIndustryCsv } from './server/sampleDataset.ts';
+import { getPersistenceStatus, isRemoteStoreConfigured } from './server/remoteStore.ts';
 import {
   createRateLimiter,
+  ensureAuditLogsHydrated,
+  flushPendingAuditWrites,
   listCompanyAuditLogs,
   listPlatformAuditLogs,
   recordAuditEvent,
 } from './server/security.ts';
 import {
+  ensureWorkspaceHydrated,
+  flushAllPendingWorkspaceWrites,
   getCompanyWorkspace,
   persistCompanyWorkspace,
   type CompanyWorkspaceState,
@@ -111,6 +142,34 @@ function buildUsageSummary(
   };
 }
 
+function serializeActiveModelEvaluation(ws: CompanyWorkspaceState) {
+  if (!ws.activeModelArtifact) return null;
+  const evaluation = ws.activeModelArtifact.evaluation;
+  const ds = ws.activeDataset;
+  if (!ds || ds.rows.length === 0) return evaluation;
+
+  const idCol = ds.state.mapping.idColumn;
+  const nameByCustomerId = new Map<string, string>();
+  ds.rows.forEach((row, idx) => {
+    const rawId =
+      idCol && row[idCol] ? row[idCol].trim() : `CUST-${String(idx + 1).padStart(4, '0')}`;
+    const name = extractCustomerNameFromRow(row);
+    if (rawId && name) {
+      nameByCustomerId.set(rawId.toLowerCase(), name);
+    }
+  });
+
+  return {
+    ...evaluation,
+    predictions: evaluation.predictions.map((p) => {
+      const matchedName =
+        nameByCustomerId.get((p.customerId || '').trim().toLowerCase()) ||
+        extractCustomerNameFromRow(p.attributes);
+      return matchedName ? { ...p, customerName: matchedName } : p;
+    }),
+  };
+}
+
 function enforceDatasetPlanQuota(
   company: CompanyWorkspaceInfo,
   rowCount: number,
@@ -135,21 +194,38 @@ function commitRowsIntoWorkspace(
   params: {
     fileName: string;
     sourceFormat: 'csv' | 'xlsx';
+    uploadPathway?: UploadPathway;
+    satisfactionScale?: SatisfactionScale;
     headers: string[];
     rows: Record<string, string>[];
     mapping?: ColumnMapping;
     churnDefinition?: ChurnDefinition;
+    rowValidation?: RowValidationReport;
+    ticketAggregation?: TicketAggregationSummary | null;
+    preserveModelArtifact?: boolean;
     isSample?: boolean;
   }
 ): {
   dataset: DatasetState;
   analytics: AnalyticsSummary;
 } {
-  const { fileName, sourceFormat, headers, rows, isSample = false } = params;
+  const {
+    fileName,
+    sourceFormat,
+    uploadPathway,
+    satisfactionScale,
+    headers,
+    rows,
+    rowValidation,
+    ticketAggregation = null,
+    preserveModelArtifact = false,
+    isSample = false,
+  } = params;
   const columns = profileColumns(headers, rows);
   const { duplicateCount, missingCellCount } = computeDatasetQualityStats(headers, rows);
 
-  const mapping = params.mapping || autoDetectMapping(columns, rows, company.industry);
+  const mapping =
+    params.mapping || autoDetectMapping(columns, rows, company.industry, uploadPathway);
   const churnDef = params.churnDefinition || company.churnDefinition;
   const targetUniqueValues = mapping.targetColumn
     ? getUniqueColumnValues(rows, mapping.targetColumn)
@@ -174,6 +250,8 @@ function commitRowsIntoWorkspace(
     datasetId: `ds_${Date.now()}`,
     fileName,
     sourceFormat,
+    uploadPathway,
+    satisfactionScale: satisfactionScale || ws.satisfactionScale || company.satisfactionScale || '1-5',
     isSample,
     uploadedAt: new Date().toISOString(),
     rowCount: rows.length,
@@ -192,13 +270,18 @@ function commitRowsIntoWorkspace(
     churnReadinessMessage: labelReadiness.churnReadinessMessage,
     readiness,
     churnDefinition: churnDef,
+    rowValidation,
+    ticketAggregation,
     previewRows: rows.slice(0, 15),
   };
 
   ws.activeDataset = { state, rows };
   ws.activeAnalytics = computeAnalytics(columns, rows, mapping, {}, churnDef);
-  ws.activeModelArtifact = null;
-  ws.modelHistory = [];
+  ws.ticketAggregation = ticketAggregation;
+  if (!preserveModelArtifact) {
+    ws.activeModelArtifact = null;
+    ws.modelHistory = [];
+  }
   ws.stagedImport = null;
 
   persistCompanyWorkspace(company.id, ws);
@@ -622,8 +705,17 @@ function parseCookies(cookieHeader: string | undefined): Record<string, string> 
 }
 
 function isHttpsRequest(req: Request): boolean {
-  const forwardedProto = String(req.headers['x-forwarded-proto'] || '').toLowerCase();
+  const forwardedProto = String(req.headers['x-forwarded-proto'] || '')
+    .split(',')[0]
+    .trim()
+    .toLowerCase();
   return req.secure || forwardedProto === 'https';
+}
+
+function isEmbeddedOrCrossSiteRequest(req: Request): boolean {
+  const embeddedHeader = String(req.headers['x-churnsight-embedded'] || '').trim();
+  const fetchSite = String(req.headers['sec-fetch-site'] || '').trim().toLowerCase();
+  return embeddedHeader === '1' || fetchSite === 'cross-site';
 }
 
 function setSessionCookie(
@@ -633,34 +725,55 @@ function setSessionCookie(
   maxAgeSeconds: number | null
 ): void {
   const https = isHttpsRequest(req);
+  const embedded = isEmbeddedOrCrossSiteRequest(req);
   const parts = [
     `${SESSION_COOKIE_NAME}=${encodeURIComponent(token)}`,
     'Path=/',
     'HttpOnly',
-    https ? 'SameSite=None' : 'SameSite=Lax',
+    https && embedded ? 'SameSite=None' : 'SameSite=Lax',
   ];
   if (maxAgeSeconds !== null) {
     parts.push(`Max-Age=${maxAgeSeconds}`);
+    parts.push(`Expires=${new Date(Date.now() + maxAgeSeconds * 1000).toUTCString()}`);
   }
   if (https) {
-    parts.push('Secure', 'Partitioned');
+    parts.push('Secure');
+    if (embedded) {
+      parts.push('Partitioned');
+    }
   }
   res.setHeader('Set-Cookie', parts.join('; '));
 }
 
 function clearSessionCookie(req: Request, res: Response): void {
   const https = isHttpsRequest(req);
-  const parts = [
-    `${SESSION_COOKIE_NAME}=`,
-    'Path=/',
-    'HttpOnly',
-    https ? 'SameSite=None' : 'SameSite=Lax',
-    'Max-Age=0',
+  const expired = 'Expires=Thu, 01 Jan 1970 00:00:00 GMT';
+  const cookies = [
+    [
+      `${SESSION_COOKIE_NAME}=`,
+      'Path=/',
+      'HttpOnly',
+      'SameSite=Lax',
+      'Max-Age=0',
+      expired,
+      ...(https ? ['Secure'] : []),
+    ].join('; '),
   ];
   if (https) {
-    parts.push('Secure', 'Partitioned');
+    cookies.push(
+      [
+        `${SESSION_COOKIE_NAME}=`,
+        'Path=/',
+        'HttpOnly',
+        'SameSite=None',
+        'Max-Age=0',
+        expired,
+        'Secure',
+        'Partitioned',
+      ].join('; ')
+    );
   }
-  res.setHeader('Set-Cookie', parts.join('; '));
+  res.setHeader('Set-Cookie', cookies);
 }
 
 function extractSessionToken(req: Request): string | undefined {
@@ -761,7 +874,10 @@ export function createApiApp() {
       res.setHeader('Vary', 'Origin');
       res.setHeader('Access-Control-Allow-Credentials', 'true');
       res.setHeader('Access-Control-Allow-Methods', 'GET,POST,PUT,PATCH,DELETE,OPTIONS');
-      res.setHeader('Access-Control-Allow-Headers', 'Content-Type,Authorization');
+      res.setHeader(
+        'Access-Control-Allow-Headers',
+        'Content-Type,Authorization,X-ChurnSight-Embedded'
+      );
     }
     if (req.method === 'OPTIONS') {
       res.status(204).end();
@@ -796,17 +912,66 @@ export function createApiApp() {
     next();
   });
 
+  // Hydrate persistent stores on serverless cold starts & flush remote writes before response completes
+  app.use('/api', async (req, res, next) => {
+    if (req.path === '/health') {
+      next();
+      return;
+    }
+    try {
+      await Promise.all([ensureAuthHydrated(), ensureAuditLogsHydrated()]);
+      const token = extractSessionToken(req);
+      let ctx = getSessionContext(token);
+      if (token && !ctx && isRemoteStoreConfigured()) {
+        await ensureAuthHydrated(true);
+        ctx = getSessionContext(token);
+      }
+      if (ctx) {
+        await ensureWorkspaceHydrated(ctx.company.id);
+      }
+
+      if (isRemoteStoreConfigured() && req.method !== 'GET' && req.method !== 'HEAD') {
+        const origJson = res.json.bind(res);
+        res.json = ((body: unknown) => {
+          Promise.all([
+            flushPendingAuthWrites(),
+            flushAllPendingWorkspaceWrites(),
+            flushPendingAuditWrites(),
+          ])
+            .catch(() => undefined)
+            .finally(() => {
+              origJson(body);
+            });
+          return res;
+        }) as Response['json'];
+      }
+      next();
+    } catch (err) {
+      next(err);
+    }
+  });
+
   // ---------------------------------------------------------------------------
   // Authentication & Registration Routes
   // ---------------------------------------------------------------------------
   app.get('/api/auth/status', (_req, res) => {
-    res.json({ hasRegisteredWorkspaces: hasAnyRegisteredUsers() });
+    const persistence = getPersistenceStatus();
+    res.json({
+      hasRegisteredWorkspaces: hasAnyRegisteredUsers(),
+      storagePersistent: persistence.persistent,
+      storageMode: persistence.mode,
+    });
   });
 
-  app.post('/api/auth/register-company', authLimiter, (req, res) => {
+  app.post('/api/auth/register-company', authLimiter, async (req, res) => {
     try {
+      if (isRemoteStoreConfigured()) {
+        await ensureAuthHydrated(true);
+      }
       const body = (req.body || {}) as RegisterCompanyRequest;
       const result = registerCompanyAndAdmin(body);
+      const session = createSessionForUser(result.user.id, true);
+      setSessionCookie(req, res, session.rawToken, session.maxAgeSeconds);
 
       recordAuditEvent({
         companyId: result.company.id,
@@ -818,21 +983,40 @@ export function createApiApp() {
         details: `Registered workspace "${result.company.name}" (${result.company.industry}, ${result.company.country})`,
       });
 
+      await Promise.all([flushPendingAuthWrites(), flushPendingAuditWrites()]);
+
       res.status(201).json({
-        company: result.company,
-        user: result.user,
-        message: 'Company workspace and administrator account created. You may now sign in.',
+        company: session.context.company,
+        user: session.context.user,
+        expiresAt: session.context.expiresAt,
+        rememberMe: session.rememberMe,
+        sessionToken: session.rawToken,
+        message: 'Company workspace and administrator account created.',
       });
     } catch (err: unknown) {
+      if (err instanceof AuthServiceError) {
+        res.status(err.statusCode).json({
+          error: err.message,
+          code: err.code,
+        });
+        return;
+      }
       const message = err instanceof Error ? err.message : 'Registration failed.';
-      res.status(400).json({ error: message });
+      const isDuplicate = /already exists|already registered/i.test(message);
+      res.status(isDuplicate ? 409 : 400).json({
+        error: message,
+        ...(isDuplicate ? { code: 'ACCOUNT_ALREADY_EXISTS' } : {}),
+      });
     }
   });
 
-  app.post('/api/auth/login', authLimiter, (req, res) => {
+  app.post('/api/auth/login', authLimiter, async (req, res) => {
     try {
+      if (isRemoteStoreConfigured()) {
+        await ensureAuthHydrated(true);
+      }
       const body = (req.body || {}) as LoginRequest;
-      const { rawToken, maxAgeSeconds, context } = authenticateUser(body);
+      const { rawToken, rememberMe, maxAgeSeconds, context } = authenticateUser(body);
       setSessionCookie(req, res, rawToken, maxAgeSeconds);
 
       recordAuditEvent({
@@ -845,19 +1029,29 @@ export function createApiApp() {
         details: `Signed in to ${context.company.name}`,
       });
 
+      await Promise.all([flushPendingAuthWrites(), flushPendingAuditWrites()]);
+
       res.json({
         user: context.user,
         company: context.company,
         expiresAt: context.expiresAt,
+        rememberMe,
         sessionToken: rawToken,
       });
     } catch (err: unknown) {
+      if (err instanceof AuthServiceError) {
+        res.status(err.statusCode).json({
+          error: err.message,
+          code: err.code,
+        });
+        return;
+      }
       const message = err instanceof Error ? err.message : 'Sign in failed.';
       res.status(401).json({ error: message });
     }
   });
 
-  app.post('/api/auth/logout', (req, res) => {
+  app.post('/api/auth/logout', async (req, res) => {
     const token = extractSessionToken(req);
     const ctx = getSessionContext(token);
     if (ctx) {
@@ -872,21 +1066,46 @@ export function createApiApp() {
       });
     }
     revokeSession(token);
+    await Promise.all([flushPendingAuthWrites(), flushPendingAuditWrites()]);
     clearSessionCookie(req, res);
     res.json({ ok: true });
   });
 
-  app.get('/api/auth/me', (req, res) => {
-    const ctx = getSessionContext(extractSessionToken(req));
-    if (!ctx) {
+  app.get('/api/auth/me', async (req, res) => {
+    const token = extractSessionToken(req);
+    const refreshed = refreshSessionIfNeeded(token, false);
+    if (!refreshed) {
       clearSessionCookie(req, res);
       res.status(401).json({ error: 'Not authenticated.' });
       return;
     }
+    if (refreshed.refreshed && token) {
+      setSessionCookie(req, res, token, refreshed.maxAgeSeconds);
+      await flushPendingAuthWrites();
+    }
     res.json({
-      user: ctx.user,
-      company: ctx.company,
-      expiresAt: ctx.expiresAt,
+      user: refreshed.context.user,
+      company: refreshed.context.company,
+      expiresAt: refreshed.context.expiresAt,
+      rememberMe: refreshed.context.rememberMe,
+    });
+  });
+
+  app.post('/api/auth/refresh', async (req, res) => {
+    const token = extractSessionToken(req);
+    const refreshed = refreshSessionIfNeeded(token, true);
+    if (!refreshed || !token) {
+      clearSessionCookie(req, res);
+      res.status(401).json({ error: 'Session expired. Please sign in again.' });
+      return;
+    }
+    setSessionCookie(req, res, token, refreshed.maxAgeSeconds);
+    await flushPendingAuthWrites();
+    res.json({
+      user: refreshed.context.user,
+      company: refreshed.context.company,
+      expiresAt: refreshed.context.expiresAt,
+      rememberMe: refreshed.context.rememberMe,
     });
   });
 
@@ -1040,7 +1259,7 @@ export function createApiApp() {
           company,
           dataset: updatedDataset,
           analytics: updatedAnalytics,
-          activeModel: ws.activeModelArtifact ? ws.activeModelArtifact.evaluation : null,
+          activeModel: serializeActiveModelEvaluation(ws),
           modelHistory: ws.modelHistory,
           automationStatus: ws.automationStatus,
           usage: buildUsageSummary(company, ws),
@@ -1118,7 +1337,7 @@ export function createApiApp() {
           company,
           dataset: ws.activeDataset ? ws.activeDataset.state : null,
           analytics: ws.activeAnalytics,
-          activeModel: ws.activeModelArtifact ? ws.activeModelArtifact.evaluation : null,
+          activeModel: serializeActiveModelEvaluation(ws),
           modelHistory: ws.modelHistory,
           automationStatus: ws.automationStatus,
           usage: buildUsageSummary(company, ws),
@@ -1290,7 +1509,7 @@ export function createApiApp() {
       company,
       dataset: ws.activeDataset ? ws.activeDataset.state : null,
       analytics: ws.activeAnalytics,
-      activeModel: ws.activeModelArtifact ? ws.activeModelArtifact.evaluation : null,
+      activeModel: serializeActiveModelEvaluation(ws),
       modelHistory: ws.modelHistory,
       batchScores: ws.batchScores || [],
       automationStatus: ws.automationStatus || null,
@@ -1352,7 +1571,7 @@ export function createApiApp() {
         res.json({
           ...result,
           usage: buildUsageSummary(company, ws),
-          activeModel: ws.activeModelArtifact ? ws.activeModelArtifact.evaluation : null,
+          activeModel: serializeActiveModelEvaluation(ws),
           modelHistory: ws.modelHistory,
           automationStatus,
         });
@@ -1371,7 +1590,7 @@ export function createApiApp() {
     res.send(sample.csvText);
   });
 
-  // 3b. Download industry-specific CSV or Excel (.xlsx) onboarding template
+  // 3b. Download industry-specific CSV or Excel (.xlsx) onboarding, comprehensive, ticket, or prediction template
   app.get('/api/dataset/template', requireAuth, (req: AuthenticatedRequest, res) => {
     try {
       const company = getCompanyById(req.auth!.company.id) || req.auth!.company;
@@ -1381,15 +1600,42 @@ export function createApiApp() {
         : company.industry;
       const format: TemplateFormat =
         String(req.query.format || 'csv').toLowerCase() === 'xlsx' ? 'xlsx' : 'csv';
-      const mode: TemplateMode =
-        String(req.query.mode || 'labeled').toLowerCase() === 'cold_start'
-          ? 'cold_start'
-          : 'labeled';
+      const rawMode = String(req.query.mode || 'established_historical').toLowerCase();
+      const rawScope = String(req.query.scope || '').toLowerCase();
+      const scope: 'comprehensive' | 'tickets' | 'pathway' =
+        rawScope === 'tickets' || rawMode === 'tickets'
+          ? 'tickets'
+          : rawScope === 'pathway'
+            ? 'pathway'
+            : 'comprehensive';
 
+      if (rawMode === 'prediction_input') {
+        const ws = getCompanyWorkspace(company.id);
+        if (!ws.activeModelArtifact) {
+          res.status(400).json({
+            error:
+              'A validated prediction model is required before downloading the Current Customer Prediction Template. Upload historical churn data or collect sufficient observed outcomes first.',
+          });
+          return;
+        }
+        const exported = generatePredictionInputTemplateExport({
+          industry: company.industry,
+          format,
+          artifact: ws.activeModelArtifact,
+          customIndustryName: company.customIndustryName,
+        });
+        res.setHeader('Content-Type', exported.contentType);
+        res.setHeader('Content-Disposition', `attachment; filename="${exported.fileName}"`);
+        res.send(exported.body);
+        return;
+      }
+
+      const mode: LegacyCompatibleTemplateMode = normalizeTemplateMode(rawMode);
       const exported = generateIndustryTemplateExport({
         industry,
         format,
         mode,
+        scope,
         customIndustryName: company.customIndustryName,
       });
 
@@ -1402,11 +1648,74 @@ export function createApiApp() {
     }
   });
 
+  // 3b-ii. Model-driven Current Customer Prediction Input Template (meta preview or CSV/XLSX download)
+  app.get('/api/dataset/prediction-template', requireAuth, (req: AuthenticatedRequest, res) => {
+    try {
+      const company = getCompanyById(req.auth!.company.id) || req.auth!.company;
+      const ws = getCompanyWorkspace(company.id);
+      const wantMeta = String(req.query.meta || '') === '1';
+
+      if (wantMeta) {
+        if (!ws.activeModelArtifact) {
+          res.json({
+            available: false,
+            modelVersion: null,
+            modelName: null,
+            columns: [],
+            reason:
+              'No validated prediction model is active in this workspace yet. Upload historical data with churn outcomes or record enough outcomes to unlock prediction templates.',
+          });
+          return;
+        }
+        const preview = generatePredictionInputTemplateExport({
+          industry: company.industry,
+          format: 'csv',
+          artifact: ws.activeModelArtifact,
+          customIndustryName: company.customIndustryName,
+        });
+        res.json({
+          available: true,
+          modelVersion: ws.activeModelArtifact.evaluation.version,
+          modelName: ws.activeModelArtifact.evaluation.modelName,
+          columns: preview.columns,
+          reason: null,
+        });
+        return;
+      }
+
+      if (!ws.activeModelArtifact) {
+        res.status(400).json({
+          error:
+            'No validated prediction model is active yet. Upload historical data with confirmed churn outcomes or collect enough observed outcomes first.',
+        });
+        return;
+      }
+
+      const format: TemplateFormat =
+        String(req.query.format || 'csv').toLowerCase() === 'xlsx' ? 'xlsx' : 'csv';
+      const exported = generatePredictionInputTemplateExport({
+        industry: company.industry,
+        format,
+        artifact: ws.activeModelArtifact,
+        customIndustryName: company.customIndustryName,
+      });
+
+      res.setHeader('Content-Type', exported.contentType);
+      res.setHeader('Content-Disposition', `attachment; filename="${exported.fileName}"`);
+      res.send(exported.body);
+    } catch (err: unknown) {
+      const message =
+        err instanceof Error ? err.message : 'Failed to build current customer prediction template.';
+      res.status(400).json({ error: message });
+    }
+  });
+
   // 3c. Current workspace data readiness assessment & schema template guide
   app.get('/api/dataset/readiness', requireAuth, (req: AuthenticatedRequest, res) => {
     const company = getCompanyById(req.auth!.company.id) || req.auth!.company;
     const ws = getCompanyWorkspace(company.id);
-    const templateColumns = getIndustryDataTemplateColumns(company.industry);
+    const modeParam = normalizeTemplateMode(String(req.query.mode || 'established_historical'));
+    const templateColumns = getIndustryDataTemplateColumns(company.industry, modeParam);
     let readiness = ws.activeDataset?.state.readiness || null;
     if (ws.activeDataset && !readiness) {
       readiness = assessDataReadiness({
@@ -1424,7 +1733,7 @@ export function createApiApp() {
     });
   });
 
-  // 4a. Stage CSV or Excel upload for schema profiling, quality inspection & confirmation
+  // 4a. Stage CSV or Excel upload for schema profiling, multi-sheet ticket linking, validation & preview
   app.post(
     '/api/dataset/stage',
     requireAuth,
@@ -1434,11 +1743,34 @@ export function createApiApp() {
       try {
         const company = getCompanyById(req.auth!.company.id) || req.auth!.company;
         const ws = getCompanyWorkspace(company.id);
-        const { fileName, csvText, fileBase64 } = (req.body || {}) as {
+        const {
+          fileName,
+          csvText,
+          fileBase64,
+          uploadPathway: rawPathway,
+          uploadMode: rawUploadMode,
+          satisfactionScale: rawScale,
+        } = (req.body || {}) as {
           fileName?: string;
           csvText?: string;
           fileBase64?: string;
+          uploadPathway?: UploadPathway;
+          uploadMode?: 'customer' | 'tickets';
+          satisfactionScale?: SatisfactionScale;
         };
+
+        const uploadPathway: UploadPathway | undefined =
+          rawPathway === 'new_business' ||
+          rawPathway === 'established_historical' ||
+          rawPathway === 'current_prediction' ||
+          rawPathway === 'existing_custom'
+            ? rawPathway
+            : undefined;
+
+        const satisfactionScale: SatisfactionScale =
+          rawScale === '1-5' || rawScale === '1-10' || rawScale === '0-100' || rawScale === 'nps'
+            ? rawScale
+            : ws.satisfactionScale || company.satisfactionScale || '1-5';
 
         const safeName = (fileName || 'uploaded_customers.csv').trim();
         const rawByteSize = csvText
@@ -1447,17 +1779,191 @@ export function createApiApp() {
             ? Math.ceil((fileBase64.length * 3) / 4)
             : 0;
 
-        const { headers, rows, sourceFormat } = parseSpreadsheetUpload({
+        const parsed = parseMultiSheetSpreadsheetUpload({
           fileName: safeName,
           csvText,
           fileBase64,
+          requestedUploadMode: rawUploadMode,
         });
+
+        let headers = parsed.headers;
+        let rows = parsed.rows;
+        const sourceFormat = parsed.sourceFormat;
+        const uploadMode = parsed.detectedUploadMode;
+        let ticketAggregation: TicketAggregationSummary | null = null;
+        let duplicateTicketIds = 0;
 
         enforceDatasetPlanQuota(company, rows.length, rawByteSize);
 
+        // Standalone ticket history upload mode
+        if (uploadMode === 'tickets') {
+          const activeValidCustomerIds = new Set<string>();
+          if (ws.activeDataset) {
+            const activeIdCol = ws.activeDataset.state.mapping.idColumn;
+            if (activeIdCol) {
+              for (const r of ws.activeDataset.rows) {
+                const cid = String(r[activeIdCol] || '').trim();
+                if (cid) activeValidCustomerIds.add(cid.toLowerCase());
+              }
+            }
+          }
+
+          const agg = aggregateTicketsByCustomer(parsed.ticketSheetRows, parsed.ticketSheetHeaders, {
+            validCustomerIds: activeValidCustomerIds.size > 0 ? activeValidCustomerIds : undefined,
+          });
+          duplicateTicketIds = agg.duplicateTicketIds;
+          if (!ws.activeDataset) {
+            ticketAggregation = {
+              source: 'standalone_ticket_upload',
+              ticketRowsCount: parsed.ticketSheetRows.length,
+              validTicketRows: agg.validTicketRows,
+              warningTicketRows: agg.warningTicketRows,
+              errorTicketRows: agg.errorTicketRows,
+              duplicateTicketIds: agg.duplicateTicketIds,
+              invalidTicketRows: agg.invalidTicketRows,
+              matchedCustomersCount: 0,
+              unmatchedTicketCount: agg.byCustomerId.size,
+              unmatchedTicketRowsCount: parsed.ticketSheetRows.length,
+              doubleCountingPrevented: true,
+              ticketIssues: agg.ticketRowIssues.slice(0, 50),
+              note: 'No active customer dataset loaded yet. Upload your Customer_Data file first before linking standalone Ticket_Data.',
+            };
+          } else {
+            const activeHeaders = ws.activeDataset.state.columns.map((c) => c.name);
+            const previewMerge = mergeTicketsIntoCustomerRows({
+              source: 'standalone_ticket_upload',
+              customerHeaders: activeHeaders,
+              customerRows: ws.activeDataset.rows,
+              ticketHeaders: parsed.ticketSheetHeaders,
+              ticketRows: parsed.ticketSheetRows,
+              idColumnHint: ws.activeDataset.state.mapping.idColumn,
+            });
+            ticketAggregation = previewMerge.summary;
+          }
+
+          const columns = profileColumns(headers, rows);
+          const { duplicateCount, missingCellCount } = computeDatasetQualityStats(headers, rows);
+          const suggestedMapping = autoDetectMapping(columns, rows, company.industry, 'new_business');
+          const suggestedChurnDefinition =
+            company.churnDefinition || buildDefaultChurnDefinition(company.industry);
+          const stagedId = `stg_${Date.now()}`;
+
+          const ticketIssues = !ws.activeDataset
+            ? [
+                {
+                  severity: 'warning' as const,
+                  message:
+                    'Upload customer master records first so Ticket_Data can link to Customer_IDs.',
+                },
+              ]
+            : [];
+
+          if (ticketAggregation.unmatchedTicketRowsCount && ticketAggregation.unmatchedTicketRowsCount > 0 && ws.activeDataset) {
+            ticketIssues.push({
+              severity: 'warning' as const,
+              message: `${ticketAggregation.unmatchedTicketRowsCount} ticket row(s) reference a Customer_ID not found in the active Customer_Data table.`,
+            });
+          }
+
+          const ticketIssuesSummary: { label: string; count: number; severity: 'warning' | 'error' }[] = [];
+          if (agg.duplicateTicketIds > 0) {
+            ticketIssuesSummary.push({
+              label: 'Duplicate Ticket_ID',
+              count: agg.duplicateTicketIds,
+              severity: 'error',
+            });
+          }
+          if (agg.unmatchedTicketRowsCount > 0) {
+            ticketIssuesSummary.push({
+              label: 'Unmatched Customer_ID in Ticket_Data',
+              count: agg.unmatchedTicketRowsCount,
+              severity: 'warning',
+            });
+          }
+          if (agg.warningTicketRows > 0 && agg.warningTicketRows > agg.unmatchedTicketRowsCount) {
+            ticketIssuesSummary.push({
+              label: 'Ticket Date / Duration Warnings',
+              count: agg.warningTicketRows - agg.unmatchedTicketRowsCount,
+              severity: 'warning',
+            });
+          }
+
+          const meta: StagedDatasetImport = {
+            stagedId,
+            fileName: safeName,
+            sourceFormat,
+            uploadPathway,
+            uploadMode: 'tickets',
+            satisfactionScale,
+            isSample: false,
+            uploadedAt: new Date().toISOString(),
+            rowCount: rows.length,
+            columnCount: columns.length,
+            duplicateCount,
+            missingCellCount,
+            columns,
+            suggestedMapping,
+            suggestedChurnDefinition,
+            targetUniqueValues: [],
+            previewRows: rows.slice(0, 12),
+            issues: ticketIssues,
+            isValid: Boolean(ws.activeDataset),
+            hasValidChurnLabels: false,
+            churnReadinessMessage:
+              ticketAggregation.note,
+            ticketAggregation,
+            rowValidation: {
+              totalRows: rows.length,
+              validCount: agg.validTicketRows,
+              warningCount: agg.warningTicketRows,
+              errorCount: agg.errorTicketRows,
+              duplicateCustomerIds: 0,
+              duplicateTicketIds: agg.duplicateTicketIds,
+              missingValuesCount: missingCellCount,
+              mappedFieldsCount: headers.length,
+              unmappedColumns: [],
+              issuesSummary: ticketIssuesSummary,
+              rowErrors: agg.ticketRowIssues,
+              previewRecords: [],
+              hasRejectedRowsCsv: false,
+            },
+          };
+
+          ws.stagedImport = {
+            meta,
+            rows,
+            ticketRows: parsed.ticketSheetRows,
+            rawByteSize,
+          };
+
+          res.json({ stagedImport: meta });
+          return;
+        }
+
+        // If multi-sheet .xlsx contains Ticket_Data alongside Customer_Data, aggregate tickets cleanly without double-counting
+        if (parsed.ticketSheetRows.length > 0) {
+          const merged = mergeTicketsIntoCustomerRows({
+            source: 'embedded_sheet',
+            customerHeaders: headers,
+            customerRows: rows,
+            ticketHeaders: parsed.ticketSheetHeaders,
+            ticketRows: parsed.ticketSheetRows,
+          });
+          headers = merged.headers;
+          rows = merged.rows;
+          ticketAggregation = merged.summary;
+          duplicateTicketIds = merged.duplicateTicketIds;
+        }
+
         const columns = profileColumns(headers, rows);
         const { duplicateCount, missingCellCount } = computeDatasetQualityStats(headers, rows);
-        const suggestedMapping = autoDetectMapping(columns, rows, company.industry);
+        const suggestedMapping = autoDetectMapping(
+          columns,
+          rows,
+          company.industry,
+          uploadPathway,
+          company.churnDefinition
+        );
         const mappingRationales = buildMappingRationales(
           columns,
           suggestedMapping,
@@ -1469,6 +1975,22 @@ export function createApiApp() {
           ? getUniqueColumnValues(rows, suggestedMapping.targetColumn)
           : [];
         const { issues, isValid } = validateDataset(columns, rows, suggestedMapping);
+        if (ticketAggregation) {
+          if (
+            (ticketAggregation.errorTicketRows ?? 0) > 0 ||
+            (ticketAggregation.warningTicketRows ?? 0) > 0 ||
+            (ticketAggregation.unmatchedTicketRowsCount ?? 0) > 0
+          ) {
+            issues.push({
+              severity: (ticketAggregation.errorTicketRows ?? 0) > 0 ? 'warning' : 'info',
+              message: `Ticket_Data sheet validated separately: ${ticketAggregation.validTicketRows ?? 0} clean, ${ticketAggregation.warningTicketRows ?? 0} warning(s), ${ticketAggregation.errorTicketRows ?? 0} error(s)${
+                (ticketAggregation.unmatchedTicketRowsCount ?? 0) > 0
+                  ? `, ${ticketAggregation.unmatchedTicketRowsCount} ticket row(s) with Customer_ID not found in Customer_Data`
+                  : ''
+              }.`,
+            });
+          }
+        }
         const labelReadiness = evaluateChurnReadiness(
           columns,
           rows,
@@ -1488,11 +2010,52 @@ export function createApiApp() {
           0
         );
 
+        const mappedKeySet = new Set(
+          [
+            suggestedMapping.targetColumn,
+            suggestedMapping.idColumn,
+            suggestedMapping.contractColumn,
+            suggestedMapping.tenureColumn,
+            suggestedMapping.monthlyChargesColumn,
+            suggestedMapping.dateColumn,
+            suggestedMapping.observationDateColumn,
+            suggestedMapping.registrationDateColumn,
+            suggestedMapping.churnDateColumn,
+            suggestedMapping.statusColumn,
+            suggestedMapping.frequencyColumn,
+            ...suggestedMapping.featureColumns,
+          ].filter(Boolean)
+        );
+        const unmappedColumns = headers.filter((h) => !mappedKeySet.has(h));
+
+        const {
+          report: rowValidation,
+          validRowsOnly,
+          rejectedRowsCsv,
+        } = validateCustomerImportRows({
+          headers,
+          rows,
+          mapping: suggestedMapping,
+          uploadPathway,
+          uploadMode: 'customer',
+          satisfactionScale,
+          unmappedColumns,
+          duplicateTicketIds,
+        });
+
+        const modelCompatibility =
+          uploadPathway === 'current_prediction' || ws.activeModelArtifact
+            ? checkModelCompatibility(headers, ws.activeModelArtifact)
+            : null;
+
         const stagedId = `stg_${Date.now()}`;
-        const meta = {
+        const meta: StagedDatasetImport = {
           stagedId,
           fileName: safeName,
           sourceFormat,
+          uploadPathway,
+          uploadMode: 'customer',
+          satisfactionScale,
           isSample: false,
           uploadedAt: new Date().toISOString(),
           rowCount: rows.length,
@@ -1512,9 +2075,19 @@ export function createApiApp() {
           hasValidChurnLabels: labelReadiness.hasValidChurnLabels,
           churnReadinessMessage: labelReadiness.churnReadinessMessage,
           readiness,
+          rowValidation,
+          ticketAggregation,
+          modelCompatibility,
         };
 
-        ws.stagedImport = { meta, rows, rawByteSize };
+        ws.stagedImport = {
+          meta,
+          rows,
+          validRowsOnly,
+          ticketRows: parsed.ticketSheetRows,
+          rejectedRowsCsv,
+          rawByteSize,
+        };
 
         recordAuditEvent({
           companyId: company.id,
@@ -1523,7 +2096,7 @@ export function createApiApp() {
           actorRole: req.auth!.user.role,
           action: 'DATASET_STAGED',
           resource: 'dataset',
-          details: `Staged ${safeName} (${rows.length} rows, ${columns.length} cols, ${duplicateCount} duplicates, readiness=${readiness.readinessScore})`,
+          details: `Staged ${safeName} (${rows.length} rows, ${columns.length} cols, valid=${rowValidation.validCount}, warnings=${rowValidation.warningCount}, errors=${rowValidation.errorCount})`,
         });
 
         res.json({ stagedImport: meta });
@@ -1534,7 +2107,56 @@ export function createApiApp() {
     }
   );
 
-  // 4b. Commit staged dataset with user-confirmed mapping & churn definition
+  // 4a-ii. Download rejected / invalid staged rows with error explanations as CSV
+  app.get('/api/dataset/staged-rejected-csv', requireAuth, (req: AuthenticatedRequest, res) => {
+    const ws = getCompanyWorkspace(req.auth!.company.id);
+    if (!ws.stagedImport?.rejectedRowsCsv) {
+      res.status(404).json({ error: 'No rejected rows report is available for the current staged upload.' });
+      return;
+    }
+    res.setHeader('Content-Type', 'text/csv; charset=utf-8');
+    res.setHeader(
+      'Content-Disposition',
+      `attachment; filename="rejected_rows_${ws.stagedImport.meta.stagedId}.csv"`
+    );
+    res.send(ws.stagedImport.rejectedRowsCsv);
+  });
+
+  // 4a-iii. Save workspace satisfaction scale configuration (1-5, 1-10, 0-100, NPS)
+  app.put(
+    '/api/company/satisfaction-scale',
+    requireAuth,
+    requirePermission('canUploadAndAnalyse'),
+    (req: AuthenticatedRequest, res) => {
+      try {
+        const { satisfactionScale } = (req.body || {}) as {
+          satisfactionScale?: SatisfactionScale;
+        };
+        if (
+          satisfactionScale !== '1-5' &&
+          satisfactionScale !== '1-10' &&
+          satisfactionScale !== '0-100' &&
+          satisfactionScale !== 'nps'
+        ) {
+          res.status(400).json({ error: 'Invalid satisfaction scale. Choose 1-5, 1-10, 0-100, or nps.' });
+          return;
+        }
+        const company = updateCompanyProfile(req.auth!.company.id, { satisfactionScale });
+        const ws = getCompanyWorkspace(company.id);
+        ws.satisfactionScale = satisfactionScale;
+        if (ws.activeDataset) {
+          ws.activeDataset.state.satisfactionScale = satisfactionScale;
+        }
+        persistCompanyWorkspace(company.id, ws);
+        res.json({ company, satisfactionScale });
+      } catch (err: unknown) {
+        const message = err instanceof Error ? err.message : 'Failed to save satisfaction scale.';
+        res.status(400).json({ error: message });
+      }
+    }
+  );
+
+  // 4b. Commit staged dataset with user-confirmed mapping, churn definition, valid-only import & ticket/current-customer handling
   app.post(
     '/api/dataset/commit',
     requireAuth,
@@ -1545,10 +2167,13 @@ export function createApiApp() {
         let company = getCompanyById(req.auth!.company.id) || req.auth!.company;
         const ws = getCompanyWorkspace(company.id);
 
-        const { stagedId, mapping, churnDefinition } = (req.body || {}) as {
+        const { stagedId, mapping, churnDefinition, importMode, satisfactionScale } = (req.body ||
+          {}) as {
           stagedId?: string;
           mapping?: Partial<ColumnMapping>;
           churnDefinition?: ChurnDefinition;
+          importMode?: 'valid_only' | 'all';
+          satisfactionScale?: SatisfactionScale;
         };
 
         if (!ws.stagedImport || ws.stagedImport.meta.stagedId !== stagedId) {
@@ -1559,6 +2184,112 @@ export function createApiApp() {
         }
 
         const staged = ws.stagedImport;
+
+        // Handle standalone Ticket_Data enrichment commit cleanly without overwriting Customer_Data or resetting model
+        if (staged.meta.uploadMode === 'tickets') {
+          if (!ws.activeDataset) {
+            res.status(400).json({
+              error:
+                'No active customer dataset exists in this workspace. Upload your customer spreadsheet first before linking ticket records.',
+            });
+            return;
+          }
+
+          const activeHeaders = ws.activeDataset.state.columns.map((c) => c.name);
+          const ticketHeaders = staged.meta.columns.map((c) => c.name);
+          const merged = mergeTicketsIntoCustomerRows({
+            source: 'standalone_ticket_upload',
+            customerHeaders: activeHeaders,
+            customerRows: ws.activeDataset.rows,
+            ticketHeaders,
+            ticketRows: staged.ticketRows || staged.rows,
+            idColumnHint: ws.activeDataset.state.mapping.idColumn,
+          });
+
+          const preservedArtifact = ws.activeModelArtifact;
+          const preservedHistory = ws.modelHistory;
+
+          const columns = profileColumns(merged.headers, merged.rows);
+          const { duplicateCount, missingCellCount } = computeDatasetQualityStats(
+            merged.headers,
+            merged.rows
+          );
+          const existingMapping = ws.activeDataset.state.mapping;
+          const { issues, isValid } = validateDataset(columns, merged.rows, existingMapping);
+          const labelReadiness = evaluateChurnReadiness(
+            columns,
+            merged.rows,
+            existingMapping,
+            company.churnDefinition
+          );
+          const readiness = assessDataReadiness({
+            columns,
+            rows: merged.rows,
+            mapping: existingMapping,
+            churnDefinition: company.churnDefinition,
+            industry: company.industry,
+          });
+
+          ws.activeDataset = {
+            rows: merged.rows,
+            state: {
+              ...ws.activeDataset.state,
+              columnCount: columns.length,
+              duplicateCount,
+              missingCellCount,
+              columns,
+              issues,
+              isValid,
+              hasValidChurnLabels: labelReadiness.hasValidChurnLabels,
+              churnReadinessMessage: labelReadiness.churnReadinessMessage,
+              readiness,
+              ticketAggregation: merged.summary,
+              previewRows: merged.rows.slice(0, 15),
+            },
+          };
+          ws.activeAnalytics = computeAnalytics(
+            columns,
+            merged.rows,
+            existingMapping,
+            {},
+            company.churnDefinition
+          );
+          ws.ticketAggregation = merged.summary;
+          ws.activeModelArtifact = preservedArtifact;
+          ws.modelHistory = preservedHistory;
+          ws.stagedImport = null;
+          persistCompanyWorkspace(company.id, ws);
+
+          recordAuditEvent({
+            companyId: company.id,
+            actorId: req.auth!.user.id,
+            actorEmail: req.auth!.user.email,
+            actorRole: req.auth!.user.role,
+            action: 'TICKETS_LINKED',
+            resource: 'dataset',
+            details: `${merged.summary.note}`,
+          });
+
+          res.json({
+            company,
+            dataset: ws.activeDataset.state,
+            analytics: ws.activeAnalytics,
+            ticketAggregation: merged.summary,
+            usage: buildUsageSummary(company, ws),
+            activeModel: serializeActiveModelEvaluation(ws),
+            modelHistory: ws.modelHistory,
+            automationStatus: ws.automationStatus,
+          });
+          return;
+        }
+
+        const effectiveScale =
+          satisfactionScale || staged.meta.satisfactionScale || ws.satisfactionScale || '1-5';
+        ws.satisfactionScale = effectiveScale;
+        if (company.satisfactionScale !== effectiveScale) {
+          company = updateCompanyProfile(company.id, { satisfactionScale: effectiveScale });
+        }
+
         const baseMapping = staged.meta.suggestedMapping;
         const targetColumn =
           mapping?.targetColumn !== undefined ? mapping.targetColumn : baseMapping.targetColumn;
@@ -1566,14 +2297,25 @@ export function createApiApp() {
         const positiveClassValue =
           mapping?.positiveClassValue !== undefined
             ? mapping.positiveClassValue
-            : targetColumn !== baseMapping.targetColumn
+            : targetColumn && targetColumn !== baseMapping.targetColumn
               ? detectPositiveClass(staged.rows, targetColumn)
               : baseMapping.positiveClassValue;
+
+        const churnDateColumn =
+          mapping?.churnDateColumn !== undefined
+            ? mapping.churnDateColumn
+            : baseMapping.churnDateColumn;
+
+        const idColumn = mapping?.idColumn !== undefined ? mapping.idColumn : baseMapping.idColumn;
+
+        const rawFeatures = Array.isArray(mapping?.featureColumns)
+          ? mapping.featureColumns
+          : baseMapping.featureColumns;
 
         const confirmedMapping: ColumnMapping = {
           targetColumn,
           positiveClassValue,
-          idColumn: mapping?.idColumn !== undefined ? mapping.idColumn : baseMapping.idColumn,
+          idColumn,
           contractColumn:
             mapping?.contractColumn !== undefined
               ? mapping.contractColumn
@@ -1586,13 +2328,24 @@ export function createApiApp() {
               : baseMapping.monthlyChargesColumn,
           dateColumn:
             mapping?.dateColumn !== undefined ? mapping.dateColumn : baseMapping.dateColumn,
+          observationDateColumn:
+            mapping?.observationDateColumn !== undefined
+              ? mapping.observationDateColumn
+              : baseMapping.observationDateColumn,
+          registrationDateColumn:
+            mapping?.registrationDateColumn !== undefined
+              ? mapping.registrationDateColumn
+              : baseMapping.registrationDateColumn,
+          churnDateColumn,
+          statusColumn:
+            mapping?.statusColumn !== undefined ? mapping.statusColumn : baseMapping.statusColumn,
           frequencyColumn:
             mapping?.frequencyColumn !== undefined
               ? mapping.frequencyColumn
               : baseMapping.frequencyColumn,
-          featureColumns: Array.isArray(mapping?.featureColumns)
-            ? mapping.featureColumns.filter((c) => c !== targetColumn)
-            : baseMapping.featureColumns.filter((c) => c !== targetColumn),
+          featureColumns: rawFeatures.filter(
+            (c) => c !== targetColumn && c !== idColumn && c !== churnDateColumn
+          ),
         };
 
         let confirmedChurnDef = churnDefinition || company.churnDefinition;
@@ -1608,25 +2361,50 @@ export function createApiApp() {
         }
 
         const headers = staged.meta.columns.map((c) => c.name);
+        const rowsToCommit =
+          importMode === 'valid_only' && staged.validRowsOnly && staged.validRowsOnly.length > 0
+            ? staged.validRowsOnly
+            : staged.rows;
+
+        const isCurrentPrediction =
+          staged.meta.uploadPathway === 'current_prediction' && Boolean(ws.activeModelArtifact);
+
+        let batchResult = null;
+        if (isCurrentPrediction && ws.activeModelArtifact) {
+          batchResult = scoreBatchRecords(
+            ws.activeModelArtifact,
+            staged.meta.fileName,
+            rowsToCommit
+          );
+          ws.batchScores = [batchResult, ...(ws.batchScores || []).slice(0, 9)];
+        }
+
         const result = commitRowsIntoWorkspace(company, ws, {
           fileName: staged.meta.fileName,
           sourceFormat: staged.meta.sourceFormat,
+          uploadPathway: staged.meta.uploadPathway,
+          satisfactionScale: effectiveScale,
           headers,
-          rows: staged.rows,
+          rows: rowsToCommit,
           mapping: confirmedMapping,
           churnDefinition: confirmedChurnDef,
+          rowValidation: staged.meta.rowValidation,
+          ticketAggregation: staged.meta.ticketAggregation || null,
+          preserveModelArtifact: isCurrentPrediction,
           isSample: false,
         });
 
-        const automationStatus = runAutomatedPredictionSetup(company, ws, {
-          allowModelExecution:
-            req.auth!.user.role !== 'ANALYST' || req.auth!.user.permissions.canGeneratePredictions,
-          actor: {
-            id: req.auth!.user.id,
-            email: req.auth!.user.email,
-            role: req.auth!.user.role,
-          },
-        });
+        const automationStatus = isCurrentPrediction
+          ? ws.automationStatus
+          : runAutomatedPredictionSetup(company, ws, {
+              allowModelExecution:
+                req.auth!.user.role !== 'ANALYST' || req.auth!.user.permissions.canGeneratePredictions,
+              actor: {
+                id: req.auth!.user.id,
+                email: req.auth!.user.email,
+                role: req.auth!.user.role,
+              },
+            });
 
         recordAuditEvent({
           companyId: company.id,
@@ -1635,14 +2413,16 @@ export function createApiApp() {
           actorRole: req.auth!.user.role,
           action: 'DATASET_COMMITTED',
           resource: 'dataset',
-          details: `Committed ${staged.meta.fileName} (${staged.meta.rowCount} rows, target=${confirmedMapping.targetColumn || 'unmapped'})`,
+          details: `Committed ${staged.meta.fileName} (${rowsToCommit.length} rows, pathway=${staged.meta.uploadPathway || 'standard'}, target=${confirmedMapping.targetColumn || 'unmapped'})`,
         });
 
         res.json({
           company,
           ...result,
+          batchResult,
+          batchScores: ws.batchScores || [],
           usage: buildUsageSummary(company, ws),
-          activeModel: ws.activeModelArtifact ? ws.activeModelArtifact.evaluation : null,
+          activeModel: serializeActiveModelEvaluation(ws),
           modelHistory: ws.modelHistory,
           automationStatus,
         });
@@ -1712,7 +2492,7 @@ export function createApiApp() {
         res.json({
           ...result,
           usage: buildUsageSummary(company, ws),
-          activeModel: ws.activeModelArtifact ? ws.activeModelArtifact.evaluation : null,
+          activeModel: serializeActiveModelEvaluation(ws),
           modelHistory: ws.modelHistory,
           automationStatus,
         });
@@ -1749,10 +2529,17 @@ export function createApiApp() {
               ? detectPositiveClass(ws.activeDataset.rows, targetColumn)
               : prev.positiveClassValue;
 
+        const churnDateColumn =
+          incoming.churnDateColumn !== undefined ? incoming.churnDateColumn : prev.churnDateColumn;
+        const idColumn = incoming.idColumn !== undefined ? incoming.idColumn : prev.idColumn;
+        const rawFeatures = Array.isArray(incoming.featureColumns)
+          ? incoming.featureColumns
+          : prev.featureColumns;
+
         const updatedMapping: ColumnMapping = {
           targetColumn,
           positiveClassValue,
-          idColumn: incoming.idColumn !== undefined ? incoming.idColumn : prev.idColumn,
+          idColumn,
           contractColumn:
             incoming.contractColumn !== undefined ? incoming.contractColumn : prev.contractColumn,
           tenureColumn:
@@ -1762,11 +2549,22 @@ export function createApiApp() {
               ? incoming.monthlyChargesColumn
               : prev.monthlyChargesColumn,
           dateColumn: incoming.dateColumn !== undefined ? incoming.dateColumn : prev.dateColumn,
+          observationDateColumn:
+            incoming.observationDateColumn !== undefined
+              ? incoming.observationDateColumn
+              : prev.observationDateColumn,
+          registrationDateColumn:
+            incoming.registrationDateColumn !== undefined
+              ? incoming.registrationDateColumn
+              : prev.registrationDateColumn,
+          churnDateColumn,
+          statusColumn:
+            incoming.statusColumn !== undefined ? incoming.statusColumn : prev.statusColumn,
           frequencyColumn:
             incoming.frequencyColumn !== undefined ? incoming.frequencyColumn : prev.frequencyColumn,
-          featureColumns: Array.isArray(incoming.featureColumns)
-            ? incoming.featureColumns.filter((c) => c !== targetColumn)
-            : prev.featureColumns.filter((c) => c !== targetColumn),
+          featureColumns: rawFeatures.filter(
+            (c) => c !== targetColumn && c !== idColumn && c !== churnDateColumn
+          ),
         };
 
         const { issues, isValid } = validateDataset(
@@ -1846,7 +2644,7 @@ export function createApiApp() {
           dataset: latestWs.activeDataset?.state ?? ws.activeDataset.state,
           analytics: latestWs.activeAnalytics ?? ws.activeAnalytics,
           usage: buildUsageSummary(company, latestWs),
-          activeModel: latestWs.activeModelArtifact ? latestWs.activeModelArtifact.evaluation : null,
+          activeModel: serializeActiveModelEvaluation(latestWs),
           modelHistory: latestWs.modelHistory,
           automationStatus,
         });
@@ -1908,7 +2706,9 @@ export function createApiApp() {
           }
           mapping.targetColumn = targetCol;
           mapping.positiveClassValue = positiveVal;
-          mapping.featureColumns = mapping.featureColumns.filter((c) => c !== targetCol);
+          mapping.featureColumns = mapping.featureColumns.filter(
+            (c) => c !== targetCol && c !== mapping.churnDateColumn
+          );
         } else {
           if (!positiveVal) {
             positiveVal = 'Churned';
@@ -2026,7 +2826,7 @@ export function createApiApp() {
           updatedCount,
           dataset: latestWs.activeDataset?.state ?? ds.state,
           analytics: latestWs.activeAnalytics ?? ws.activeAnalytics,
-          activeModel: latestWs.activeModelArtifact ? latestWs.activeModelArtifact.evaluation : null,
+          activeModel: serializeActiveModelEvaluation(latestWs),
           modelHistory: latestWs.modelHistory,
           automationStatus,
           usage: buildUsageSummary(company, latestWs),
@@ -2034,6 +2834,459 @@ export function createApiApp() {
       } catch (err: unknown) {
         const message =
           err instanceof Error ? err.message : 'Failed to record observed churn outcome.';
+        res.status(400).json({ error: message });
+      }
+    }
+  );
+
+  // 5c. Customer Directory CRUD (Add / Update / Remove single customer record)
+  const buildTemplateMappingForIndustry = (industry: IndustryKey, headers: string[]): ColumnMapping => {
+    const specs = getIndustryDataTemplateColumns(industry);
+    const findByRole = (role: string) =>
+      specs.find((s) => s.semanticRole === role && headers.includes(s.name))?.name || null;
+
+    const targetCol = findByRole('target') || '';
+    const idCol = findByRole('id');
+    const dateCol = findByRole('date');
+    const observationDateCol = findByRole('observation_date');
+    const registrationDateCol = findByRole('registration_date');
+    const churnDateCol = findByRole('churn_date');
+    const statusCol = findByRole('status');
+
+    const excluded = new Set(
+      [targetCol, idCol, dateCol, observationDateCol, registrationDateCol, churnDateCol].filter(
+        (v): v is string => Boolean(v)
+      )
+    );
+
+    return {
+      targetColumn: targetCol,
+      positiveClassValue: targetCol ? 'Yes' : '',
+      idColumn: idCol,
+      contractColumn: findByRole('segment'),
+      tenureColumn: findByRole('tenure'),
+      monthlyChargesColumn: findByRole('revenue'),
+      dateColumn: dateCol,
+      observationDateColumn: observationDateCol,
+      registrationDateColumn: registrationDateCol,
+      churnDateColumn: churnDateCol,
+      statusColumn: statusCol,
+      frequencyColumn: findByRole('frequency'),
+      featureColumns: headers.filter((h) => !excluded.has(h)),
+    };
+  };
+
+  const refreshActiveDatasetState = (
+    company: CompanyWorkspaceInfo,
+    ws: CompanyWorkspaceState,
+    actor: { id: string; email: string; role: UserRole },
+    allowModelExecution: boolean
+  ) => {
+    const ds = ws.activeDataset!;
+    const headers = Object.keys(ds.rows[0] || {});
+    const columns = profileColumns(headers, ds.rows);
+    const { duplicateCount, missingCellCount } = computeDatasetQualityStats(headers, ds.rows);
+    const mapping = ds.state.mapping;
+    const targetUniqueValues = mapping.targetColumn
+      ? getUniqueColumnValues(ds.rows, mapping.targetColumn)
+      : [];
+    const { issues, isValid } = validateDataset(columns, ds.rows, mapping);
+    const labelReadiness = evaluateChurnReadiness(
+      columns,
+      ds.rows,
+      mapping,
+      company.churnDefinition
+    );
+    const readiness = assessDataReadiness({
+      columns,
+      rows: ds.rows,
+      mapping,
+      churnDefinition: company.churnDefinition,
+      industry: company.industry,
+    });
+    const mappingRationales = buildMappingRationales(columns, mapping, company.industry);
+    const invalidDateCount = columns.reduce((acc, c) => acc + (c.invalidDateCount || 0), 0);
+    const inconsistentCategoryCount = columns.reduce(
+      (acc, c) => acc + (c.inconsistentCategoryCount || 0),
+      0
+    );
+
+    ds.state = {
+      ...ds.state,
+      rowCount: ds.rows.length,
+      columnCount: columns.length,
+      duplicateCount,
+      missingCellCount,
+      invalidDateCount,
+      inconsistentCategoryCount,
+      columns,
+      mappingRationales,
+      targetUniqueValues,
+      issues,
+      isValid,
+      hasValidChurnLabels: labelReadiness.hasValidChurnLabels,
+      churnReadinessMessage: labelReadiness.churnReadinessMessage,
+      readiness,
+      previewRows: ds.rows.slice(0, 15),
+    };
+
+    ws.activeAnalytics = computeAnalytics(
+      columns,
+      ds.rows,
+      mapping,
+      {},
+      company.churnDefinition
+    );
+    persistCompanyWorkspace(company.id, ws);
+
+    const automationStatus = runAutomatedPredictionSetup(company, ws, {
+      allowModelExecution,
+      actor,
+    });
+
+    return { automationStatus };
+  };
+
+  app.post(
+    '/api/dataset/customers',
+    requireAuth,
+    requirePermission('canUploadAndAnalyse'),
+    (req: AuthenticatedRequest, res) => {
+      try {
+        const company = getCompanyById(req.auth!.company.id) || req.auth!.company;
+        const ws = getCompanyWorkspace(company.id);
+        const body = (req.body || {}) as { customer?: Record<string, string> };
+        const incoming = body.customer;
+        if (!incoming || typeof incoming !== 'object') {
+          res.status(400).json({ error: 'Customer details are required.' });
+          return;
+        }
+
+        const allowModelExecution =
+          req.auth!.user.role !== 'ANALYST' || req.auth!.user.permissions.canGeneratePredictions;
+        const actor = {
+          id: req.auth!.user.id,
+          email: req.auth!.user.email,
+          role: req.auth!.user.role,
+        };
+
+        if (!ws.activeDataset) {
+          const specs = getIndustryDataTemplateColumns(company.industry);
+          const headers = Array.from(
+            new Set([
+              ...specs.map((s) => s.name),
+              ...Object.keys(incoming).map((k) => k.trim()).filter(Boolean),
+            ])
+          );
+          const normalizedRow: Record<string, string> = {};
+          for (const h of headers) {
+            normalizedRow[h] = String(incoming[h] ?? '').trim();
+          }
+
+          const mapping = buildTemplateMappingForIndustry(company.industry, headers);
+          const idCol = mapping.idColumn;
+          if (idCol && !normalizedRow[idCol]) {
+            normalizedRow[idCol] = `CUST-${String(1001).padStart(4, '0')}`;
+          }
+
+          const rows = [normalizedRow];
+          enforceDatasetPlanQuota(company, rows.length, Buffer.byteLength(JSON.stringify(rows)));
+
+          const committed = commitRowsIntoWorkspace(company, ws, {
+            fileName: 'customer_directory.csv',
+            sourceFormat: 'csv',
+            headers,
+            rows,
+            mapping,
+            churnDefinition: company.churnDefinition,
+            isSample: false,
+          });
+
+          const automationStatus = runAutomatedPredictionSetup(company, ws, {
+            allowModelExecution,
+            actor,
+          });
+
+          recordAuditEvent({
+            companyId: company.id,
+            actorId: actor.id,
+            actorEmail: actor.email,
+            actorRole: actor.role,
+            action: 'CUSTOMER_RECORD_ADDED',
+            resource: 'dataset',
+            details: `Initialized customer directory with record ${idCol ? normalizedRow[idCol] : '#1'}`,
+          });
+
+          const latestWs = getCompanyWorkspace(company.id);
+          res.status(201).json({
+            dataset: latestWs.activeDataset?.state ?? committed.dataset,
+            analytics: latestWs.activeAnalytics ?? committed.analytics,
+            activeModel: serializeActiveModelEvaluation(latestWs),
+            modelHistory: latestWs.modelHistory,
+            automationStatus,
+            usage: buildUsageSummary(company, latestWs),
+          });
+          return;
+        }
+
+        const ds = ws.activeDataset;
+        const existingHeaders = ds.state.columns.map((c) => c.name);
+        const extraKeys = Object.keys(incoming).filter((k) => k.trim() && !existingHeaders.includes(k));
+        const headers = [...existingHeaders, ...extraKeys];
+
+        const normalizedRow: Record<string, string> = {};
+        for (const h of headers) {
+          normalizedRow[h] = String(incoming[h] ?? '').trim();
+        }
+
+        const idCol = ds.state.mapping.idColumn;
+        if (idCol) {
+          if (!normalizedRow[idCol]) {
+            normalizedRow[idCol] = `CUST-${String(ds.rows.length + 1001).padStart(4, '0')}`;
+          }
+          const dupExists = ds.rows.some(
+            (r) => (r[idCol] || '').trim().toLowerCase() === normalizedRow[idCol].toLowerCase()
+          );
+          if (dupExists) {
+            res.status(400).json({
+              error: `A customer with ${idCol} "${normalizedRow[idCol]}" already exists.`,
+            });
+            return;
+          }
+        }
+
+        const nextRows = [normalizedRow, ...ds.rows].map((r) => {
+          if (extraKeys.length === 0) return r;
+          const padded = { ...r };
+          for (const k of extraKeys) {
+            if (padded[k] === undefined) padded[k] = '';
+          }
+          return padded;
+        });
+
+        enforceDatasetPlanQuota(
+          company,
+          nextRows.length,
+          Buffer.byteLength(JSON.stringify(nextRows))
+        );
+
+        ds.rows = nextRows;
+        const { automationStatus } = refreshActiveDatasetState(
+          company,
+          ws,
+          actor,
+          allowModelExecution
+        );
+
+        recordAuditEvent({
+          companyId: company.id,
+          actorId: actor.id,
+          actorEmail: actor.email,
+          actorRole: actor.role,
+          action: 'CUSTOMER_RECORD_ADDED',
+          resource: 'dataset',
+          details: `Added customer record ${idCol ? normalizedRow[idCol] : `row #${nextRows.length}`}`,
+        });
+
+        const latestWs = getCompanyWorkspace(company.id);
+        res.status(201).json({
+          dataset: latestWs.activeDataset?.state ?? ds.state,
+          analytics: latestWs.activeAnalytics ?? ws.activeAnalytics,
+          activeModel: serializeActiveModelEvaluation(latestWs),
+          modelHistory: latestWs.modelHistory,
+          automationStatus,
+          usage: buildUsageSummary(company, latestWs),
+        });
+      } catch (err: unknown) {
+        const message = err instanceof Error ? err.message : 'Failed to add customer record.';
+        res.status(400).json({ error: message });
+      }
+    }
+  );
+
+  app.put(
+    '/api/dataset/customers/:rowIndex',
+    requireAuth,
+    requirePermission('canUploadAndAnalyse'),
+    (req: AuthenticatedRequest, res) => {
+      try {
+        const company = getCompanyById(req.auth!.company.id) || req.auth!.company;
+        const ws = getCompanyWorkspace(company.id);
+        if (!ws.activeDataset) {
+          res.status(400).json({ error: 'No dataset loaded.' });
+          return;
+        }
+
+        const rowIndex = Number(req.params.rowIndex);
+        if (!Number.isInteger(rowIndex) || rowIndex < 0 || rowIndex >= ws.activeDataset.rows.length) {
+          res.status(404).json({ error: 'Customer record not found.' });
+          return;
+        }
+
+        const body = (req.body || {}) as { customer?: Record<string, string> };
+        const incoming = body.customer;
+        if (!incoming || typeof incoming !== 'object') {
+          res.status(400).json({ error: 'Updated customer fields are required.' });
+          return;
+        }
+
+        const ds = ws.activeDataset;
+        const headers = ds.state.columns.map((c) => c.name);
+        const existing = ds.rows[rowIndex];
+        const updatedRow: Record<string, string> = { ...existing };
+        for (const h of headers) {
+          if (incoming[h] !== undefined) {
+            updatedRow[h] = String(incoming[h]).trim();
+          }
+        }
+
+        const idCol = ds.state.mapping.idColumn;
+        if (idCol && updatedRow[idCol]) {
+          const dupExists = ds.rows.some(
+            (r, idx) =>
+              idx !== rowIndex &&
+              (r[idCol] || '').trim().toLowerCase() === updatedRow[idCol].toLowerCase()
+          );
+          if (dupExists) {
+            res.status(400).json({
+              error: `Another customer already uses ${idCol} "${updatedRow[idCol]}".`,
+            });
+            return;
+          }
+        }
+
+        ds.rows[rowIndex] = updatedRow;
+        const allowModelExecution =
+          req.auth!.user.role !== 'ANALYST' || req.auth!.user.permissions.canGeneratePredictions;
+        const actor = {
+          id: req.auth!.user.id,
+          email: req.auth!.user.email,
+          role: req.auth!.user.role,
+        };
+
+        const { automationStatus } = refreshActiveDatasetState(
+          company,
+          ws,
+          actor,
+          allowModelExecution
+        );
+
+        recordAuditEvent({
+          companyId: company.id,
+          actorId: actor.id,
+          actorEmail: actor.email,
+          actorRole: actor.role,
+          action: 'CUSTOMER_RECORD_UPDATED',
+          resource: 'dataset',
+          details: `Updated customer record ${idCol ? updatedRow[idCol] : `#${rowIndex + 1}`}`,
+        });
+
+        const latestWs = getCompanyWorkspace(company.id);
+        res.json({
+          dataset: latestWs.activeDataset?.state ?? ds.state,
+          analytics: latestWs.activeAnalytics ?? ws.activeAnalytics,
+          activeModel: serializeActiveModelEvaluation(latestWs),
+          modelHistory: latestWs.modelHistory,
+          automationStatus,
+          usage: buildUsageSummary(company, latestWs),
+        });
+      } catch (err: unknown) {
+        const message = err instanceof Error ? err.message : 'Failed to update customer record.';
+        res.status(400).json({ error: message });
+      }
+    }
+  );
+
+  app.delete(
+    '/api/dataset/customers/:rowIndex',
+    requireAuth,
+    requirePermission('canUploadAndAnalyse'),
+    (req: AuthenticatedRequest, res) => {
+      try {
+        const company = getCompanyById(req.auth!.company.id) || req.auth!.company;
+        const ws = getCompanyWorkspace(company.id);
+        if (!ws.activeDataset) {
+          res.status(400).json({ error: 'No dataset loaded.' });
+          return;
+        }
+
+        const rowIndex = Number(req.params.rowIndex);
+        if (!Number.isInteger(rowIndex) || rowIndex < 0 || rowIndex >= ws.activeDataset.rows.length) {
+          res.status(404).json({ error: 'Customer record not found.' });
+          return;
+        }
+
+        const ds = ws.activeDataset;
+        const idCol = ds.state.mapping.idColumn;
+        const removedId = idCol ? ds.rows[rowIndex]?.[idCol] : `#${rowIndex + 1}`;
+        ds.rows.splice(rowIndex, 1);
+
+        const actor = {
+          id: req.auth!.user.id,
+          email: req.auth!.user.email,
+          role: req.auth!.user.role,
+        };
+
+        if (ds.rows.length === 0) {
+          ws.activeDataset = null;
+          ws.activeAnalytics = null;
+          ws.activeModelArtifact = null;
+          ws.modelHistory = [];
+          ws.automationStatus = null;
+          persistCompanyWorkspace(company.id, ws);
+
+          recordAuditEvent({
+            companyId: company.id,
+            actorId: actor.id,
+            actorEmail: actor.email,
+            actorRole: actor.role,
+            action: 'CUSTOMER_RECORD_DELETED',
+            resource: 'dataset',
+            details: `Removed final customer record (${removedId}); directory is now empty`,
+          });
+
+          res.json({
+            dataset: null,
+            analytics: null,
+            activeModel: null,
+            modelHistory: [],
+            automationStatus: null,
+            usage: buildUsageSummary(company, ws),
+          });
+          return;
+        }
+
+        const allowModelExecution =
+          req.auth!.user.role !== 'ANALYST' || req.auth!.user.permissions.canGeneratePredictions;
+
+        const { automationStatus } = refreshActiveDatasetState(
+          company,
+          ws,
+          actor,
+          allowModelExecution
+        );
+
+        recordAuditEvent({
+          companyId: company.id,
+          actorId: actor.id,
+          actorEmail: actor.email,
+          actorRole: actor.role,
+          action: 'CUSTOMER_RECORD_DELETED',
+          resource: 'dataset',
+          details: `Removed customer record (${removedId})`,
+        });
+
+        const latestWs = getCompanyWorkspace(company.id);
+        res.json({
+          dataset: latestWs.activeDataset?.state ?? ds.state,
+          analytics: latestWs.activeAnalytics ?? ws.activeAnalytics,
+          activeModel: serializeActiveModelEvaluation(latestWs),
+          modelHistory: latestWs.modelHistory,
+          automationStatus,
+          usage: buildUsageSummary(company, latestWs),
+        });
+      } catch (err: unknown) {
+        const message = err instanceof Error ? err.message : 'Failed to delete customer record.';
         res.status(400).json({ error: message });
       }
     }
@@ -2047,23 +3300,107 @@ export function createApiApp() {
       return;
     }
 
+    const ds = ws.activeDataset;
+    const mapping = ds.state.mapping;
     const page = Math.max(1, Number(req.query.page) || 1);
     const limit = Math.min(100, Math.max(5, Number(req.query.limit) || 20));
     const search = String(req.query.search || '').trim().toLowerCase();
+    const statusFilter = String(req.query.status || 'ALL').trim().toLowerCase();
+    const monthFilter = String(req.query.month || '').trim(); // YYYY-MM
 
-    let filtered = ws.activeDataset.rows;
+    const predByRowIndex = new Map<
+      number,
+      { churnProbability: number; riskCategory: string; predictedChurn: string }
+    >();
+    const predByCustomerId = new Map<
+      string,
+      { churnProbability: number; riskCategory: string; predictedChurn: string }
+    >();
+    if (ws.activeModelArtifact) {
+      for (const p of ws.activeModelArtifact.evaluation.predictions) {
+        predByRowIndex.set(p.rowIndex, {
+          churnProbability: p.churnProbability,
+          riskCategory: p.riskCategory,
+          predictedChurn: p.predictedChurn,
+        });
+        if (p.customerId) {
+          predByCustomerId.set(p.customerId.trim().toLowerCase(), {
+            churnProbability: p.churnProbability,
+            riskCategory: p.riskCategory,
+            predictedChurn: p.predictedChurn,
+          });
+        }
+      }
+    }
+
+    const targetCol = mapping.targetColumn;
+    const positiveVal = (mapping.positiveClassValue || '').trim().toLowerCase();
+    const idCol = mapping.idColumn;
+    const dateCol = mapping.dateColumn;
+
+    const counts = {
+      all: ds.rows.length,
+      active: 0,
+      churned: 0,
+      highRisk: 0,
+      pending: 0,
+    };
+
+    const indexed = ds.rows.map((row, idx) => {
+      const targetRaw = targetCol ? (row[targetCol] || '').trim() : '';
+      const isMissingOutcome = !targetCol || isMissingValue(targetRaw);
+      const isChurned = !isMissingOutcome && targetRaw.toLowerCase() === positiveVal;
+      const isActive = !isMissingOutcome && !isChurned;
+
+      const rowIdKey = idCol && row[idCol] ? row[idCol].trim().toLowerCase() : '';
+      const risk =
+        predByRowIndex.get(idx) || (rowIdKey ? predByCustomerId.get(rowIdKey) : undefined) || null;
+      const isHighRisk = risk?.riskCategory === 'Higher Estimated Churn Risk';
+
+      if (isMissingOutcome) counts.pending++;
+      else if (isChurned) counts.churned++;
+      else counts.active++;
+      if (isHighRisk) counts.highRisk++;
+
+      return { row, idx, risk, isActive, isChurned, isMissingOutcome, isHighRisk };
+    });
+
+    let filtered = indexed;
     if (search) {
-      filtered = ws.activeDataset.rows.filter((row) =>
-        Object.values(row).some((val) => val.toLowerCase().includes(search))
+      filtered = filtered.filter((entry) =>
+        Object.values(entry.row).some((val) => val.toLowerCase().includes(search))
       );
+    }
+    if (statusFilter === 'active') {
+      filtered = filtered.filter((entry) => entry.isActive);
+    } else if (statusFilter === 'churned') {
+      filtered = filtered.filter((entry) => entry.isChurned);
+    } else if (statusFilter === 'high_risk') {
+      filtered = filtered.filter((entry) => entry.isHighRisk);
+    } else if (statusFilter === 'pending') {
+      filtered = filtered.filter((entry) => entry.isMissingOutcome);
+    }
+    if (monthFilter && dateCol) {
+      filtered = filtered.filter((entry) => {
+        const rawDate = (entry.row[dateCol] || '').trim();
+        if (!rawDate) return false;
+        if (rawDate.startsWith(monthFilter)) return true;
+        const parsed = new Date(rawDate);
+        if (Number.isNaN(parsed.getTime())) return false;
+        const ym = `${parsed.getUTCFullYear()}-${String(parsed.getUTCMonth() + 1).padStart(2, '0')}`;
+        return ym === monthFilter;
+      });
     }
 
     const total = filtered.length;
     const start = (page - 1) * limit;
-    const items = filtered.slice(start, start + limit);
+    const slice = filtered.slice(start, start + limit);
 
     res.json({
-      items,
+      items: slice.map((s) => s.row),
+      rowIndices: slice.map((s) => s.idx),
+      risks: slice.map((s) => s.risk),
+      counts,
       total,
       page,
       limit,
@@ -2236,7 +3573,7 @@ export function createApiApp() {
         });
 
         res.json({
-          activeModel: artifact.evaluation,
+          activeModel: serializeActiveModelEvaluation(ws),
           modelHistory: ws.modelHistory,
           automationStatus: ws.automationStatus,
           usage: buildUsageSummary(company, ws),
@@ -2274,7 +3611,7 @@ export function createApiApp() {
         });
 
         res.json({
-          activeModel: ws.activeModelArtifact ? ws.activeModelArtifact.evaluation : null,
+          activeModel: serializeActiveModelEvaluation(ws),
           modelHistory: ws.modelHistory,
           automationStatus,
           usage: buildUsageSummary(company, ws),
@@ -2461,6 +3798,123 @@ export function createApiApp() {
   });
 
   // ---------------------------------------------------------------------------
+  // 9b. Customer Value Intelligence Routes (Strictly Tenant-Isolated)
+  // ---------------------------------------------------------------------------
+  app.get('/api/value-intelligence', requireAuth, (req: AuthenticatedRequest, res) => {
+    const company = getCompanyById(req.auth!.company.id) || req.auth!.company;
+    const ws = getCompanyWorkspace(company.id);
+    const summary = computeCustomerValueIntelligence({
+      dataset: ws.activeDataset,
+      activeArtifact: ws.activeModelArtifact,
+      batchScores: ws.batchScores,
+      valueConfig: ws.valueConfig || DEFAULT_CUSTOMER_VALUE_CONFIG,
+    });
+    res.json({ summary });
+  });
+
+  app.put(
+    '/api/value-intelligence/config',
+    requireAuth,
+    requirePermission('canUploadAndAnalyse'),
+    (req: AuthenticatedRequest, res) => {
+      try {
+        const company = getCompanyById(req.auth!.company.id) || req.auth!.company;
+        const ws = getCompanyWorkspace(company.id);
+        const incoming = (req.body || {}) as Partial<CustomerValueConfig>;
+        const nextConfig = normalizeValueConfig({
+          ...(ws.valueConfig || DEFAULT_CUSTOMER_VALUE_CONFIG),
+          ...incoming,
+          weights: {
+            ...(ws.valueConfig?.weights || DEFAULT_CUSTOMER_VALUE_CONFIG.weights),
+            ...(incoming.weights || {}),
+          },
+        });
+        ws.valueConfig = nextConfig;
+        persistCompanyWorkspace(company.id, ws);
+
+        const summary = computeCustomerValueIntelligence({
+          dataset: ws.activeDataset,
+          activeArtifact: ws.activeModelArtifact,
+          batchScores: ws.batchScores,
+          valueConfig: nextConfig,
+        });
+
+        recordAuditEvent({
+          companyId: company.id,
+          actorId: req.auth!.user.id,
+          actorEmail: req.auth!.user.email,
+          actorRole: req.auth!.user.role,
+          action: 'VALUE_CONFIG_UPDATED',
+          resource: 'value_intelligence',
+          details: `Updated value weights (rev=${nextConfig.weights.revenue}, highPct=${nextConfig.highValuePercentile}, riskCutoff=${nextConfig.highRiskCutoff})`,
+        });
+
+        res.json({ summary, config: nextConfig });
+      } catch (err: unknown) {
+        const message = err instanceof Error ? err.message : 'Failed to update value configuration.';
+        res.status(400).json({ error: message });
+      }
+    }
+  );
+
+  app.get('/api/value-intelligence/export-csv', requireAuth, (req: AuthenticatedRequest, res) => {
+    const company = getCompanyById(req.auth!.company.id) || req.auth!.company;
+    const ws = getCompanyWorkspace(company.id);
+    const summary = computeCustomerValueIntelligence({
+      dataset: ws.activeDataset,
+      activeArtifact: ws.activeModelArtifact,
+      batchScores: ws.batchScores,
+      valueConfig: ws.valueConfig || DEFAULT_CUSTOMER_VALUE_CONFIG,
+    });
+
+    if (!summary.valueAssessmentAvailable || summary.customers.length === 0) {
+      res.status(400).json({ error: summary.unavailableReason || 'No customer value assessment available.' });
+      return;
+    }
+
+    const headers = [
+      'CustomerID',
+      'CustomerName',
+      'Segment',
+      'ValueScore',
+      'ValueSegment',
+      'AnnualizedRevenue',
+      'ProfitContribution',
+      'ChurnProbability',
+      'ValueRiskQuadrant',
+      'RetentionPriority',
+      'ExpectedRevenueExposure',
+      'RiskFactors',
+    ];
+    const lines = [headers.join(',')];
+    for (const c of summary.customers) {
+      lines.push(
+        [
+          escapeCsvCell(c.customerId),
+          escapeCsvCell(c.customerName),
+          escapeCsvCell(c.segment),
+          String(c.valueScore),
+          escapeCsvCell(c.valueSegment),
+          c.annualizedRevenue !== null ? String(c.annualizedRevenue) : 'Unavailable',
+          c.profitContribution !== null ? String(c.profitContribution) : 'Unavailable',
+          c.churnProbability !== null ? `${(c.churnProbability * 100).toFixed(1)}%` : 'Unavailable',
+          escapeCsvCell(c.quadrantLabel),
+          escapeCsvCell(c.retentionPriority),
+          c.expectedRevenueExposure !== null ? String(c.expectedRevenueExposure) : 'Unavailable',
+          escapeCsvCell(c.riskFactors.join('; ')),
+        ].join(',')
+      );
+    }
+
+    res.setHeader('Content-Type', 'text/csv; charset=utf-8');
+    res.setHeader(
+      'Content-Disposition',
+      'attachment; filename="churnsight_customer_value_intelligence.csv"'
+    );
+    res.send(lines.join('\n'));
+  });
+
+  // ---------------------------------------------------------------------------
   // Platform Owner SaaS Governance Routes (Strictly PLATFORM_OWNER Only)
   // ---------------------------------------------------------------------------
   app.get(
@@ -2572,11 +4026,19 @@ async function startServer() {
     });
   }
 
+  httpServer.on('error', (err) => {
+    console.error('HTTP server failed to bind:', err);
+    process.exit(1);
+  });
+
   httpServer.listen(PORT, '0.0.0.0', () => {
     console.log(`Server running on http://localhost:${PORT}`);
   });
 }
 
-if (!process.env.VERCEL) {
-  startServer();
+if (!process.env.VERCEL && process.env.CHURNSIGHT_NO_LISTEN !== 'true') {
+  startServer().catch((err) => {
+    console.error('Fatal server startup error:', err);
+    process.exit(1);
+  });
 }

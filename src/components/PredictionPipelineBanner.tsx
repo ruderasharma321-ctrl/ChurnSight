@@ -231,7 +231,7 @@ export const PredictionPipelineBanner: React.FC<PredictionPipelineBannerProps> =
               className="inline-flex items-center gap-1.5 px-3.5 py-2 rounded-xl border border-slate-200 bg-white hover:bg-slate-50 text-xs font-semibold text-slate-700 transition-colors cursor-pointer whitespace-nowrap"
             >
               <SlidersHorizontal className="w-3.5 h-3.5 text-[#7655E8]" />
-              <span>Technical Studio</span>
+              <span>Advanced Tuning</span>
             </button>
           )}
         </div>

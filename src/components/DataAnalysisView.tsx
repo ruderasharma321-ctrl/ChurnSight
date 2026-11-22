@@ -157,7 +157,7 @@ export const DataAnalysisView: React.FC<DataAnalysisViewProps> = ({
             </>
           ) : (
             <>
-              Overall Churn Rate:{' '}
+              Historical Churn Rate:{' '}
               <span className="font-bold text-[#D63384]">{activeData.churnRate.toFixed(1)}%</span>
             </>
           )}

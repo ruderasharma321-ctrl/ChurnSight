@@ -4,6 +4,7 @@ import {
   ChevronLeft,
   ChevronRight,
   Download,
+  FileSpreadsheet,
   FileText,
   Info,
   RefreshCw,
@@ -62,6 +63,108 @@ function readExcelBase64(file: File): Promise<string> {
   });
 }
 
+const CUSTOMER_NAME_MISSING_TOKENS = new Set([
+  '',
+  'null',
+  'na',
+  'n/a',
+  'nan',
+  'none',
+  'undefined',
+  '?',
+  '-',
+  '—',
+]);
+
+const CUSTOMER_NAME_PRIORITY = [
+  'customername',
+  'fullname',
+  'membername',
+  'clientname',
+  'accountname',
+  'subscribername',
+  'studentname',
+  'patientname',
+  'contactname',
+  'companyname',
+  'username',
+  'name',
+];
+
+const CUSTOMER_NAME_NORM_KEYS = new Set(CUSTOMER_NAME_PRIORITY);
+
+function isValidCustomerNameValue(val: string | undefined): val is string {
+  if (!val) return false;
+  const trimmed = val.trim();
+  return !CUSTOMER_NAME_MISSING_TOKENS.has(trimmed.toLowerCase());
+}
+
+function getCustomerNameCandidates(attributes: Record<string, string> | undefined): string[] {
+  if (!attributes) return [];
+  const candidates: string[] = [];
+  let firstName = '';
+  let lastName = '';
+
+  for (const [key, rawVal] of Object.entries(attributes)) {
+    const val = (rawVal || '').trim();
+    if (!isValidCustomerNameValue(val)) continue;
+    const norm = key.toLowerCase().replace(/[^a-z0-9]/g, '');
+    if (CUSTOMER_NAME_NORM_KEYS.has(norm)) {
+      candidates.push(val);
+    } else if (norm === 'firstname') {
+      firstName = val;
+    } else if (norm === 'lastname') {
+      lastName = val;
+    } else if (
+      norm.endsWith('name') &&
+      !/(plan|tier|product|package|service|campaign|segment|region|branch|store|file|sheet|model)/.test(
+        norm
+      )
+    ) {
+      candidates.push(val);
+    }
+  }
+
+  const combinedName = `${firstName} ${lastName}`.trim();
+  if (combinedName) {
+    candidates.push(combinedName);
+  } else if (firstName) {
+    candidates.push(firstName);
+  } else if (lastName) {
+    candidates.push(lastName);
+  }
+
+  return candidates;
+}
+
+function resolveCustomerName(p: CustomerPrediction): string {
+  if (isValidCustomerNameValue(p.customerName)) {
+    return p.customerName.trim();
+  }
+  const attrs = p.attributes;
+  if (!attrs) return '';
+
+  const normalized = Object.entries(attrs).map(([k, v]) => ({
+    norm: k.toLowerCase().replace(/[^a-z0-9]/g, ''),
+    val: (v || '').trim(),
+  }));
+
+  for (const key of CUSTOMER_NAME_PRIORITY) {
+    const found = normalized.find((e) => e.norm === key && isValidCustomerNameValue(e.val));
+    if (found) return found.val;
+  }
+
+  const first =
+    normalized.find((e) => e.norm === 'firstname' && isValidCustomerNameValue(e.val))?.val || '';
+  const last =
+    normalized.find((e) => e.norm === 'lastname' && isValidCustomerNameValue(e.val))?.val || '';
+  const combined = `${first} ${last}`.trim();
+  if (combined) return combined;
+
+  const fallback = getCustomerNameCandidates(attrs)[0];
+  return fallback || '';
+}
+
 export const ChurnPredictionView: React.FC<ChurnPredictionViewProps> = ({
   company,
   dataset,
@@ -116,15 +219,20 @@ export const ChurnPredictionView: React.FC<ChurnPredictionViewProps> = ({
 
   const filteredPredictions = useMemo(() => {
     if (!activeModel) return [];
+    const rawQuery = searchId.trim().toLowerCase();
+    const normalizedQuery = rawQuery.replace(/\s+/g, ' ');
     return activeModel.predictions.filter((p) => {
       if (riskFilter !== 'ALL' && p.riskCategory !== riskFilter) return false;
       if (splitFilter !== 'ALL' && p.split !== splitFilter) return false;
-      if (searchId.trim()) {
-        const q = searchId.trim().toLowerCase();
-        if (
-          !p.customerId.toLowerCase().includes(q) &&
-          !String(p.rowIndex).includes(q)
-        ) {
+      if (normalizedQuery) {
+        const matchesId = p.customerId.toLowerCase().includes(rawQuery);
+        const resolvedName = resolveCustomerName(p);
+        const matchesResolvedName =
+          resolvedName && resolvedName.toLowerCase().replace(/\s+/g, ' ').includes(normalizedQuery);
+        const matchesCandidateName = getCustomerNameCandidates(p.attributes).some((name) =>
+          name.toLowerCase().replace(/\s+/g, ' ').includes(normalizedQuery)
+        );
+        if (!matchesId && !matchesResolvedName && !matchesCandidateName) {
           return false;
         }
       }
@@ -925,15 +1033,90 @@ export const ChurnPredictionView: React.FC<ChurnPredictionViewProps> = ({
                   </div>
                 ) : (
                   <>
+                    <div className="rounded-xl border border-purple-200/80 bg-white p-4 flex flex-col lg:flex-row lg:items-center lg:justify-between gap-4">
+                      <div className="space-y-1">
+                        <div className="text-[11px] font-bold uppercase tracking-[0.16em] text-[#7655E8]">
+                          Step 1 · Download Model-Matched Input Template
+                        </div>
+                        <div className="text-xs font-bold text-[#11142B]">
+                          Current Customer Prediction Template ({activeModel.modelName}{' '}
+                          {activeModel.version})
+                        </div>
+                        <p className="text-xs text-slate-600 leading-relaxed max-w-2xl">
+                          Contains{' '}
+                          <span className="font-mono font-semibold text-[#11142B]">
+                            {[
+                              dataset.mapping.idColumn || 'customer_id',
+                              ...dataset.mapping.featureColumns,
+                            ].join(', ')}
+                          </span>{' '}
+                          and intentionally excludes outcome/leakage columns (
+                          <span className="font-mono">
+                            {dataset.mapping.targetColumn || 'churn_status'}
+                            {dataset.mapping.churnDateColumn
+                              ? `, ${dataset.mapping.churnDateColumn}`
+                              : ''}
+                          </span>
+                          ).
+                        </p>
+                      </div>
+
+                      <div className="flex flex-wrap items-center gap-2 shrink-0">
+                        <button
+                          type="button"
+                          onClick={() => {
+                            setBatchError(null);
+                            downloadProtectedCsv(
+                              '/api/dataset/prediction-template?format=csv',
+                              `churnsight_prediction_input_${activeModel.version}.csv`
+                            ).catch((err: unknown) => {
+                              setBatchError(
+                                err instanceof Error
+                                  ? err.message
+                                  : 'Failed to download prediction CSV template.'
+                              );
+                            });
+                          }}
+                          className="inline-flex items-center gap-1.5 px-3.5 py-2 rounded-lg border border-slate-200 bg-white hover:bg-[#F5F3FF] text-xs font-semibold text-[#11142B] cursor-pointer whitespace-nowrap shrink-0"
+                        >
+                          <Download className="w-3.5 h-3.5 text-[#7655E8]" />
+                          <span>Prediction CSV</span>
+                        </button>
+                        <button
+                          type="button"
+                          onClick={() => {
+                            setBatchError(null);
+                            downloadProtectedCsv(
+                              '/api/dataset/prediction-template?format=xlsx',
+                              `churnsight_prediction_input_${activeModel.version}.xlsx`
+                            ).catch((err: unknown) => {
+                              setBatchError(
+                                err instanceof Error
+                                  ? err.message
+                                  : 'Failed to download prediction Excel template.'
+                              );
+                            });
+                          }}
+                          className="inline-flex items-center gap-1.5 px-3.5 py-2 rounded-lg bg-[#11142B] hover:bg-[#1C2147] text-white text-xs font-semibold cursor-pointer whitespace-nowrap shrink-0"
+                        >
+                          <FileSpreadsheet className="w-3.5 h-3.5 text-[#35C5E8]" />
+                          <span>Prediction Excel (.xlsx)</span>
+                        </button>
+                      </div>
+                    </div>
+
                     <div className="flex flex-col sm:flex-row sm:items-center sm:justify-between gap-4 border border-dashed border-purple-300 bg-[#F5F3FF]/50 rounded-xl p-5">
                       <div className="space-y-1">
+                        <div className="text-[11px] font-bold uppercase tracking-[0.16em] text-[#397BFF]">
+                          Step 2 · Score Active {tmpl.entityPlural}
+                        </div>
                         <div className="text-xs font-bold text-[#11142B]">
-                          Score New {tmpl.entityPlural} ({activeModel.version})
+                          Upload Unlabeled {tmpl.entitySingular} File ({activeModel.version})
                         </div>
                         <p className="text-xs text-slate-600">
                           Upload a CSV or Excel (.xlsx/.xls) file of active{' '}
-                          {tmpl.entityPlural.toLowerCase()} to score churn probability tiers for
-                          outreach prioritization.
+                          {tmpl.entityPlural.toLowerCase()} to estimate forward-looking churn
+                          probabilities for retention prioritization.
                         </p>
                       </div>
 
@@ -953,7 +1136,7 @@ export const ChurnPredictionView: React.FC<ChurnPredictionViewProps> = ({
                           type="button"
                           disabled={isBatchScoring || !canGeneratePredictions}
                           onClick={() => batchFileRef.current?.click()}
-                          className="inline-flex items-center gap-2 px-4 py-2.5 bg-[#11142B] hover:bg-[#1C2147] text-white text-xs font-semibold uppercase tracking-[0.12em] rounded-lg cursor-pointer disabled:opacity-45"
+                          className="inline-flex items-center gap-2 px-4 py-2.5 bg-[#11142B] hover:bg-[#1C2147] text-white text-xs font-semibold uppercase tracking-[0.12em] rounded-lg cursor-pointer disabled:opacity-45 whitespace-nowrap shrink-0"
                         >
                           <Upload className="w-3.5 h-3.5 text-[#35C5E8]" />
                           <span>{isBatchScoring ? 'Scoring Batch...' : 'Upload Batch File'}</span>
@@ -1102,7 +1285,8 @@ export const ChurnPredictionView: React.FC<ChurnPredictionViewProps> = ({
                     type="text"
                     value={searchId}
                     onChange={(e) => setSearchId(e.target.value)}
-                    placeholder="Search ID..."
+                    placeholder="Search by Customer ID or Name..."
+                    aria-label="Search by Customer ID or Name"
                     className="pl-8 pr-3 py-1.5 text-xs border border-slate-200 rounded-lg bg-[#F5F3FF]/45 text-[#11142B] w-36 focus:outline-none focus:border-[#7655E8]"
                   />
                 </div>
@@ -1166,7 +1350,9 @@ export const ChurnPredictionView: React.FC<ChurnPredictionViewProps> = ({
                 <thead className="sticky top-0 bg-[#F5F3FF]/95 backdrop-blur-xs border-b border-slate-200 text-[10px] font-semibold uppercase tracking-[0.14em] text-slate-500">
                   <tr>
                     <th className="py-3 pl-6 pr-3">Row</th>
-                    <th className="py-3 px-3">{tmpl.entitySingular} ID</th>
+                    <th className="py-3 px-3 min-w-[200px] whitespace-nowrap">
+                      {tmpl.entitySingular} ID / Customer Name
+                    </th>
                     <th className="py-3 px-3">Sample Group</th>
                     <th className="py-3 px-3">Historical Status</th>
                     <th className="py-3 px-3">Predicted Signal</th>
@@ -1179,7 +1365,7 @@ export const ChurnPredictionView: React.FC<ChurnPredictionViewProps> = ({
                     <tr>
                       <td colSpan={7} className="py-10 text-center text-slate-500">
                         <div className="space-y-2">
-                          <div>No records match the active portfolio filters.</div>
+                          <div>No customers found</div>
                           <button
                             type="button"
                             onClick={() => {
@@ -1200,6 +1386,7 @@ export const ChurnPredictionView: React.FC<ChurnPredictionViewProps> = ({
                         (item) => item.rowIndex === p.rowIndex
                       );
                       const isSelected = originalIdx === selectedCustomerIdx;
+                      const customerName = resolveCustomerName(p);
                       return (
                         <tr
                           key={p.rowIndex}
@@ -1218,8 +1405,20 @@ export const ChurnPredictionView: React.FC<ChurnPredictionViewProps> = ({
                           <td className="py-2.5 pl-6 pr-3 font-mono tabular-nums text-slate-400">
                             {p.rowIndex}
                           </td>
-                          <td className="py-2.5 px-3 font-mono font-semibold text-[#11142B]">
-                            {p.customerId}
+                          <td className="py-2.5 px-3 min-w-[200px]">
+                            <div className="font-mono font-bold text-[#11142B] leading-tight">
+                              {p.customerId}
+                            </div>
+                            <div
+                              className={`font-sans text-[11px] leading-snug mt-0.5 truncate max-w-[240px] ${
+                                customerName
+                                  ? 'text-slate-500 font-normal'
+                                  : 'text-slate-400 font-normal'
+                              }`}
+                              title={customerName || 'Name unavailable'}
+                            >
+                              {customerName || 'Name unavailable'}
+                            </div>
                           </td>
                           <td
                             className={`py-2.5 px-3 font-medium ${

@@ -31,6 +31,7 @@ import type {
   RiskCategory,
   SplitStrategy,
   TrainModelRequest,
+  UploadPathway,
   ValidationIssue,
 } from '../src/types/churn.ts';
 import {
@@ -87,6 +88,70 @@ const MISSING_TOKENS = new Set(['', 'null', 'na', 'n/a', 'nan', 'none', 'undefin
 export function isMissingValue(val: string | undefined): boolean {
   if (val === undefined || val === null) return true;
   return MISSING_TOKENS.has(val.trim().toLowerCase());
+}
+
+const NAME_MISSING_TOKENS = new Set([
+  '',
+  'null',
+  'na',
+  'n/a',
+  'nan',
+  'none',
+  'undefined',
+  '?',
+  '-',
+  '—',
+]);
+
+const CUSTOMER_NAME_PRIORITY = [
+  'customername',
+  'fullname',
+  'membername',
+  'clientname',
+  'accountname',
+  'subscribername',
+  'studentname',
+  'patientname',
+  'contactname',
+  'companyname',
+  'username',
+  'name',
+];
+
+export function extractCustomerNameFromRow(row: Record<string, string> | undefined): string {
+  if (!row) return '';
+  const normalized = Object.entries(row).map(([k, v]) => ({
+    norm: k.toLowerCase().replace(/[^a-z0-9]/g, ''),
+    val: (v || '').trim(),
+  }));
+
+  for (const key of CUSTOMER_NAME_PRIORITY) {
+    const found = normalized.find(
+      (e) => e.norm === key && !NAME_MISSING_TOKENS.has(e.val.toLowerCase())
+    );
+    if (found) return found.val;
+  }
+
+  const first =
+    normalized.find(
+      (e) => e.norm === 'firstname' && !NAME_MISSING_TOKENS.has(e.val.toLowerCase())
+    )?.val || '';
+  const last =
+    normalized.find(
+      (e) => e.norm === 'lastname' && !NAME_MISSING_TOKENS.has(e.val.toLowerCase())
+    )?.val || '';
+  const combined = `${first} ${last}`.trim();
+  if (combined) return combined;
+
+  const suffix = normalized.find(
+    (e) =>
+      e.norm.endsWith('name') &&
+      !/(plan|tier|product|package|service|campaign|segment|region|branch|store|file|sheet|model)/.test(
+        e.norm
+      ) &&
+      !NAME_MISSING_TOKENS.has(e.val.toLowerCase())
+  );
+  return suffix ? suffix.val : '';
 }
 
 export function parseCsvText(csvText: string): { headers: string[]; rows: Record<string, string>[] } {
@@ -303,14 +368,65 @@ function isLikelyDateString(val: string): boolean {
 
 function inferSemanticRole(header: string, dataType: ColumnDataType): ColumnSemanticRole {
   const h = header.toLowerCase();
-  if (dataType === 'identifier' || /(customer|user|account|member|workspace|client).*id|^id$/.test(h)) {
+  if (dataType === 'identifier' || /(customer|user|account|member|workspace|client|policyholder|patient|learner).*id|^id$/.test(h)) {
     return 'id';
   }
-  if (/(churn|exited|attrition|lapsed|cancelled|dropped|non_renew)/.test(h) && dataType !== 'date') {
+  if (/(churn_date|cancel_date|cancellation_date|closure_date|termination_date|exit_date|close_date|churned_date|cancel_dt)/.test(h)) {
+    return 'churn_date';
+  }
+  if (/(observation_date|snapshot_date|as_of_date|eval_date)/.test(h)) {
+    return 'observation_date';
+  }
+  if (/(registration_date|signup_date|joined_date|join_date|enrollment_date|enrolled_date|created_at|start_date)/.test(h)) {
+    return 'registration_date';
+  }
+  if (/(customer_status|account_status|membership_status|subscription_status|lifecycle_status)/.test(h)) {
+    return 'status';
+  }
+  if (/(churn|exited|attrition|lapsed|cancelled|dropped|discontinued|non_renew)/.test(h) && dataType !== 'date') {
     return 'target';
   }
   if (dataType === 'date' || /(date|_at$|timestamp|renewal|signup|joined)/.test(h)) {
     return 'date';
+  }
+  if (
+    dataType === 'numeric' &&
+    /(satisfaction|csat|nps|sentiment|feedback_score)/.test(h)
+  ) {
+    return 'satisfaction';
+  }
+  if (
+    dataType === 'numeric' &&
+    /(complaint|complaints|dispute)/.test(h)
+  ) {
+    return 'complaints';
+  }
+  if (
+    dataType === 'numeric' &&
+    /(ticket|tickets_raised|open_tickets|resolved_tickets|unresolved_tickets)/.test(h)
+  ) {
+    return 'tickets';
+  }
+  if (
+    dataType === 'numeric' &&
+    /(resolution_days|resolution_time|avg_resolution)/.test(h)
+  ) {
+    return 'resolution_days';
+  }
+  if (
+    dataType === 'numeric' &&
+    /(profit|margin)/.test(h)
+  ) {
+    return 'profit';
+  }
+  if (
+    dataType === 'numeric' &&
+    /(service_cost|cost_to_serve|acquisition_cost|cogs|operating_cost|total_cost)/.test(h)
+  ) {
+    return 'cost';
+  }
+  if (/(payment_status|late_payment|overdue_count|outstanding_balance)/.test(h)) {
+    return 'payment_health';
   }
   if (
     dataType === 'numeric' &&
@@ -323,7 +439,7 @@ function inferSemanticRole(header: string, dataType: ColumnDataType): ColumnSema
   }
   if (
     dataType === 'numeric' &&
-    /(frequency|orders|visits|checkins|sessions|transactions|tickets|calls|products|claims|usage|active_users)/.test(h)
+    /(frequency|orders|visits|checkins|sessions|transactions|calls|products|claims|usage|active_users)/.test(h)
   ) {
     return 'frequency';
   }
@@ -500,13 +616,25 @@ export function getUniqueColumnValues(rows: Record<string, string>[], columnName
 
 const SUSPICIOUS_LEAKAGE_PATTERNS = [
   'churn_date',
+  'churned_date',
   'cancel_date',
+  'cancel_dt',
   'cancellation_date',
+  'closure_date',
+  'termination_date',
+  'close_date',
   'exit_date',
   'churn_reason',
+  'cancellation_reason',
   'cancel_reason',
+  'exit_reason',
+  'reason_for_leaving',
+  'reactivated',
+  'reactivation_date',
+  'previous_churn_risk',
   'churn_score',
   'predicted_churn',
+  'post_churn',
 ];
 
 function looksLikeLeakageColumn(colName: string): boolean {
@@ -514,28 +642,121 @@ function looksLikeLeakageColumn(colName: string): boolean {
   return SUSPICIOUS_LEAKAGE_PATTERNS.some((p) => lower.includes(p));
 }
 
+const EXPLICIT_CHURN_VALUE_TOKENS = new Set([
+  'yes',
+  'no',
+  '1',
+  '0',
+  'true',
+  'false',
+  'churn',
+  'churned',
+  'retained',
+  'stayed',
+  'exited',
+  'lapsed',
+  'cancelled',
+  'canceled',
+  'dropped',
+  'discontinued',
+]);
+
+function hasExplicitChurnValueSemantics(
+  rows: Record<string, string>[],
+  columnName: string
+): boolean {
+  const vals = getUniqueColumnValues(rows, columnName).map((v) => v.toLowerCase());
+  if (vals.length < 2 || vals.length > 6) return false;
+  return vals.some((v) => EXPLICIT_CHURN_VALUE_TOKENS.has(v));
+}
+
 export function autoDetectMapping(
   columns: ColumnProfile[],
   rows: Record<string, string>[],
-  industry: IndustryKey = 'telecommunications'
+  industry: IndustryKey = 'telecommunications',
+  uploadPathway?: UploadPathway,
+  churnDefinition?: ChurnDefinition
 ): ColumnMapping {
   const headers = columns.map((c) => c.name);
   const tmpl = getIndustryTemplate(industry);
 
-  let targetColumn =
-    findMatchingColumn(headers, [
-      ...tmpl.suggestedTargetCols,
-      'churn',
-      'exited',
-      'target',
-      'status',
-      'attrition',
-      'is_churn',
-    ]) || '';
+  const cancellationHint = churnDefinition?.cancellationDateColumnHint?.trim();
+  const churnStatusHint = churnDefinition?.churnStatusColumnHint?.trim();
 
-  if (!targetColumn) {
-    const binaryCol = columns.find((c) => c.dataType === 'categorical' && c.uniqueCount === 2);
-    targetColumn = binaryCol ? binaryCol.name : '';
+  const churnDateColumn =
+    findMatchingColumn(headers, [
+      ...(cancellationHint ? [cancellationHint] : []),
+      'churn_date',
+      'cancellation_date',
+      'cancel_date',
+      'closure_date',
+      'termination_date',
+      'exit_date',
+      'close_date',
+      'churned_date',
+    ]) || null;
+
+  const observationDateColumn =
+    findMatchingColumn(headers, ['observation_date', 'snapshot_date', 'as_of_date', 'eval_date']) ||
+    null;
+
+  const registrationDateColumn =
+    findMatchingColumn(headers, [
+      'registration_date',
+      'signup_date',
+      'joined_date',
+      'join_date',
+      'enrollment_date',
+      'enrolled_date',
+      'created_at',
+      'start_date',
+    ]) || null;
+
+  const statusColumn =
+    findMatchingColumn(headers, [
+      'customer_status',
+      'account_status',
+      'membership_status',
+      'subscription_status',
+      'lifecycle_status',
+    ]) || null;
+
+  let targetColumn = '';
+  if (uploadPathway !== 'new_business' && uploadPathway !== 'current_prediction') {
+    const safeIndustryTargets = tmpl.suggestedTargetCols.filter(
+      (c) => c.toLowerCase() !== 'status'
+    );
+    const nonDateHeaders = columns
+      .filter((c) => c.dataType !== 'date' && c.name !== churnDateColumn && !looksLikeLeakageColumn(c.name))
+      .map((c) => c.name);
+
+    targetColumn =
+      findMatchingColumn(nonDateHeaders, [
+        ...(churnStatusHint ? [churnStatusHint] : []),
+        'churn_status',
+        ...safeIndustryTargets,
+        'churned',
+        'churn',
+        'exited',
+        'lapsed',
+        'dropped',
+        'discontinued',
+        'attrition',
+        'is_churn',
+        'is_churned',
+        'churn_flag',
+        'exit_flag',
+        'churn_label',
+        'target',
+      ]) || '';
+
+    // Only accept a generic "status" column as historical target if its values have churn semantics (e.g. Churned/Retained, Yes/No)
+    if (!targetColumn) {
+      const genericStatus = findMatchingColumn(nonDateHeaders, ['status']);
+      if (genericStatus && hasExplicitChurnValueSemantics(rows, genericStatus)) {
+        targetColumn = genericStatus;
+      }
+    }
   }
 
   const positiveClassValue = targetColumn ? detectPositiveClass(rows, targetColumn) : '';
@@ -546,6 +767,9 @@ export function autoDetectMapping(
     'account_id',
     'member_id',
     'workspace_id',
+    'policyholder_id',
+    'patient_id',
+    'learner_id',
     'cust_id',
     'userid',
     'user_id',
@@ -579,9 +803,20 @@ export function autoDetectMapping(
     'price',
   ]);
 
+  const nonLeakageDateHeaders = headers.filter(
+    (h) => h !== churnDateColumn && !looksLikeLeakageColumn(h)
+  );
   const dateColumn =
-    findMatchingColumn(headers, tmpl.suggestedDateCols) ||
-    columns.find((c) => c.dataType === 'date' && !looksLikeLeakageColumn(c.name))?.name ||
+    findMatchingColumn(nonLeakageDateHeaders, tmpl.suggestedDateCols) ||
+    observationDateColumn ||
+    columns.find(
+      (c) =>
+        c.dataType === 'date' &&
+        c.name !== churnDateColumn &&
+        c.name !== registrationDateColumn &&
+        !looksLikeLeakageColumn(c.name)
+    )?.name ||
+    registrationDateColumn ||
     null;
 
   const frequencyColumn = findMatchingColumn(headers, tmpl.suggestedFrequencyCols);
@@ -591,6 +826,7 @@ export function autoDetectMapping(
       (c) =>
         c.name !== targetColumn &&
         c.name !== idColumn &&
+        c.name !== churnDateColumn &&
         c.dataType !== 'identifier' &&
         c.dataType !== 'date' &&
         !looksLikeLeakageColumn(c.name)
@@ -605,6 +841,10 @@ export function autoDetectMapping(
     tenureColumn: tenureColumn !== targetColumn ? tenureColumn : null,
     monthlyChargesColumn: monthlyChargesColumn !== targetColumn ? monthlyChargesColumn : null,
     dateColumn: dateColumn !== targetColumn ? dateColumn : null,
+    observationDateColumn: observationDateColumn !== targetColumn ? observationDateColumn : null,
+    registrationDateColumn: registrationDateColumn !== targetColumn ? registrationDateColumn : null,
+    churnDateColumn: churnDateColumn !== targetColumn ? churnDateColumn : null,
+    statusColumn: statusColumn !== targetColumn ? statusColumn : null,
     frequencyColumn: frequencyColumn !== targetColumn ? frequencyColumn : null,
     featureColumns,
   };
@@ -664,14 +904,38 @@ export function buildMappingRationales(
     evaluateField(
       'targetColumn',
       mapping.targetColumn,
-      [...tmpl.suggestedTargetCols, 'churn', 'exited', 'target', 'status', 'attrition', 'is_churn'],
+      ['churn_status', ...tmpl.suggestedTargetCols, 'churn', 'exited', 'target', 'attrition', 'is_churn'],
       'historical churn outcome'
     ),
     evaluateField(
       'idColumn',
       mapping.idColumn,
-      ['customer_id', 'customerid', 'account_id', 'member_id', 'workspace_id', 'user_id', 'id'],
+      ['customer_id', 'customerid', 'account_id', 'member_id', 'workspace_id', 'policyholder_id', 'patient_id', 'learner_id', 'user_id', 'id'],
       'unique customer identifier'
+    ),
+    evaluateField(
+      'statusColumn',
+      mapping.statusColumn,
+      ['customer_status', 'account_status', 'membership_status', 'subscription_status'],
+      'current operational status'
+    ),
+    evaluateField(
+      'observationDateColumn',
+      mapping.observationDateColumn,
+      ['observation_date', 'snapshot_date', 'as_of_date'],
+      'historical observation snapshot date'
+    ),
+    evaluateField(
+      'registrationDateColumn',
+      mapping.registrationDateColumn,
+      ['registration_date', 'signup_date', 'join_date', 'created_at'],
+      'customer registration date'
+    ),
+    evaluateField(
+      'churnDateColumn',
+      mapping.churnDateColumn,
+      ['churn_date', 'cancellation_date', 'cancel_date', 'closure_date', 'exit_date'],
+      'audit cancellation/churn date (excluded from ML features)'
     ),
     evaluateField(
       'contractColumn',
@@ -774,9 +1038,16 @@ function computeBehaviourMonitoring(
   hasValidLabels = true
 ): BehaviourMonitoringSummary | null {
   const dateCol =
-    mapping.dateColumn && columns.some((c) => c.name === mapping.dateColumn)
+    (mapping.dateColumn && columns.some((c) => c.name === mapping.dateColumn)
       ? mapping.dateColumn
-      : null;
+      : null) ||
+    (mapping.observationDateColumn && columns.some((c) => c.name === mapping.observationDateColumn)
+      ? mapping.observationDateColumn
+      : null) ||
+    (mapping.registrationDateColumn &&
+    columns.some((c) => c.name === mapping.registrationDateColumn)
+      ? mapping.registrationDateColumn
+      : null);
   const freqCol =
     mapping.frequencyColumn && columns.some((c) => c.name === mapping.frequencyColumn)
       ? mapping.frequencyColumn
@@ -789,9 +1060,14 @@ function computeBehaviourMonitoring(
     mapping.monthlyChargesColumn && columns.some((c) => c.name === mapping.monthlyChargesColumn)
       ? mapping.monthlyChargesColumn
       : null;
+  const statusCol =
+    mapping.statusColumn && columns.some((c) => c.name === mapping.statusColumn)
+      ? mapping.statusColumn
+      : null;
 
   const signalsDetected: string[] = [];
   if (dateCol) signalsDetected.push(`Activity / Event Dates (${dateCol})`);
+  if (statusCol) signalsDetected.push(`Customer Status (${statusCol})`);
   if (freqCol) signalsDetected.push(`Engagement Frequency (${freqCol})`);
   if (tenureCol) signalsDetected.push(`Customer Tenure (${tenureCol})`);
   if (revCol) signalsDetected.push(`Customer Value / Spend (${revCol})`);
@@ -946,10 +1222,15 @@ export function assessDataReadiness(params: {
     (c) => (c.inconsistentCategoryCount || 0) > 0
   ).length;
 
+  const leakageColumnsExcluded = columns
+    .filter((c) => looksLikeLeakageColumn(c.name) || c.name === mapping.churnDateColumn)
+    .map((c) => c.name);
+
   const usableFeatures = mapping.featureColumns.filter((name) => {
     const col = columns.find((c) => c.name === name);
     return (
       col &&
+      col.name !== mapping.churnDateColumn &&
       (col.dataType === 'numeric' || col.dataType === 'categorical') &&
       !looksLikeLeakageColumn(col.name)
     );
@@ -975,9 +1256,16 @@ export function assessDataReadiness(params: {
   const unlabeledRows = Math.max(0, totalRows - labeledRows);
   const minorityClassCount =
     churnedCount > 0 && retainedCount > 0 ? Math.min(churnedCount, retainedCount) : 0;
+  const minorityRatio = labeledRows > 0 && minorityClassCount > 0 ? minorityClassCount / labeledRows : 0;
+  const classImbalanceWarning =
+    churnedCount > 0 && retainedCount > 0 && minorityRatio < 0.12
+      ? `Severe class imbalance detected: minority outcome is ${(minorityRatio * 100).toFixed(1)}% (${minorityClassCount} of ${labeledRows} labeled rows). Prioritize Recall and F1-Score over raw accuracy.`
+      : null;
 
-  const dateProfile = mapping.dateColumn
-    ? columns.find((c) => c.name === mapping.dateColumn)
+  const activeDateColName =
+    mapping.dateColumn || mapping.observationDateColumn || mapping.registrationDateColumn || null;
+  const dateProfile = activeDateColName
+    ? columns.find((c) => c.name === activeDateColName)
     : undefined;
   let validDatesInMappedCol = 0;
   const distinctDateTs = new Set<number>();
@@ -999,6 +1287,7 @@ export function assessDataReadiness(params: {
   const churnDefinitionConfirmed = Boolean(churnDefinition?.confirmedByUser);
   const hasBehaviourSignals = Boolean(
     hasValidDates ||
+      (mapping.statusColumn && columns.some((c) => c.name === mapping.statusColumn)) ||
       (mapping.frequencyColumn && columns.some((c) => c.name === mapping.frequencyColumn)) ||
       (mapping.tenureColumn && columns.some((c) => c.name === mapping.tenureColumn)) ||
       (mapping.monthlyChargesColumn && columns.some((c) => c.name === mapping.monthlyChargesColumn))
@@ -1305,6 +1594,8 @@ export function assessDataReadiness(params: {
       churnedCount,
       retainedCount,
       minorityClassCount,
+      classImbalanceWarning,
+      leakageColumnsExcluded,
       usableFeatureCount,
       missingCellPercent,
       duplicateRowCount: duplicateCount,
@@ -1398,6 +1689,24 @@ export function validateDataset(
         message: `${missingTarget} row(s) have missing values in "${mapping.targetColumn}" and will be excluded from supervised training until outcomes are recorded.`,
       });
     }
+
+    let posHits = 0;
+    let totalLabeledHits = 0;
+    for (const r of rows) {
+      const v = r[mapping.targetColumn];
+      if (!isMissingValue(v)) {
+        totalLabeledHits++;
+        if (v.trim() === mapping.positiveClassValue) posHits++;
+      }
+    }
+    const minorityHits = Math.min(posHits, totalLabeledHits - posHits);
+    if (totalLabeledHits >= 10 && minorityHits > 0 && minorityHits / totalLabeledHits < 0.12) {
+      issues.push({
+        severity: 'warning',
+        column: mapping.targetColumn,
+        message: `Class imbalance detected: minority outcome represents ${((minorityHits / totalLabeledHits) * 100).toFixed(1)}% (${minorityHits}/${totalLabeledHits}) of labeled rows. Review Recall and F1-Score alongside Accuracy.`,
+      });
+    }
   }
 
   if (mapping.featureColumns.length === 0) {
@@ -1407,12 +1716,23 @@ export function validateDataset(
     });
   }
 
+  const leakageColsInDataset = columns.filter(
+    (c) => looksLikeLeakageColumn(c.name) || c.name === mapping.churnDateColumn
+  );
+  for (const lCol of leakageColsInDataset) {
+    issues.push({
+      severity: 'info',
+      column: lCol.name,
+      message: `Post-outcome / audit column "${lCol.name}" is preserved for record keeping and automatically excluded from predictive ML features to prevent target leakage.`,
+    });
+  }
+
   for (const colName of mapping.featureColumns) {
-    if (looksLikeLeakageColumn(colName)) {
+    if (looksLikeLeakageColumn(colName) || colName === mapping.churnDateColumn) {
       issues.push({
         severity: 'warning',
         column: colName,
-        message: `Selected feature "${colName}" resembles a post-churn or leakage column and is excluded from predictive modeling.`,
+        message: `Selected feature "${colName}" resembles a post-churn or leakage column and is blocked from predictive modeling.`,
       });
     }
   }
@@ -2323,10 +2643,19 @@ export function trainAndEvaluateModel(
     );
   }
 
-  const usableFeatureCount = mapping.featureColumns.filter((colName) => {
+  const safeFeatureColumns = mapping.featureColumns.filter((colName) => {
     const c = columns.find((col) => col.name === colName);
-    return c && (c.dataType === 'numeric' || c.dataType === 'categorical') && !looksLikeLeakageColumn(colName);
-  }).length;
+    return (
+      c &&
+      c.name !== mapping.targetColumn &&
+      c.name !== mapping.idColumn &&
+      c.name !== mapping.churnDateColumn &&
+      (c.dataType === 'numeric' || c.dataType === 'categorical') &&
+      !looksLikeLeakageColumn(colName)
+    );
+  });
+
+  const usableFeatureCount = safeFeatureColumns.length;
   const minSampleFloor = Math.max(8, usableFeatureCount + 4);
   if (validRows.length < minSampleFloor) {
     throw new Error(
@@ -2400,14 +2729,18 @@ export function trainAndEvaluateModel(
   const testCount = testItems.length;
   const trainCount = trainItems.length;
 
-  // Target leakage check on selected features
+  // Target leakage audit & hard exclusion on mapped/attempted features
   const leakageWarnings: string[] = [];
   for (const colName of mapping.featureColumns) {
-    if (looksLikeLeakageColumn(colName)) {
+    if (looksLikeLeakageColumn(colName) || colName === mapping.churnDateColumn) {
       leakageWarnings.push(
-        `Feature "${colName}" matches a post-outcome / cancellation column pattern and may cause target leakage.`
+        `Blocked post-outcome leakage column "${colName}" from predictive model training.`
       );
     }
+  }
+
+  const blockedExactLeakageCols = new Set<string>();
+  for (const colName of safeFeatureColumns) {
     let exactMatch = 0;
     let inverseMatch = 0;
     for (const item of validRows) {
@@ -2418,17 +2751,20 @@ export function trainAndEvaluateModel(
     }
     const maxAgreement = Math.max(exactMatch, inverseMatch) / validRows.length;
     if (maxAgreement >= 0.98) {
+      blockedExactLeakageCols.add(colName);
       leakageWarnings.push(
-        `Feature "${colName}" exhibits ${(maxAgreement * 100).toFixed(1)}% direct agreement with target "${mapping.targetColumn}", indicating potential target leakage.`
+        `Excluded "${colName}" (${(maxAgreement * 100).toFixed(1)}% direct agreement with target "${mapping.targetColumn}") to prevent target leakage.`
       );
     }
   }
+
+  const finalTrainingFeatures = safeFeatureColumns.filter((c) => !blockedExactLeakageCols.has(c));
 
   // Fit preprocessing strictly on trainItems
   const features: FeatureMeta[] = [];
   const encodedFeatureNames: string[] = [];
 
-  for (const colName of mapping.featureColumns) {
+  for (const colName of finalTrainingFeatures) {
     const colProfile = columns.find((c) => c.name === colName);
     if (!colProfile || colProfile.dataType === 'identifier' || colProfile.dataType === 'date') {
       continue;
@@ -2603,9 +2939,12 @@ export function trainAndEvaluateModel(
         ? item.row[mapping.idColumn]
         : `CUST-${String(item.rowIndex).padStart(4, '0')}`;
 
+    const customerName = extractCustomerNameFromRow(item.row);
+
     return {
       rowIndex: item.rowIndex,
       customerId,
+      ...(customerName ? { customerName } : {}),
       split: testRowIndices.has(item.rowIndex) ? 'Unseen Test' : 'Training',
       actualChurn: item.label === 1 ? 'Churned' : 'Stayed',
       predictedChurn: prob >= 0.5 ? 'Likely to Churn' : 'Likely to Stay',

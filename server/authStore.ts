@@ -12,6 +12,7 @@ import type {
   IndustryKey,
   LoginRequest,
   RegisterCompanyRequest,
+  SatisfactionScale,
   SubscriptionPlanTier,
   UserAccount,
   UserPermissions,
@@ -24,6 +25,11 @@ import {
   INDUSTRY_PROFILES,
 } from '../src/utils/industryConfig.ts';
 import { getSubscriptionPlanSpec } from '../src/utils/subscriptionPlans.ts';
+import {
+  isRemoteStoreConfigured,
+  remoteGetJson,
+  remoteSetJson,
+} from './remoteStore.ts';
 
 interface StoredCompany {
   id: string;
@@ -38,6 +44,7 @@ interface StoredCompany {
   businessModel?: BusinessModel;
   customerRelationshipType?: CustomerRelationshipType;
   subscriptionPlan?: SubscriptionPlanTier;
+  satisfactionScale?: SatisfactionScale;
   churnDefinition?: ChurnDefinition;
   privacySettings?: DataPrivacySettings;
   createdAt: string;
@@ -72,11 +79,32 @@ interface AuthDatabase {
   sessions: StoredSession[];
 }
 
+export type AuthErrorCode =
+  | 'ACCOUNT_ALREADY_EXISTS'
+  | 'COMPANY_ALREADY_EXISTS'
+  | 'ACCOUNT_NOT_FOUND'
+  | 'INVALID_PASSWORD'
+  | 'ACCOUNT_DEACTIVATED'
+  | 'VALIDATION_ERROR';
+
+export class AuthServiceError extends Error {
+  code: AuthErrorCode;
+  statusCode: number;
+
+  constructor(message: string, code: AuthErrorCode, statusCode = 400) {
+    super(message);
+    this.name = 'AuthServiceError';
+    this.code = code;
+    this.statusCode = statusCode;
+  }
+}
+
 export interface AuthContext {
   tokenHash: string;
   user: UserAccount;
   company: CompanyWorkspaceInfo;
   expiresAt: string;
+  rememberMe: boolean;
 }
 
 const DATA_DIR =
@@ -84,33 +112,94 @@ const DATA_DIR =
   (process.env.VERCEL ? path.join(os.tmpdir(), 'churnsight-data') : path.resolve(process.cwd(), '.data'));
 const DB_FILE = path.join(DATA_DIR, 'churnsight_auth.json');
 
+const REMOTE_AUTH_KEY = 'churnsight:auth:v1';
 const SESSION_SHORT_MS = 8 * 60 * 60 * 1000; // 8 hours
 const SESSION_REMEMBER_MS = 30 * 24 * 60 * 60 * 1000; // 30 days
 const MAX_IMAGE_DATA_URL_LENGTH = 750_000; // ~550KB image limit
 
+let lastDiskMtimeMs = 0;
 let db: AuthDatabase = loadDbFromDisk();
+let lastRemoteHydratedAt = 0;
+let pendingRemoteWrite: Promise<void> | null = null;
+
+function sanitizeLoadedDb(parsed: Partial<AuthDatabase> | null | undefined): AuthDatabase {
+  const now = Date.now();
+  return {
+    companies: Array.isArray(parsed?.companies) ? parsed.companies : [],
+    users: Array.isArray(parsed?.users) ? parsed.users : [],
+    sessions: Array.isArray(parsed?.sessions)
+      ? parsed.sessions.filter((s) => new Date(s.expiresAt).getTime() > now)
+      : [],
+  };
+}
 
 function loadDbFromDisk(): AuthDatabase {
   try {
     if (fs.existsSync(DB_FILE)) {
+      const stat = fs.statSync(DB_FILE);
       const raw = fs.readFileSync(DB_FILE, 'utf-8');
+      if (!raw.trim()) {
+        return { companies: [], users: [], sessions: [] };
+      }
       const parsed = JSON.parse(raw) as Partial<AuthDatabase>;
-      const now = Date.now();
-      return {
-        companies: Array.isArray(parsed.companies) ? parsed.companies : [],
-        users: Array.isArray(parsed.users) ? parsed.users : [],
-        sessions: Array.isArray(parsed.sessions)
-          ? parsed.sessions.filter((s) => new Date(s.expiresAt).getTime() > now)
-          : [],
-      };
+      lastDiskMtimeMs = stat.mtimeMs;
+      return sanitizeLoadedDb(parsed);
     }
-  } catch {
-    // Fall back to fresh database if file is missing or unreadable
+  } catch (err) {
+    console.error('Failed to read auth store from disk:', err);
   }
   return { companies: [], users: [], sessions: [] };
 }
 
-function saveDbToDisk(): void {
+function syncDbFromDiskIfNewer(): void {
+  if (isRemoteStoreConfigured()) return;
+  try {
+    if (!fs.existsSync(DB_FILE)) return;
+    const stat = fs.statSync(DB_FILE);
+    if (stat.mtimeMs > lastDiskMtimeMs) {
+      const raw = fs.readFileSync(DB_FILE, 'utf-8');
+      if (!raw.trim()) return;
+      const parsed = JSON.parse(raw) as Partial<AuthDatabase>;
+      db = sanitizeLoadedDb(parsed);
+      lastDiskMtimeMs = stat.mtimeMs;
+    }
+  } catch (err) {
+    console.error('Failed to sync auth store from disk:', err);
+  }
+}
+
+export async function ensureAuthHydrated(force = false): Promise<void> {
+  if (!isRemoteStoreConfigured()) {
+    syncDbFromDiskIfNewer();
+    return;
+  }
+  // On serverless instances, re-hydrate periodically or when memory is empty so concurrent instances stay consistent
+  const stale = Date.now() - lastRemoteHydratedAt > 2000;
+  if (!force && !stale && db.users.length > 0) {
+    return;
+  }
+  try {
+    if (pendingRemoteWrite) {
+      await pendingRemoteWrite;
+    }
+    const remote = await remoteGetJson<Partial<AuthDatabase>>(REMOTE_AUTH_KEY);
+    if (remote) {
+      db = sanitizeLoadedDb(remote);
+      saveDbToDiskOnly();
+    }
+    lastRemoteHydratedAt = Date.now();
+  } catch (err) {
+    console.error('Failed to hydrate auth store from remote KV:', err);
+  }
+}
+
+export async function flushPendingAuthWrites(): Promise<void> {
+  if (pendingRemoteWrite) {
+    await pendingRemoteWrite;
+  }
+}
+
+function saveDbToDiskOnly(): void {
   try {
     if (!fs.existsSync(DATA_DIR)) {
       fs.mkdirSync(DATA_DIR, { recursive: true });
@@ -118,8 +207,26 @@ function saveDbToDisk(): void {
     const tmpFile = `${DB_FILE}.${process.pid}.tmp`;
     fs.writeFileSync(tmpFile, JSON.stringify(db, null, 2), { encoding: 'utf-8', mode: 0o600 });
     fs.renameSync(tmpFile, DB_FILE);
+    lastDiskMtimeMs = fs.statSync(DB_FILE).mtimeMs;
   } catch (err) {
     console.error('Failed to persist auth store:', err);
+  }
+}
+
+function saveDbToDisk(): void {
+  saveDbToDiskOnly();
+  if (isRemoteStoreConfigured()) {
+    const snapshot = JSON.parse(JSON.stringify(db)) as AuthDatabase;
+    const writeTask = (pendingRemoteWrite || Promise.resolve())
+      .catch(() => undefined)
+      .then(() => remoteSetJson(REMOTE_AUTH_KEY, snapshot))
+      .then(() => {
+        lastRemoteHydratedAt = Date.now();
+      })
+      .catch((err) => {
+        console.error('Failed to persist auth store to remote KV:', err);
+      });
+    pendingRemoteWrite = writeTask;
   }
 }
 
@@ -230,6 +337,7 @@ function toPublicCompany(c: StoredCompany): CompanyWorkspaceInfo {
     customerRelationshipType:
       c.customerRelationshipType || getDefaultRelationshipForIndustry(industry),
     subscriptionPlan: c.subscriptionPlan || 'professional',
+    satisfactionScale: c.satisfactionScale || '1-5',
     churnDefinition: c.churnDefinition || buildDefaultChurnDefinition(industry),
     privacySettings: c.privacySettings || buildDefaultPrivacySettings(),
     createdAt: c.createdAt,
@@ -291,14 +399,24 @@ export function registerCompanyAndAdmin(input: RegisterCompanyRequest): {
     throw new Error('Password and confirmation password do not match.');
   }
 
-  if (db.companies.some((c) => c.name.toLowerCase() === companyName.toLowerCase())) {
-    throw new Error('A company workspace with this name is already registered.');
+  syncDbFromDiskIfNewer();
+
+  if (
+    db.users.some((u) => normalizeEmail(u.email) === adminEmail || normalizeEmail(u.email) === companyEmail) ||
+    db.companies.some((c) => normalizeEmail(c.email) === companyEmail || normalizeEmail(c.email) === adminEmail)
+  ) {
+    throw new AuthServiceError(
+      'This email is already registered. Please log in.',
+      'ACCOUNT_ALREADY_EXISTS',
+      409
+    );
   }
-  if (db.companies.some((c) => c.email === companyEmail)) {
-    throw new Error('A company workspace with this company email is already registered.');
-  }
-  if (db.users.some((u) => u.email === adminEmail)) {
-    throw new Error('An account with this administrator email already exists.');
+  if (db.companies.some((c) => c.name.trim().toLowerCase() === companyName.toLowerCase())) {
+    throw new AuthServiceError(
+      'A company workspace with this name is already registered.',
+      'COMPANY_ALREADY_EXISTS',
+      409
+    );
   }
 
   const now = new Date().toISOString();
@@ -345,49 +463,21 @@ export function registerCompanyAndAdmin(input: RegisterCompanyRequest): {
 }
 
 export function hasAnyRegisteredUsers(): boolean {
+  syncDbFromDiskIfNewer();
   return db.users.length > 0;
 }
 
-export function authenticateUser(input: LoginRequest): {
+function issueSessionForStoredUser(
+  user: StoredUser,
+  company: StoredCompany,
+  rememberMe: boolean
+): {
   rawToken: string;
   rememberMe: boolean;
   maxAgeSeconds: number | null;
   context: AuthContext;
 } {
   pruneExpiredSessions();
-
-  const email = normalizeEmail(input.email || '');
-  const password = input.password || '';
-  const rememberMe = Boolean(input.rememberMe);
-
-  if (!isValidEmail(email)) {
-    throw new Error('Please enter a valid email address.');
-  }
-  if (!password) {
-    throw new Error('Please enter your password.');
-  }
-
-  if (db.users.length === 0) {
-    throw new Error(
-      'No user accounts exist on this server yet (local workspace storage is empty). Please switch to "Register Company" to create your workspace and Firm Admin account.'
-    );
-  }
-
-  const user = db.users.find((u) => u.email === email);
-  if (!user || !verifyPassword(password, user.passwordHash)) {
-    throw new Error('Invalid email address or password.');
-  }
-
-  if (!user.isActive) {
-    throw new Error(
-      'This account has been deactivated. Please contact your company administrator.'
-    );
-  }
-
-  const company = db.companies.find((c) => c.id === user.companyId);
-  if (!company) {
-    throw new Error('Associated company workspace was not found.');
-  }
 
   const nowMs = Date.now();
   const ttlMs = rememberMe ? SESSION_REMEMBER_MS : SESSION_SHORT_MS;
@@ -416,11 +506,93 @@ export function authenticateUser(input: LoginRequest): {
       user: toPublicUser(user),
       company: toPublicCompany(company),
       expiresAt,
+      rememberMe,
     },
   };
 }
 
+export function createSessionForUser(
+  userId: string,
+  rememberMe = true
+): {
+  rawToken: string;
+  rememberMe: boolean;
+  maxAgeSeconds: number | null;
+  context: AuthContext;
+} {
+  syncDbFromDiskIfNewer();
+  const user = db.users.find((u) => u.id === userId);
+  if (!user || !user.isActive) {
+    throw new Error('User account is unavailable.');
+  }
+  const company = db.companies.find((c) => c.id === user.companyId);
+  if (!company) {
+    throw new Error('Associated company workspace was not found.');
+  }
+  return issueSessionForStoredUser(user, company, rememberMe);
+}
+
+export function authenticateUser(input: LoginRequest): {
+  rawToken: string;
+  rememberMe: boolean;
+  maxAgeSeconds: number | null;
+  context: AuthContext;
+} {
+  syncDbFromDiskIfNewer();
+  pruneExpiredSessions();
+
+  const email = normalizeEmail(input.email || '');
+  const password = input.password || '';
+  const rememberMe = input.rememberMe !== undefined ? Boolean(input.rememberMe) : true;
+
+  if (!isValidEmail(email)) {
+    throw new AuthServiceError('Please enter a valid email address.', 'VALIDATION_ERROR', 400);
+  }
+  if (!password) {
+    throw new AuthServiceError('Please enter your password.', 'VALIDATION_ERROR', 400);
+  }
+
+  const user = db.users.find((u) => normalizeEmail(u.email) === email);
+  if (!user) {
+    throw new AuthServiceError(
+      'Account not found. Please register first.',
+      'ACCOUNT_NOT_FOUND',
+      401
+    );
+  }
+  if (!verifyPassword(password, user.passwordHash)) {
+    throw new AuthServiceError(
+      'Incorrect password. Please check your password and try again.',
+      'INVALID_PASSWORD',
+      401
+    );
+  }
+
+  if (!user.isActive) {
+    throw new AuthServiceError(
+      'This account has been deactivated. Please contact your company administrator.',
+      'ACCOUNT_DEACTIVATED',
+      403
+    );
+  }
+
+  const company = db.companies.find((c) => c.id === user.companyId);
+  if (!company) {
+    throw new AuthServiceError(
+      'Associated company workspace was not found.',
+      'ACCOUNT_NOT_FOUND',
+      401
+    );
+  }
+
+  return issueSessionForStoredUser(user, company, rememberMe);
+}
+
+const REMEMBER_SLIDING_THRESHOLD_MS = 25 * 24 * 60 * 60 * 1000; // renew if < 25 days left
+const SHORT_SLIDING_THRESHOLD_MS = 4 * 60 * 60 * 1000; // renew if < 4 hours left
+
 export function getSessionContext(rawToken: string | undefined): AuthContext | null {
+  syncDbFromDiskIfNewer();
   if (!rawToken) return null;
   const tokenHash = hashSessionToken(rawToken);
   const session = db.sessions.find((s) => s.tokenHash === tokenHash);
@@ -445,6 +617,63 @@ export function getSessionContext(rawToken: string | undefined): AuthContext | n
     user: toPublicUser(user),
     company: toPublicCompany(company),
     expiresAt: session.expiresAt,
+    rememberMe: Boolean(session.rememberMe),
+  };
+}
+
+export function refreshSessionIfNeeded(
+  rawToken: string | undefined,
+  forceExtend = false
+): {
+  refreshed: boolean;
+  maxAgeSeconds: number | null;
+  context: AuthContext;
+} | null {
+  syncDbFromDiskIfNewer();
+  if (!rawToken) return null;
+  const tokenHash = hashSessionToken(rawToken);
+  const session = db.sessions.find((s) => s.tokenHash === tokenHash);
+  if (!session) return null;
+
+  const nowMs = Date.now();
+  const expiresMs = new Date(session.expiresAt).getTime();
+  if (expiresMs <= nowMs) {
+    db.sessions = db.sessions.filter((s) => s.tokenHash !== tokenHash);
+    saveDbToDisk();
+    return null;
+  }
+
+  const user = db.users.find((u) => u.id === session.userId && u.companyId === session.companyId);
+  const company = db.companies.find((c) => c.id === session.companyId);
+  if (!user || !company || !user.isActive) {
+    db.sessions = db.sessions.filter((s) => s.tokenHash !== tokenHash);
+    saveDbToDisk();
+    return null;
+  }
+
+  const remainingMs = expiresMs - nowMs;
+  const thresholdMs = session.rememberMe
+    ? REMEMBER_SLIDING_THRESHOLD_MS
+    : SHORT_SLIDING_THRESHOLD_MS;
+  const ttlMs = session.rememberMe ? SESSION_REMEMBER_MS : SESSION_SHORT_MS;
+
+  let refreshed = false;
+  if (forceExtend || remainingMs < thresholdMs) {
+    session.expiresAt = new Date(nowMs + ttlMs).toISOString();
+    saveDbToDisk();
+    refreshed = true;
+  }
+
+  return {
+    refreshed,
+    maxAgeSeconds: session.rememberMe ? Math.floor(SESSION_REMEMBER_MS / 1000) : null,
+    context: {
+      tokenHash,
+      user: toPublicUser(user),
+      company: toPublicCompany(company),
+      expiresAt: session.expiresAt,
+      rememberMe: Boolean(session.rememberMe),
+    },
   };
 }
 
@@ -469,17 +698,19 @@ export function revokeUserSessions(userId: string, exceptTokenHash?: string): vo
 }
 
 export function checkEmailRegisteredForReset(emailInput: string): boolean {
+  syncDbFromDiskIfNewer();
   const email = normalizeEmail(emailInput || '');
   if (!isValidEmail(email)) {
     throw new Error('Please enter a valid email address.');
   }
-  return db.users.some((u) => u.email === email);
+  return db.users.some((u) => normalizeEmail(u.email) === email);
 }
 
 export function updateOwnProfile(
   userId: string,
   updates: { fullName?: string; avatarDataUrl?: string | null }
 ): UserAccount {
+  syncDbFromDiskIfNewer();
   const user = db.users.find((u) => u.id === userId);
   if (!user) throw new Error('User account not found.');
 
@@ -506,6 +737,7 @@ export function changeOwnPassword(
   confirmNewPassword: string,
   currentTokenHash?: string
 ): void {
+  syncDbFromDiskIfNewer();
   const user = db.users.find((u) => u.id === userId);
   if (!user) throw new Error('User account not found.');
 
@@ -547,10 +779,12 @@ export function updateCompanyProfile(
     businessModel?: BusinessModel;
     customerRelationshipType?: CustomerRelationshipType;
     subscriptionPlan?: SubscriptionPlanTier;
+    satisfactionScale?: SatisfactionScale;
     churnDefinition?: ChurnDefinition;
     privacySettings?: Partial<DataPrivacySettings>;
   }
 ): CompanyWorkspaceInfo {
+  syncDbFromDiskIfNewer();
   const company = db.companies.find((c) => c.id === companyId);
   if (!company) throw new Error('Company workspace not found.');
 
@@ -624,6 +858,10 @@ export function updateCompanyProfile(
     company.subscriptionPlan = updates.subscriptionPlan;
   }
 
+  if (updates.satisfactionScale !== undefined) {
+    company.satisfactionScale = updates.satisfactionScale;
+  }
+
   if (updates.churnDefinition !== undefined) {
     company.churnDefinition = {
       ...updates.churnDefinition,
@@ -662,15 +900,18 @@ export function updateCompanyProfile(
 }
 
 export function getCompanyById(companyId: string): CompanyWorkspaceInfo | null {
+  syncDbFromDiskIfNewer();
   const company = db.companies.find((c) => c.id === companyId);
   return company ? toPublicCompany(company) : null;
 }
 
 export function listAllCompanies(): CompanyWorkspaceInfo[] {
+  syncDbFromDiskIfNewer();
   return db.companies.map(toPublicCompany).sort((a, b) => a.createdAt.localeCompare(b.createdAt));
 }
 
 export function listCompanyUsers(companyId: string): UserAccount[] {
+  syncDbFromDiskIfNewer();
   return db.users
     .filter((u) => u.companyId === companyId)
     .map(toPublicUser)
@@ -715,7 +956,8 @@ export function createCompanyUser(
   if (pwError) {
     throw new Error(pwError);
   }
-  if (db.users.some((u) => u.email === email)) {
+  syncDbFromDiskIfNewer();
+  if (db.users.some((u) => normalizeEmail(u.email) === email)) {
     throw new Error('An account with this email address already exists.');
   }
 

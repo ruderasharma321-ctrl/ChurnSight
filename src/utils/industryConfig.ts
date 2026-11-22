@@ -10,6 +10,7 @@ import type {
   IndustryKey,
   IndustryTemplateColumnSpec,
   ReportingPeriod,
+  TemplateMode,
 } from '../types/churn.ts';
 
 export interface IndustryProfileTemplate {
@@ -447,6 +448,8 @@ export function buildDefaultChurnDefinition(
   const tmpl = getIndustryTemplate(industry);
   return {
     ...tmpl.defaultChurnDefinition,
+    churnStatusColumnHint: tmpl.suggestedTargetCols[0] || 'churn_status',
+    cancellationDateColumnHint: 'churn_date',
     confirmedByUser: false,
     confirmedAt: null,
   };
@@ -1271,7 +1274,125 @@ export const INDUSTRY_DATA_TEMPLATES: Record<IndustryKey, IndustryTemplateColumn
 };
 
 export function getIndustryDataTemplateColumns(
-  industry: IndustryKey = 'telecommunications'
+  industry: IndustryKey = 'telecommunications',
+  mode: TemplateMode = 'established_historical'
 ): IndustryTemplateColumnSpec[] {
-  return INDUSTRY_DATA_TEMPLATES[industry] || INDUSTRY_DATA_TEMPLATES.other;
+  const base = INDUSTRY_DATA_TEMPLATES[industry] || INDUSTRY_DATA_TEMPLATES.other;
+  const idSpec = base.find((c) => c.semanticRole === 'id') || base[0];
+  const segmentSpec = base.find((c) => c.semanticRole === 'segment');
+  const tenureSpec = base.find((c) => c.semanticRole === 'tenure');
+  const revenueSpec = base.find((c) => c.semanticRole === 'revenue');
+  const freqSpec = base.find((c) => c.semanticRole === 'frequency');
+  const dateSpec = base.find((c) => c.semanticRole === 'date');
+  const otherSpecs = base.filter(
+    (c) =>
+      c.semanticRole !== 'id' &&
+      c.semanticRole !== 'target' &&
+      c.semanticRole !== 'segment' &&
+      c.semanticRole !== 'tenure' &&
+      c.semanticRole !== 'revenue' &&
+      c.semanticRole !== 'frequency' &&
+      c.semanticRole !== 'date'
+  );
+
+  if (mode === 'new_business') {
+    const registrationCol: IndustryTemplateColumnSpec = {
+      name: 'registration_date',
+      displayName: 'Registration / Start Date',
+      tier: 'required',
+      dataType: 'date',
+      semanticRole: 'registration_date',
+      acceptedFormats: 'ISO date YYYY-MM-DD',
+      description: 'Date the customer joined, subscribed, or opened their account.',
+      exampleValue: '2026-06-15',
+    };
+    const statusCol: IndustryTemplateColumnSpec = {
+      name: 'customer_status',
+      displayName: 'Current Customer Status',
+      tier: 'required',
+      dataType: 'categorical',
+      semanticRole: 'status',
+      acceptedFormats: 'Active, Trial, Paused, At-Risk (operational status — not a historical churn label)',
+      description: 'Live operational lifecycle status used for cohort tracking.',
+      exampleValue: 'Active',
+    };
+    const activityDateCol: IndustryTemplateColumnSpec = dateSpec
+      ? {
+          ...dateSpec,
+          tier: 'recommended',
+          displayName: dateSpec.displayName || 'Last Activity Date',
+        }
+      : {
+          name: 'last_activity_date',
+          displayName: 'Last Activity Date',
+          tier: 'recommended',
+          dataType: 'date',
+          semanticRole: 'date',
+          acceptedFormats: 'ISO date YYYY-MM-DD',
+          description: 'Most recent recorded customer activity, login, visit, or purchase.',
+          exampleValue: '2026-09-20',
+        };
+
+    return [
+      { ...idSpec, tier: 'required' },
+      registrationCol,
+      statusCol,
+      ...(segmentSpec ? [{ ...segmentSpec, tier: 'required' as const }] : []),
+      ...(revenueSpec ? [{ ...revenueSpec, tier: 'required' as const }] : []),
+      ...(tenureSpec ? [{ ...tenureSpec, tier: 'recommended' as const }] : []),
+      ...(freqSpec ? [{ ...freqSpec, tier: 'recommended' as const }] : []),
+      activityDateCol,
+      ...otherSpecs,
+    ];
+  }
+
+  // established_historical mode: point-in-time snapshot before outcome
+  const observationDateCol: IndustryTemplateColumnSpec = {
+    name: 'observation_date',
+    displayName: 'Observation Snapshot Date',
+    tier: 'required',
+    dataType: 'date',
+    semanticRole: 'observation_date',
+    acceptedFormats: 'ISO date YYYY-MM-DD (before churn outcome)',
+    description:
+      'Point-in-time snapshot date when attributes and usage were captured prior to outcome.',
+    exampleValue: '2026-08-31',
+  };
+
+  const targetCol: IndustryTemplateColumnSpec = {
+    name: 'churn_status',
+    displayName: 'Historical Churn Status',
+    tier: 'required',
+    dataType: 'categorical',
+    semanticRole: 'target',
+    acceptedFormats: 'Yes / No, Churned / Retained, or 1 / 0',
+    description:
+      'Confirmed historical outcome matching your organization’s churn definition.',
+    exampleValue: 'No',
+  };
+
+  const churnDateCol: IndustryTemplateColumnSpec = {
+    name: 'churn_date',
+    displayName: 'Churn / Cancellation Date (When Applicable)',
+    tier: 'optional',
+    dataType: 'date',
+    semanticRole: 'churn_date',
+    acceptedFormats: 'ISO date YYYY-MM-DD when churned; leave blank for retained rows',
+    description:
+      'Audit date of confirmed exit/cancellation. Automatically excluded from predictive ML features to prevent target leakage.',
+    exampleValue: '',
+  };
+
+  return [
+    { ...idSpec, tier: 'required' },
+    observationDateCol,
+    ...(segmentSpec ? [{ ...segmentSpec, tier: 'required' as const }] : []),
+    ...(tenureSpec ? [{ ...tenureSpec, tier: 'required' as const }] : []),
+    ...(revenueSpec ? [{ ...revenueSpec, tier: 'required' as const }] : []),
+    ...(freqSpec ? [{ ...freqSpec, tier: 'recommended' as const }] : []),
+    ...(dateSpec ? [{ ...dateSpec, tier: 'recommended' as const }] : []),
+    ...otherSpecs,
+    targetCol,
+    churnDateCol,
+  ];
 }

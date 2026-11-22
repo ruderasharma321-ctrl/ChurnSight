@@ -4,14 +4,22 @@ import os from 'os';
 import path from 'path';
 import type { NextFunction, Request, Response } from 'express';
 import type { AuditLogEntry, UserRole } from '../src/types/churn.ts';
+import {
+  isRemoteStoreConfigured,
+  remoteGetJson,
+  remoteSetJson,
+} from './remoteStore.ts';
 
 const DATA_DIR =
   process.env.CHURNSIGHT_DATA_DIR ||
   (process.env.VERCEL ? path.join(os.tmpdir(), 'churnsight-data') : path.resolve(process.cwd(), '.data'));
 const AUDIT_FILE = path.join(DATA_DIR, 'audit_logs.json');
+const REMOTE_AUDIT_KEY = 'churnsight:audit:v1';
 const MAX_AUDIT_ENTRIES = 2500;
 
 let auditLogs: AuditLogEntry[] = loadAuditLogs();
+let lastAuditHydratedAt = 0;
+let pendingAuditWrite: Promise<void> | null = null;
 
 function loadAuditLogs(): AuditLogEntry[] {
   try {
@@ -26,19 +34,52 @@ function loadAuditLogs(): AuditLogEntry[] {
   return [];
 }
 
+export async function ensureAuditLogsHydrated(): Promise<void> {
+  if (!isRemoteStoreConfigured()) return;
+  if (Date.now() - lastAuditHydratedAt <= 5000 && auditLogs.length > 0) return;
+  try {
+    if (pendingAuditWrite) await pendingAuditWrite;
+    const remote = await remoteGetJson<AuditLogEntry[]>(REMOTE_AUDIT_KEY);
+    if (Array.isArray(remote)) {
+      auditLogs = remote.slice(0, MAX_AUDIT_ENTRIES);
+    }
+    lastAuditHydratedAt = Date.now();
+  } catch {
+    // ignore non-critical audit hydration failure
+  }
+}
+
+export async function flushPendingAuditWrites(): Promise<void> {
+  if (pendingAuditWrite) {
+    await pendingAuditWrite;
+  }
+}
+
 function saveAuditLogs(): void {
+  const sliced = auditLogs.slice(0, MAX_AUDIT_ENTRIES);
   try {
     if (!fs.existsSync(DATA_DIR)) {
       fs.mkdirSync(DATA_DIR, { recursive: true });
     }
     const tmp = `${AUDIT_FILE}.${process.pid}.tmp`;
-    fs.writeFileSync(tmp, JSON.stringify(auditLogs.slice(0, MAX_AUDIT_ENTRIES), null, 2), {
+    fs.writeFileSync(tmp, JSON.stringify(sliced, null, 2), {
       encoding: 'utf-8',
       mode: 0o600,
     });
     fs.renameSync(tmp, AUDIT_FILE);
   } catch (err) {
     console.error('Failed to persist audit logs:', err);
+  }
+
+  if (isRemoteStoreConfigured()) {
+    const prev = pendingAuditWrite || Promise.resolve();
+    pendingAuditWrite = prev
+      .catch(() => undefined)
+      .then(() => remoteSetJson(REMOTE_AUDIT_KEY, sliced))
+      .then(() => {
+        lastAuditHydratedAt = Date.now();
+      })
+      .catch(() => undefined);
   }
 }
 

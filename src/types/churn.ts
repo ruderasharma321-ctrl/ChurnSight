@@ -46,6 +46,20 @@ export type ChurnDenominatorType =
 
 export type ReportingPeriod = 'monthly' | 'quarterly' | 'annual' | 'custom';
 
+export type UploadPathway =
+  | 'new_business'
+  | 'established_historical'
+  | 'current_prediction'
+  | 'existing_custom';
+
+export type TemplateMode =
+  | 'new_business'
+  | 'established_historical'
+  | 'prediction_input'
+  | 'tickets';
+
+export type SatisfactionScale = '1-5' | '1-10' | '0-100' | 'nps';
+
 export interface ChurnDefinition {
   triggerType: ChurnTriggerType;
   churnEventDescription: string;
@@ -53,6 +67,8 @@ export interface ChurnDefinition {
   denominatorPopulation: ChurnDenominatorType;
   reportingPeriod: ReportingPeriod;
   inactivityDays: number | null;
+  churnStatusColumnHint?: string | null;
+  cancellationDateColumnHint?: string | null;
   confirmedByUser: boolean;
   confirmedAt: string | null;
 }
@@ -73,12 +89,14 @@ export type TemplateColumnTier = 'required' | 'recommended' | 'optional';
 export interface IndustryTemplateColumnSpec {
   name: string;
   displayName: string;
+  category?: string;
   tier: TemplateColumnTier;
   dataType: ColumnDataType;
   semanticRole: ColumnSemanticRole;
   acceptedFormats: string;
   description: string;
   exampleValue: string;
+  usedFor?: string;
   coldStartNote?: string;
 }
 
@@ -87,11 +105,22 @@ export type ColumnDataType = 'numeric' | 'categorical' | 'identifier' | 'date';
 export type ColumnSemanticRole =
   | 'id'
   | 'target'
+  | 'status'
   | 'date'
+  | 'observation_date'
+  | 'registration_date'
+  | 'churn_date'
   | 'revenue'
   | 'tenure'
   | 'segment'
   | 'frequency'
+  | 'satisfaction'
+  | 'complaints'
+  | 'tickets'
+  | 'resolution_days'
+  | 'profit'
+  | 'cost'
+  | 'payment_health'
   | 'other';
 
 export interface ColumnProfile {
@@ -116,7 +145,11 @@ export interface ColumnMapping {
   contractColumn: string | null; // Segment / Plan / Contract / Tier column
   tenureColumn: string | null; // Tenure / Lifetime / Membership Duration column
   monthlyChargesColumn: string | null; // Revenue / MRR / Avg Order Value / Fee column
-  dateColumn?: string | null; // Event / Last Activity / Signup / Transaction Date
+  dateColumn?: string | null; // Activity / Event / Observation / Renewal Date
+  observationDateColumn?: string | null; // Historical Snapshot Observation_Date
+  registrationDateColumn?: string | null; // Account Registration_Date
+  churnDateColumn?: string | null; // Post-outcome Churn_Date / Cancellation_Date (excluded from ML features)
+  statusColumn?: string | null; // Current Customer_Status (e.g., Active / Trial / Paused)
   frequencyColumn?: string | null; // Purchase Frequency / Visits / Usage Count
   featureColumns: string[];
 }
@@ -182,6 +215,8 @@ export interface DataReadinessAssessment {
     churnedCount: number;
     retainedCount: number;
     minorityClassCount: number;
+    classImbalanceWarning?: string | null;
+    leakageColumnsExcluded?: string[];
     usableFeatureCount: number;
     missingCellPercent: number;
     duplicateRowCount: number;
@@ -195,10 +230,78 @@ export interface DataReadinessAssessment {
   nextActions: string[];
 }
 
+export interface RowValidationIssue {
+  rowIndex: number;
+  customerId: string;
+  status: 'warning' | 'error';
+  messages: string[];
+}
+
+export interface RowValidationPreviewItem {
+  rowIndex: number;
+  customerId: string;
+  customerName: string;
+  subscriptionStatus: string;
+  tenure: string;
+  satisfactionScore: string;
+  complaints: string;
+  ticketsRaised: string;
+  avgResolutionTime: string;
+  revenue: string;
+  churnStatus: string;
+  validationStatus: 'Valid' | 'Warning' | 'Error';
+  validationNotes: string[];
+}
+
+export interface RowValidationReport {
+  totalRows: number;
+  validCount: number;
+  warningCount: number;
+  errorCount: number;
+  duplicateCustomerIds: number;
+  duplicateTicketIds: number;
+  missingValuesCount: number;
+  mappedFieldsCount: number;
+  unmappedColumns: string[];
+  issuesSummary: { label: string; count: number; severity: 'warning' | 'error' }[];
+  rowErrors: RowValidationIssue[];
+  previewRecords: RowValidationPreviewItem[];
+  hasRejectedRowsCsv: boolean;
+}
+
+export interface TicketAggregationSummary {
+  source: 'embedded_sheet' | 'standalone_ticket_upload';
+  ticketRowsCount: number;
+  validTicketRows?: number;
+  warningTicketRows?: number;
+  errorTicketRows?: number;
+  duplicateTicketIds: number;
+  invalidTicketRows: number;
+  matchedCustomersCount: number;
+  unmatchedTicketCount: number;
+  unmatchedTicketRowsCount?: number;
+  doubleCountingPrevented: boolean;
+  ticketIssues?: RowValidationIssue[];
+  note: string;
+}
+
+export interface ModelCompatibilityReport {
+  modelAvailable: boolean;
+  modelVersion: string | null;
+  modelName: string | null;
+  compatible: boolean;
+  requiredFeatures: string[];
+  matchedFeatures: string[];
+  missingFeatures: string[];
+  message: string;
+}
+
 export interface DatasetState {
   datasetId: string;
   fileName: string;
   sourceFormat?: 'csv' | 'xlsx';
+  uploadPathway?: UploadPathway;
+  satisfactionScale?: SatisfactionScale;
   isSample: boolean;
   uploadedAt: string;
   rowCount: number;
@@ -217,6 +320,8 @@ export interface DatasetState {
   churnReadinessMessage?: string | null;
   readiness?: DataReadinessAssessment;
   churnDefinition?: ChurnDefinition;
+  rowValidation?: RowValidationReport;
+  ticketAggregation?: TicketAggregationSummary | null;
   previewRows: Record<string, string>[];
 }
 
@@ -224,6 +329,9 @@ export interface StagedDatasetImport {
   stagedId: string;
   fileName: string;
   sourceFormat: 'csv' | 'xlsx';
+  uploadPathway?: UploadPathway;
+  uploadMode?: 'customer' | 'tickets';
+  satisfactionScale?: SatisfactionScale;
   isSample: boolean;
   uploadedAt: string;
   rowCount: number;
@@ -243,6 +351,9 @@ export interface StagedDatasetImport {
   hasValidChurnLabels: boolean;
   churnReadinessMessage: string | null;
   readiness?: DataReadinessAssessment;
+  rowValidation?: RowValidationReport;
+  ticketAggregation?: TicketAggregationSummary | null;
+  modelCompatibility?: ModelCompatibilityReport | null;
 }
 
 export interface BehaviourWatchlistItem {
@@ -382,6 +493,7 @@ export type RiskCategory =
 export interface CustomerPrediction {
   rowIndex: number;
   customerId: string;
+  customerName?: string;
   split: 'Training' | 'Unseen Test';
   actualChurn: 'Churned' | 'Stayed';
   predictedChurn: 'Likely to Churn' | 'Likely to Stay';
@@ -481,6 +593,7 @@ export interface CompanyWorkspaceInfo {
   businessModel: BusinessModel;
   customerRelationshipType?: CustomerRelationshipType;
   subscriptionPlan: SubscriptionPlanTier;
+  satisfactionScale?: SatisfactionScale;
   churnDefinition: ChurnDefinition;
   privacySettings?: DataPrivacySettings;
   createdAt: string;
@@ -491,6 +604,7 @@ export interface AuthSessionPayload {
   company: CompanyWorkspaceInfo;
   expiresAt: string;
   sessionToken?: string;
+  rememberMe?: boolean;
 }
 
 export interface RegisterCompanyRequest {
@@ -596,14 +710,144 @@ export interface PredictionPipelineStatus {
 
 export type NavTab =
   | 'overview'
-  | 'intelligence'
+  | 'customers'
+  | 'churn_analysis'
   | 'data'
+  | 'reports'
+  | 'settings'
+  // Backward-compatible section aliases routed automatically to the 6 primary tabs
+  | 'intelligence'
+  | 'value'
   | 'analytics'
   | 'predictions'
   | 'performance'
-  | 'reports'
-  | 'settings'
   | 'technical'
   | 'platform'
   | 'about';
+
+// ---------------------------------------------------------------------------
+// Customer Value Intelligence Types
+// ---------------------------------------------------------------------------
+
+export interface CustomerValueConfig {
+  weights: {
+    revenue: number;
+    frequency: number;
+    tenure: number;
+    paymentHealth: number;
+    profit: number;
+    growth: number;
+  };
+  highValuePercentile: number; // e.g. 75 (top 25% of composite scores)
+  mediumValuePercentile: number; // e.g. 35 (middle 40%)
+  highRiskCutoff: number; // e.g. 0.50 (50% churn probability cutoff)
+  annualizationMonths: number; // default 12 when monthly revenue is scaled to annualized view
+}
+
+export interface ValueCriterionAvailability {
+  key: 'revenue' | 'frequency' | 'tenure' | 'paymentHealth' | 'profit' | 'growth';
+  label: string;
+  available: boolean;
+  sourceColumn: string | null;
+  configuredWeight: number;
+  effectiveWeight: number;
+  note: string;
+}
+
+export type ValueSegmentTier = 'High Value' | 'Medium Value' | 'Low Value';
+
+export type ValueMatrixQuadrant =
+  | 'critical_retention_priority'
+  | 'protect_and_maintain'
+  | 'monitor_and_assess'
+  | 'normal_monitoring'
+  | 'risk_unavailable';
+
+export interface CustomerValueFactorContribution {
+  label: string;
+  rawDisplay: string;
+  percentileScore: number;
+  weightPct: number;
+}
+
+export interface CustomerValueRecord {
+  rowIndex: number;
+  customerId: string;
+  customerName: string;
+  segment: string;
+  valueScore: number; // 0..100 composite weighted percentile
+  valueSegment: ValueSegmentTier;
+  valueFactors: CustomerValueFactorContribution[];
+  revenueContribution: number | null;
+  revenueLabel: string | null;
+  annualizedRevenue: number | null;
+  profitContribution: number | null;
+  profitMarginPct: number | null;
+  churnProbability: number | null; // null when no validated model prediction applies
+  riskCategory: RiskCategory | null;
+  riskAvailable: boolean;
+  quadrant: ValueMatrixQuadrant;
+  quadrantLabel: string;
+  expectedRevenueExposure: number | null; // annualizedRevenue * churnProbability ONLY when both exist
+  riskFactors: string[];
+  retentionPriority: 'Critical' | 'High' | 'Medium' | 'Low' | 'Unavailable';
+}
+
+export interface ValueDistributionBucket {
+  segment: ValueSegmentTier;
+  count: number;
+  sharePercent: number;
+  totalRevenue: number | null;
+  avgValueScore: number;
+  highRiskCount: number;
+}
+
+export interface ValueMatrixGroupCount {
+  quadrant: ValueMatrixQuadrant;
+  label: string;
+  description: string;
+  count: number;
+  totalRevenue: number | null;
+  expectedExposure: number | null;
+}
+
+export interface CustomerValueRecommendation {
+  id: string;
+  priority: 'Critical' | 'High' | 'Moderate';
+  title: string;
+  targetSegment: string;
+  affectedCustomers: number;
+  estimatedRevenueAtRisk: number | null;
+  evidence: string;
+  recommendedAction: string;
+}
+
+export interface CustomerValueSummary {
+  datasetId: string;
+  generatedAt: string;
+  totalCustomers: number;
+  valueAssessmentAvailable: boolean;
+  unavailableReason: string | null;
+  revenueAvailable: boolean;
+  revenueBasisNote: string;
+  profitAvailable: boolean;
+  profitUnavailableReason: string | null;
+  riskPredictionsAvailable: boolean;
+  riskUnavailableReason: string | null;
+  highValueCount: number;
+  mediumValueCount: number;
+  lowValueCount: number;
+  highValueAtRiskCount: number | null;
+  totalPortfolioRevenue: number | null;
+  totalPortfolioProfit: number | null;
+  atRiskCustomersRevenue: number | null; // Full revenue of customers above highRiskCutoff
+  estimatedExpectedRevenueExposure: number | null; // Sum(annualRevenue * P(churn))
+  highValueAtRiskRevenue: number | null;
+  config: CustomerValueConfig;
+  criteriaAvailability: ValueCriterionAvailability[];
+  segmentDistribution: ValueDistributionBucket[];
+  fourGroupMatrix: ValueMatrixGroupCount[];
+  recommendations: CustomerValueRecommendation[];
+  customers: CustomerValueRecord[];
+}
 

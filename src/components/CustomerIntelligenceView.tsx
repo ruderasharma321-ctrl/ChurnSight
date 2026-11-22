@@ -26,6 +26,7 @@ interface CustomerIntelligenceViewProps {
   automationStatus: PredictionPipelineStatus | null;
   isPipelineRunning?: boolean;
   canGeneratePredictions?: boolean;
+  embedded?: boolean;
   onAutoBuild?: () => void;
   onNavigate: (tab: NavTab) => void;
 }
@@ -74,6 +75,7 @@ export const CustomerIntelligenceView: React.FC<CustomerIntelligenceViewProps> =
   automationStatus,
   isPipelineRunning = false,
   canGeneratePredictions = true,
+  embedded = false,
   onAutoBuild,
   onNavigate,
 }) => {
@@ -105,7 +107,7 @@ export const CustomerIntelligenceView: React.FC<CustomerIntelligenceViewProps> =
           <Database className="w-6 h-6" />
         </div>
         <h2 className="font-display text-lg font-bold text-[#11142B]">
-          Customer Intelligence Awaits Data
+          Churn Pattern Discovery Awaits Data
         </h2>
         <p className="text-sm text-slate-600 leading-relaxed">
           Upload your {tmpl.label.toLowerCase()} customer file or load a demonstration dataset in Data
@@ -124,38 +126,40 @@ export const CustomerIntelligenceView: React.FC<CustomerIntelligenceViewProps> =
 
   return (
     <div className="space-y-6">
-      <div className="flex flex-col sm:flex-row sm:items-end sm:justify-between gap-3">
-        <div>
-          <div className="text-xs font-semibold text-[#7655E8]">
-            {tmpl.label} · Actionable Retention Insights
+      {!embedded && (
+        <div className="flex flex-col sm:flex-row sm:items-end sm:justify-between gap-3">
+          <div>
+            <div className="text-xs font-semibold text-[#7655E8]">
+              {tmpl.label} · Retention Insights
+            </div>
+            <h2 className="font-display text-2xl font-bold text-[#11142B] tracking-tight mt-0.5">
+              Churn Patterns &amp; Retention Insights
+            </h2>
+            <p className="text-sm text-slate-600 mt-0.5">
+              Verified attrition signals, behavioral comparisons, and retention opportunities for{' '}
+              {company.name}
+            </p>
           </div>
-          <h1 className="font-display text-2xl font-bold text-[#11142B] tracking-tight mt-0.5">
-            Customer Intelligence
-          </h1>
-          <p className="text-sm text-slate-600 mt-0.5">
-            Verified attrition signals, behavioral comparisons, and retention opportunities for{' '}
-            {company.name}
-          </p>
-        </div>
 
-        <div className="flex flex-wrap items-center gap-2.5">
-          <button
-            type="button"
-            onClick={() => onNavigate('predictions')}
-            className="inline-flex items-center gap-1.5 px-4 py-2 bg-[#11142B] hover:bg-[#1C2147] text-white text-xs font-semibold rounded-xl transition-colors cursor-pointer"
-          >
-            <span>Open Churn Predictions</span>
-            <ArrowRight className="w-3.5 h-3.5 text-[#35C5E8]" />
-          </button>
-          <button
-            type="button"
-            onClick={() => onNavigate('reports')}
-            className="inline-flex items-center gap-1.5 px-4 py-2 bg-white hover:bg-[#F5F3FF] text-[#11142B] border border-purple-200 text-xs font-semibold rounded-xl transition-colors cursor-pointer"
-          >
-            <span>Export Reports</span>
-          </button>
+          <div className="flex flex-wrap items-center gap-2.5">
+            <button
+              type="button"
+              onClick={() => onNavigate('predictions')}
+              className="inline-flex items-center gap-1.5 px-4 py-2 bg-[#11142B] hover:bg-[#1C2147] text-white text-xs font-semibold rounded-xl transition-colors cursor-pointer"
+            >
+              <span>Open Churn Predictions</span>
+              <ArrowRight className="w-3.5 h-3.5 text-[#35C5E8]" />
+            </button>
+            <button
+              type="button"
+              onClick={() => onNavigate('reports')}
+              className="inline-flex items-center gap-1.5 px-4 py-2 bg-white hover:bg-[#F5F3FF] text-[#11142B] border border-purple-200 text-xs font-semibold rounded-xl transition-colors cursor-pointer"
+            >
+              <span>Export Reports</span>
+            </button>
+          </div>
         </div>
-      </div>
+      )}
 
       <PredictionPipelineBanner
         automationStatus={automationStatus}

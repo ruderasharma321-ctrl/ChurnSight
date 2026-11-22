@@ -1,4 +1,4 @@
-import React, { useMemo, useState } from 'react';
+import React, { useEffect, useMemo, useState } from 'react';
 import { motion } from 'motion/react';
 import {
   Activity,
@@ -7,47 +7,38 @@ import {
   BarChart3,
   BrainCircuit,
   CheckCircle2,
-  Cpu,
   Database,
   Download,
-  FileSpreadsheet,
   FileText,
+  Gem,
   ShieldAlert,
-  Sparkles,
   TrendingUp,
   Upload,
-  UserCheck,
-  UserMinus,
   Users,
 } from 'lucide-react';
 import {
   AnalyticsSummary,
   CompanyWorkspaceInfo,
+  CustomerValueSummary,
   DatasetState,
   ModelEvaluationResult,
   NavTab,
   PredictionPipelineStatus,
 } from '../types/churn';
-import {
-  deriveCustomerIntelligence,
-  InsightTone,
-} from '../utils/churnIntelligence';
+import { apiFetch } from '../utils/apiClient';
+import { deriveCustomerIntelligence } from '../utils/churnIntelligence';
 import { getIndustryTemplate } from '../utils/industryConfig';
 import { exportChurnSummaryCsv, exportChurnSummaryPdf } from '../utils/reportExporter';
 import { getSubscriptionPlanSpec } from '../utils/subscriptionPlans';
 import {
   AverageChargesBarChart,
-  CategoryChurnRateBarChart,
   ChurnDoughnutChart,
   GroupedChurnBarChart,
   TenureTrendLineChart,
 } from './Charts';
+import { CustomerDirectorySection } from './CustomerDirectorySection';
 import { PredictionPipelineBanner } from './PredictionPipelineBanner';
-import {
-  CircularRiskRing,
-  HeroArtwork,
-  TiltKpiCard,
-} from './PremiumUI';
+import { HeroArtwork, TiltKpiCard } from './PremiumUI';
 
 export type { NavTab };
 
@@ -63,51 +54,21 @@ interface DashboardViewProps {
   canGeneratePredictions?: boolean;
   onLoadSample: () => void;
   onAutoBuild?: () => void;
+  onWorkspaceMutated?: (payload: Record<string, any>) => void;
   onNavigate: (tab: NavTab) => void;
 }
 
-const INSIGHT_TONE_STYLES: Record<
-  InsightTone,
-  { iconBg: string; statColor: string; barGradient: string; ringBorder: string }
-> = {
-  danger: {
-    iconBg: 'bg-gradient-to-br from-[#FF786B] to-[#E84FA8]',
-    statColor: 'text-[#D63384]',
-    barGradient: 'from-[#FF786B] to-[#E84FA8]',
-    ringBorder: 'hover:border-[#E84FA8]/40',
-  },
-  purple: {
-    iconBg: 'bg-gradient-to-br from-[#7655E8] to-[#B84DE0]',
-    statColor: 'text-[#7655E8]',
-    barGradient: 'from-[#7655E8] to-[#B84DE0]',
-    ringBorder: 'hover:border-[#7655E8]/40',
-  },
-  blue: {
-    iconBg: 'bg-gradient-to-br from-[#397BFF] to-[#7655E8]',
-    statColor: 'text-[#397BFF]',
-    barGradient: 'from-[#397BFF] to-[#7655E8]',
-    ringBorder: 'hover:border-[#397BFF]/40',
-  },
-  cyan: {
-    iconBg: 'bg-gradient-to-br from-[#35C5E8] to-[#397BFF]',
-    statColor: 'text-[#0284C7]',
-    barGradient: 'from-[#35C5E8] to-[#397BFF]',
-    ringBorder: 'hover:border-[#35C5E8]/45',
-  },
-  emerald: {
-    iconBg: 'bg-gradient-to-br from-[#16C995] to-[#397BFF]',
-    statColor: 'text-[#0E9F6E]',
-    barGradient: 'from-[#16C995] to-[#397BFF]',
-    ringBorder: 'hover:border-[#16C995]/45',
-  },
-};
-
 const revealProps = {
-  initial: { opacity: 0, y: 16 },
+  initial: { opacity: 0, y: 14 },
   whileInView: { opacity: 1, y: 0 },
   viewport: { once: true, amount: 0.08 },
-  transition: { duration: 0.42, ease: [0.16, 1, 0.3, 1] as const },
+  transition: { duration: 0.35, ease: [0.16, 1, 0.3, 1] as const },
 };
+
+function formatCurrencyCompact(value: number | null | undefined): string {
+  if (value === null || value === undefined || !Number.isFinite(value)) return 'Unavailable';
+  return `$${value.toLocaleString(undefined, { maximumFractionDigits: 0 })}`;
+}
 
 export const DashboardView: React.FC<DashboardViewProps> = ({
   company,
@@ -121,11 +82,34 @@ export const DashboardView: React.FC<DashboardViewProps> = ({
   canGeneratePredictions = true,
   onLoadSample,
   onAutoBuild,
+  onWorkspaceMutated = () => {},
   onNavigate,
 }) => {
   const [heroTilt, setHeroTilt] = useState({ x: 0, y: 0 });
+  const [valueSummary, setValueSummary] = useState<CustomerValueSummary | null>(null);
   const tmpl = getIndustryTemplate(company.industry, company.customIndustryName);
   const plan = getSubscriptionPlanSpec(company.subscriptionPlan);
+
+  useEffect(() => {
+    let active = true;
+    if (!dataset) {
+      setValueSummary(null);
+      return;
+    }
+    apiFetch('/api/value-intelligence')
+      .then((res) => (res.ok ? res.json() : null))
+      .then((data) => {
+        if (active && data?.summary) {
+          setValueSummary(data.summary);
+        }
+      })
+      .catch(() => {
+        if (active) setValueSummary(null);
+      });
+    return () => {
+      active = false;
+    };
+  }, [dataset?.datasetId, dataset?.rowCount, activeModel?.modelId]);
 
   const handleHeroPointerMove = (e: React.PointerEvent<HTMLElement>) => {
     if (
@@ -160,25 +144,94 @@ export const DashboardView: React.FC<DashboardViewProps> = ({
     if (!activeModel || activeModel.predictions.length === 0) return null;
     const preds = activeModel.predictions;
     const total = preds.length;
-    const highRisk = preds.filter((p) => p.riskCategory === 'Higher Estimated Churn Risk');
-    const medRisk = preds.filter((p) => p.riskCategory === 'Moderate Estimated Churn Risk');
-    const lowRisk = preds.filter((p) => p.riskCategory === 'Low Estimated Churn Risk');
-    const avgProb =
-      (preds.reduce((acc, p) => acc + p.churnProbability, 0) / total) * 100;
-    const topAtRisk = [...preds]
-      .sort((a, b) => b.churnProbability - a.churnProbability)
-      .slice(0, 5);
-
+    const highCount = preds.filter(
+      (p) => p.riskCategory === 'Higher Estimated Churn Risk'
+    ).length;
+    const medCount = preds.filter(
+      (p) => p.riskCategory === 'Moderate Estimated Churn Risk'
+    ).length;
+    const atRiskCount = highCount + medCount;
+    const avgProb = (preds.reduce((acc, p) => acc + p.churnProbability, 0) / total) * 100;
     return {
       total,
-      highCount: highRisk.length,
-      medCount: medRisk.length,
-      lowCount: lowRisk.length,
+      highCount,
+      medCount,
+      atRiskCount,
       avgProb,
-      topAtRisk,
     };
   }, [activeModel]);
 
+  const recommendedActions = useMemo(() => {
+    if (!dataset || !analytics) return [];
+    const actions: {
+      id: string;
+      title: string;
+      detail: string;
+      cta: string;
+      target: NavTab;
+      priority: 'Critical' | 'High' | 'Normal';
+    }[] = [];
+
+    if (valueSummary?.recommendations?.length) {
+      for (const rec of valueSummary.recommendations.slice(0, 2)) {
+        actions.push({
+          id: rec.id,
+          title: rec.title,
+          detail: rec.recommendedAction,
+          cta: rec.priority === 'Critical' ? 'Review Value & Risk' : 'Inspect Customers',
+          target: 'value',
+          priority: rec.priority === 'Critical' ? 'Critical' : 'High',
+        });
+      }
+    }
+
+    if (analytics.isUnlabeledColdStart) {
+      actions.push({
+        id: 'cold-start-outcomes',
+        title: 'Record Customer Outcomes as They Occur',
+        detail:
+          'Your dataset monitors active customer behaviour. Confirm observed churned or retained outcomes in Data Management to unlock churn risk scoring.',
+        cta: 'Open Data Management',
+        target: 'data',
+        priority: 'Normal',
+      });
+    } else if (activeModel && riskOverview && riskOverview.highCount > 0) {
+      actions.push({
+        id: 'review-high-risk',
+        title: `Contact ${riskOverview.highCount.toLocaleString()} High-Risk ${tmpl.entityPlural}`,
+        detail:
+          'Inspect individual risk factors and retention drivers in Churn Analysis to launch targeted outreach before renewal.',
+        cta: 'Inspect Predictions',
+        target: 'predictions',
+        priority: 'Critical',
+      });
+    } else if (!activeModel) {
+      actions.push({
+        id: 'enable-predictions',
+        title: 'Confirm Historical Outcomes to Activate Predictions',
+        detail:
+          'Map a historical churn outcome column in Data Management to calculate individual churn probabilities and revenue exposure.',
+        cta: 'Review Data Setup',
+        target: 'data',
+        priority: 'Normal',
+      });
+    }
+
+    if (actions.length < 3) {
+      actions.push({
+        id: 'explore-patterns',
+        title: 'Compare Retention Drivers Across Segments',
+        detail: `Review how ${tmpl.segmentLabel.toLowerCase()} and ${tmpl.tenureLabel.toLowerCase()} affect retention and export a summary report.`,
+        cta: 'View Churn Patterns',
+        target: 'analytics',
+        priority: 'Normal',
+      });
+    }
+
+    return actions.slice(0, 3);
+  }, [dataset, analytics, valueSummary, activeModel, riskOverview, tmpl]);
+
+  // Empty Workspace State
   if (!dataset || !analytics) {
     return (
       <div className="relative space-y-8 overflow-x-hidden">
@@ -187,41 +240,44 @@ export const DashboardView: React.FC<DashboardViewProps> = ({
           <div className="animate-mesh-drift-slow absolute bottom-0 left-1/3 w-[420px] h-[420px] rounded-full bg-[#35C5E8]/[0.07] blur-3xl" />
         </div>
 
-        {/* Cinematic 3D Hero Section (Empty Workspace State) */}
+        {/* 3D Hero Section */}
         <section
           onPointerMove={handleHeroPointerMove}
           onPointerLeave={handleHeroPointerLeave}
-          className="relative overflow-hidden rounded-[28px] bg-gradient-to-br from-[#11142B] via-[#1C184A] to-[#4A227A] text-white shadow-[0_28px_70px_rgba(17,20,43,0.28)] border border-white/15 p-7 sm:p-10 lg:p-12"
+          className="relative overflow-hidden rounded-[28px] bg-gradient-to-br from-[#0B0E23] via-[#13173C] to-[#24184E] text-white shadow-[0_28px_70px_rgba(11,14,35,0.32)] border border-white/12 p-7 sm:p-10 lg:p-12"
         >
           <div
-            className="absolute inset-0 opacity-20 pointer-events-none"
+            className="absolute inset-0 opacity-15 pointer-events-none"
             style={{
-              backgroundImage: 'radial-gradient(rgba(255,255,255,0.24) 1px, transparent 1px)',
+              backgroundImage: 'radial-gradient(rgba(255,255,255,0.22) 1px, transparent 1px)',
               backgroundSize: '28px 28px',
             }}
           />
-          <div className="animate-mesh-drift absolute -left-24 -top-24 w-96 h-96 rounded-full bg-[#397BFF]/25 blur-3xl pointer-events-none" />
-          <div className="animate-mesh-drift-slow absolute right-0 -bottom-16 w-[420px] h-[420px] rounded-full bg-[#E84FA8]/25 blur-3xl pointer-events-none" />
+          <div className="animate-mesh-drift absolute -left-24 -top-24 w-96 h-96 rounded-full bg-[#38BDF8]/18 blur-3xl pointer-events-none" />
+          <div className="animate-mesh-drift-slow absolute right-0 -bottom-16 w-[420px] h-[420px] rounded-full bg-[#7655E8]/26 blur-3xl pointer-events-none" />
 
-          <div className="relative grid grid-cols-1 lg:grid-cols-12 gap-8 items-center">
+          <div className="relative grid grid-cols-1 lg:grid-cols-12 gap-8 lg:gap-10 items-center">
             <div className="lg:col-span-6 space-y-5">
-              <div className="text-[11px] uppercase tracking-[0.22em] font-semibold text-[#35C5E8] flex items-center gap-2">
-                <Sparkles className="w-3.5 h-3.5 shrink-0" />
-                <span>ChurnSight · {tmpl.label} Intelligence</span>
+              <div className="text-xs tracking-[0.14em] uppercase font-medium text-[#38BDF8]/90 flex flex-wrap items-center gap-2">
+                <span>ChurnSight</span>
+                <span aria-hidden="true" className="text-white/30">·</span>
+                <span className="text-slate-300">{tmpl.shortLabel} Workspace</span>
               </div>
 
-              <h1 className="font-display text-3xl sm:text-4xl lg:text-[46px] font-extrabold tracking-tight leading-[1.08] text-white">
-                UNDERSTAND{' '}
-                <span className="bg-gradient-to-r from-[#35C5E8] via-[#397BFF] to-[#E84FA8] bg-clip-text text-transparent">
-                  {tmpl.entityPlural.toUpperCase()}.
+              <h1 className="font-display text-3xl sm:text-4xl lg:text-[46px] font-extrabold tracking-[-0.025em] leading-[1.06] text-white text-balance">
+                UNDERSTAND YOUR{' '}
+                <span className="bg-gradient-to-r from-[#38BDF8] via-[#60A5FA] to-[#A855F7] bg-clip-text text-transparent">
+                  CUSTOMERS.
                 </span>
                 <br />
-                PREDICT CHURN EARLY.
+                ANTICIPATE THEIR{' '}
+                <span className="bg-gradient-to-r from-[#38BDF8] via-[#60A5FA] to-[#A855F7] bg-clip-text text-transparent">
+                  NEXT MOVE.
+                </span>
               </h1>
 
-              <p className="text-base text-indigo-100/85 leading-relaxed max-w-xl">
-                {tmpl.description} Upload CSV or Excel data to uncover churn drivers and activate
-                automated retention predictions for {company.name}.
+              <p className="text-sm sm:text-base text-slate-300/90 leading-relaxed max-w-lg">
+                Identify customer risk. Understand churn patterns. Make smarter retention decisions.
               </p>
 
               {canUploadAndAnalyse ? (
@@ -230,7 +286,7 @@ export const DashboardView: React.FC<DashboardViewProps> = ({
                     type="button"
                     onClick={onLoadSample}
                     disabled={isLoading}
-                    className="inline-flex items-center gap-2 px-5 py-3 bg-white text-[#11142B] hover:bg-[#F5F3FF] text-sm font-bold rounded-xl shadow-lg shadow-[#11142B]/30 transition-all disabled:opacity-50 cursor-pointer whitespace-nowrap shrink-0"
+                    className="inline-flex items-center gap-2 px-5 py-3 bg-white text-[#0B0E23] hover:bg-[#F5F3FF] text-sm font-bold rounded-xl shadow-lg shadow-[#0B0E23]/30 transition-all disabled:opacity-50 cursor-pointer whitespace-nowrap shrink-0"
                   >
                     <Database className="w-4 h-4 text-[#7655E8]" />
                     <span>{isLoading ? 'Preparing Workspace...' : tmpl.demoDatasetLabel}</span>
@@ -238,16 +294,16 @@ export const DashboardView: React.FC<DashboardViewProps> = ({
                   <button
                     type="button"
                     onClick={() => onNavigate('data')}
-                    className="inline-flex items-center gap-2 px-5 py-3 bg-white/10 hover:bg-white/20 text-white border border-white/25 text-sm font-semibold rounded-xl transition-all cursor-pointer whitespace-nowrap shrink-0"
+                    className="inline-flex items-center gap-2 px-5 py-3 bg-white/10 hover:bg-white/18 text-white border border-white/20 text-sm font-semibold rounded-xl transition-all cursor-pointer whitespace-nowrap shrink-0"
                   >
-                    <Upload className="w-4 h-4 text-[#35C5E8]" />
+                    <Upload className="w-4 h-4 text-[#38BDF8]" />
                     <span>Upload Customer Data</span>
                   </button>
                 </div>
               ) : (
-                <div className="pt-1 text-xs font-medium text-white/90 bg-white/10 border border-white/20 rounded-xl px-4 py-3 max-w-lg">
+                <div className="pt-1 text-xs font-medium text-white/90 bg-white/10 border border-white/15 rounded-xl px-4 py-3 max-w-lg">
                   No dataset is loaded in this company workspace yet. Dataset upload permissions are
-                  currently restricted to your Firm Administrator or authorised analysts.
+                  currently restricted to your Firm Administrator.
                 </div>
               )}
             </div>
@@ -258,53 +314,45 @@ export const DashboardView: React.FC<DashboardViewProps> = ({
           </div>
         </section>
 
-        {/* Three-Stage Automated SaaS Workflow */}
+        {/* Scrollable Customer Directory */}
+        <CustomerDirectorySection
+          company={company}
+          dataset={dataset}
+          activeModel={activeModel}
+          canUploadAndAnalyse={canUploadAndAnalyse}
+          onWorkspaceMutated={onWorkspaceMutated}
+          onNavigateData={() => onNavigate('data')}
+        />
+
+        {/* Quick 3-Step Onboarding Guide */}
         <div className="grid grid-cols-1 md:grid-cols-3 gap-5">
-          <div className="bg-white/90 border border-purple-100 rounded-2xl shadow-sm shadow-purple-950/[0.04] p-6 space-y-3 transition-all duration-200 hover:-translate-y-1 hover:shadow-lg hover:shadow-[#7655E8]/10">
-            <div className="w-10 h-10 rounded-xl bg-gradient-to-br from-[#7655E8] to-[#B84DE0] text-white flex items-center justify-center shadow-sm shadow-[#7655E8]/25">
-              <Database className="w-5 h-5" />
-            </div>
-            <div className="text-xs font-semibold text-slate-400">
-              Step 01
-            </div>
+          <div className="bg-white/95 border border-purple-100 rounded-2xl shadow-xs p-6 space-y-2.5">
+            <div className="text-xs font-semibold text-[#7655E8]">Step 01</div>
             <h2 className="font-display text-base font-bold text-[#11142B]">
-              Upload &amp; Confirm Churn Rules
+              Import Your Customer Data
             </h2>
             <p className="text-sm text-slate-600 leading-relaxed">
-              Import CSV or Excel sheets, review data quality, confirm {tmpl.segmentLabel},{' '}
-              {tmpl.tenureLabel}, and {tmpl.revenueLabel}, and lock in your company churn rule.
+              Download an industry CSV or Excel template, upload current or historical records, and validate data quality in Data Management.
             </p>
           </div>
 
-          <div className="bg-white/90 border border-purple-100 rounded-2xl shadow-sm shadow-purple-950/[0.04] p-6 space-y-3 transition-all duration-200 hover:-translate-y-1 hover:shadow-lg hover:shadow-[#397BFF]/10">
-            <div className="w-10 h-10 rounded-xl bg-gradient-to-br from-[#397BFF] to-[#35C5E8] text-white flex items-center justify-center shadow-sm shadow-[#397BFF]/25">
-              <BarChart3 className="w-5 h-5" />
-            </div>
-            <div className="text-xs font-semibold text-slate-400">
-              Step 02
-            </div>
+          <div className="bg-white/95 border border-purple-100 rounded-2xl shadow-xs p-6 space-y-2.5">
+            <div className="text-xs font-semibold text-[#397BFF]">Step 02</div>
             <h2 className="font-display text-base font-bold text-[#11142B]">
-              Explore Business Analytics
+              Understand Customer Value &amp; Risk
             </h2>
             <p className="text-sm text-slate-600 leading-relaxed">
-              Inspect retention charts tailored to your business with transparent churn
-              calculations and interactive segment filtering.
+              Automatically segment customers into High, Medium, and Low value tiers and uncover who may leave next.
             </p>
           </div>
 
-          <div className="bg-white/90 border border-purple-100 rounded-2xl shadow-sm shadow-purple-950/[0.04] p-6 space-y-3 transition-all duration-200 hover:-translate-y-1 hover:shadow-lg hover:shadow-[#E84FA8]/10">
-            <div className="w-10 h-10 rounded-xl bg-gradient-to-br from-[#E84FA8] to-[#B84DE0] text-white flex items-center justify-center shadow-sm shadow-[#E84FA8]/25">
-              <BrainCircuit className="w-5 h-5" />
-            </div>
-            <div className="text-xs font-semibold text-slate-400">
-              Step 03
-            </div>
+          <div className="bg-white/95 border border-purple-100 rounded-2xl shadow-xs p-6 space-y-2.5">
+            <div className="text-xs font-semibold text-[#E84FA8]">Step 03</div>
             <h2 className="font-display text-base font-bold text-[#11142B]">
-              Managed Prediction Setup
+              Take Action &amp; Export Reports
             </h2>
             <p className="text-sm text-slate-600 leading-relaxed">
-              ChurnSight automatically prepares customer data, selects the best model, checks
-              prediction quality, and activates risk scoring and executive reports.
+              Prioritise retention outreach for high-value at-risk accounts and export clean PDF and CSV reports.
             </p>
           </div>
         </div>
@@ -312,343 +360,129 @@ export const DashboardView: React.FC<DashboardViewProps> = ({
     );
   }
 
-  const missingTotal = dataset.columns.reduce((sum, c) => sum + c.missingCount, 0);
-  const missingOptionalCharts = [
-    !analytics.contractStats ? tmpl.segmentLabel : null,
-    !analytics.tenureStats ? tmpl.tenureLabel : null,
-    !analytics.monthlyChargesComparison ? tmpl.revenueLabel : null,
-    !analytics.paymentMethodStats ? 'Billing / Category Method' : null,
-  ].filter(Boolean);
+  const highValueSharePct =
+    valueSummary &&
+    valueSummary.totalPortfolioRevenue &&
+    valueSummary.segmentDistribution.length > 0
+      ? (() => {
+          const hv = valueSummary.segmentDistribution.find((s) => s.segment === 'High Value');
+          if (!hv || hv.totalRevenue === null || valueSummary.totalPortfolioRevenue <= 0) {
+            return null;
+          }
+          return Math.round((hv.totalRevenue / valueSummary.totalPortfolioRevenue) * 100);
+        })()
+      : null;
 
   return (
-    <div className="relative space-y-10 overflow-x-hidden pb-6">
+    <div className="relative space-y-8 overflow-x-hidden pb-6">
       <div className="pointer-events-none fixed inset-0 -z-10 overflow-hidden" aria-hidden="true">
         <div className="animate-mesh-drift absolute -top-20 right-[12%] w-[520px] h-[520px] rounded-full bg-[#7655E8]/[0.07] blur-3xl" />
         <div className="animate-mesh-drift-slow absolute top-[38%] -left-24 w-[460px] h-[460px] rounded-full bg-[#35C5E8]/[0.07] blur-3xl" />
-        <div className="animate-mesh-drift absolute bottom-0 right-[22%] w-[440px] h-[440px] rounded-full bg-[#E84FA8]/[0.06] blur-3xl" />
       </div>
 
-      {/* 1. CINEMATIC 3D HERO EXPERIENCE */}
+      {/* 1. 3D HERO SECTION */}
       <section
         onPointerMove={handleHeroPointerMove}
         onPointerLeave={handleHeroPointerLeave}
-        className="relative overflow-hidden rounded-[28px] bg-gradient-to-br from-[#11142B] via-[#211B58] to-[#562583] text-white shadow-[0_28px_70px_rgba(17,20,43,0.28)] border border-white/15 p-6 sm:p-8 lg:p-11"
+        className="relative overflow-hidden rounded-[28px] bg-gradient-to-br from-[#0B0E23] via-[#13173C] to-[#24184E] text-white shadow-[0_28px_70px_rgba(11,14,35,0.32)] border border-white/12 p-6 sm:p-9 lg:p-11"
       >
         <div
-          className="absolute inset-0 opacity-20 pointer-events-none"
+          className="absolute inset-0 opacity-15 pointer-events-none"
           style={{
-            backgroundImage: 'radial-gradient(rgba(255,255,255,0.24) 1px, transparent 1px)',
+            backgroundImage: 'radial-gradient(rgba(255,255,255,0.22) 1px, transparent 1px)',
             backgroundSize: '28px 28px',
           }}
         />
-        <div className="animate-mesh-drift absolute -left-24 -top-24 w-96 h-96 rounded-full bg-[#397BFF]/25 blur-3xl pointer-events-none" />
-        <div className="animate-mesh-drift-slow absolute right-4 -bottom-20 w-[420px] h-[420px] rounded-full bg-[#E84FA8]/30 blur-3xl pointer-events-none" />
+        <div className="animate-mesh-drift absolute -left-24 -top-24 w-96 h-96 rounded-full bg-[#38BDF8]/18 blur-3xl pointer-events-none" />
+        <div className="animate-mesh-drift-slow absolute right-4 -bottom-20 w-[420px] h-[420px] rounded-full bg-[#7655E8]/26 blur-3xl pointer-events-none" />
 
-        <span className="animate-particle absolute top-8 left-1/3 w-1.5 h-1.5 rounded-full bg-[#35C5E8] pointer-events-none" />
-        <span
-          className="animate-particle absolute bottom-10 left-1/4 w-1 h-1 rounded-full bg-[#E84FA8] pointer-events-none"
-          style={{ animationDelay: '1.6s' }}
-        />
-
-        <div className="relative grid grid-cols-1 lg:grid-cols-12 gap-8 items-center">
+        <div className="relative grid grid-cols-1 lg:grid-cols-12 gap-8 lg:gap-10 items-center">
           <div className="lg:col-span-6 space-y-5">
-            <div className="text-[11px] uppercase tracking-[0.18em] font-semibold text-[#35C5E8] flex flex-wrap items-center gap-2">
-              <span>{tmpl.shortLabel} Workspace</span>
-              <span aria-hidden="true">·</span>
-              <span>{dataset.fileName}</span>
-              {dataset.isSample && (
-                <span className="text-indigo-200/90">(Demonstration Data)</span>
-              )}
-              <span aria-hidden="true">·</span>
-              <span className="font-mono tabular-nums text-white/95">
+            <div className="text-xs tracking-[0.12em] uppercase font-medium text-[#38BDF8]/90 flex flex-wrap items-center gap-2">
+              <span>{tmpl.shortLabel}</span>
+              <span aria-hidden="true" className="text-white/30">·</span>
+              <span className="text-slate-300 normal-case tracking-normal truncate max-w-[220px]">
+                {dataset.fileName}
+              </span>
+              <span aria-hidden="true" className="text-white/30">·</span>
+              <span className="font-mono tabular-nums text-white/90 normal-case tracking-normal">
                 {dataset.rowCount.toLocaleString()} records
               </span>
             </div>
 
-            <h1 className="font-display text-3xl sm:text-4xl lg:text-[44px] font-extrabold tracking-tight leading-[1.08] text-white">
-              KNOW YOUR{' '}
-              <span className="bg-gradient-to-r from-[#35C5E8] via-[#397BFF] to-[#E84FA8] bg-clip-text text-transparent">
-                {tmpl.entityPlural.toUpperCase()}.
+            <h1 className="font-display text-3xl sm:text-4xl lg:text-[46px] font-extrabold tracking-[-0.025em] leading-[1.06] text-white text-balance">
+              UNDERSTAND YOUR{' '}
+              <span className="bg-gradient-to-r from-[#38BDF8] via-[#60A5FA] to-[#A855F7] bg-clip-text text-transparent">
+                CUSTOMERS.
               </span>
               <br />
-              BEFORE THEY LEAVE.
+              ANTICIPATE THEIR{' '}
+              <span className="bg-gradient-to-r from-[#38BDF8] via-[#60A5FA] to-[#A855F7] bg-clip-text text-transparent">
+                NEXT MOVE.
+              </span>
             </h1>
 
-            <p className="text-sm sm:text-base text-indigo-100/85 leading-relaxed max-w-xl">
-              {tmpl.description} Turn {company.name} retention metrics into actionable predictions.
+            <p className="text-sm sm:text-base text-slate-300/90 leading-relaxed max-w-lg">
+              Identify customer risk. Understand churn patterns. Make smarter retention decisions.
             </p>
 
             <div className="pt-1 flex flex-wrap items-center gap-3">
-              {activeModel ? (
-                <button
-                  type="button"
-                  onClick={() => onNavigate('predictions')}
-                  className="inline-flex items-center gap-2 px-5 py-2.5 bg-white text-[#11142B] hover:bg-[#F5F3FF] text-sm font-bold rounded-xl shadow-lg shadow-[#11142B]/25 transition-all cursor-pointer whitespace-nowrap shrink-0"
-                >
-                  <span>View Churn Predictions</span>
-                  <ArrowRight className="w-4 h-4 text-[#7655E8]" />
-                </button>
-              ) : (
-                <button
-                  type="button"
-                  onClick={() => onNavigate('intelligence')}
-                  className="inline-flex items-center gap-2 px-5 py-2.5 bg-white text-[#11142B] hover:bg-[#F5F3FF] text-sm font-bold rounded-xl shadow-lg shadow-[#11142B]/25 transition-all cursor-pointer whitespace-nowrap shrink-0"
-                >
-                  <span>Explore Customer Intelligence</span>
-                  <ArrowRight className="w-4 h-4 text-[#7655E8]" />
-                </button>
-              )}
               <button
                 type="button"
-                onClick={() => onNavigate('analytics')}
-                className="inline-flex items-center gap-2 px-4 py-2.5 bg-white/10 hover:bg-white/20 text-white border border-white/25 text-sm font-semibold rounded-xl transition-all cursor-pointer whitespace-nowrap shrink-0"
+                onClick={() => onNavigate(activeModel ? 'churn_analysis' : 'customers')}
+                className="inline-flex items-center gap-2 px-5 py-2.5 bg-white text-[#0B0E23] hover:bg-[#F5F3FF] text-sm font-bold rounded-xl shadow-lg shadow-[#0B0E23]/25 transition-all cursor-pointer whitespace-nowrap shrink-0"
               >
-                <BarChart3 className="w-4 h-4 text-[#35C5E8]" />
-                <span>Business Analytics</span>
+                <span>{activeModel ? 'Open Churn Analysis' : 'Inspect Customers'}</span>
+                <ArrowRight className="w-4 h-4 text-[#7655E8]" />
               </button>
               <button
                 type="button"
                 onClick={() => onNavigate('data')}
-                className="inline-flex items-center gap-2 px-4 py-2.5 bg-white/10 hover:bg-white/20 text-white border border-white/20 text-sm font-semibold rounded-xl transition-all cursor-pointer whitespace-nowrap shrink-0"
+                className="inline-flex items-center gap-2 px-4 py-2.5 bg-white/10 hover:bg-white/18 text-white border border-white/20 text-sm font-semibold rounded-xl transition-all cursor-pointer whitespace-nowrap shrink-0"
               >
-                <FileSpreadsheet className="w-4 h-4" />
-                <span>Data Management</span>
+                <Database className="w-4 h-4 text-[#38BDF8]" />
+                <span>Manage Data</span>
               </button>
             </div>
           </div>
 
           <div className="lg:col-span-6">
-            <HeroArtwork
-              analytics={analytics}
-              activeModel={activeModel}
-              tilt={heroTilt}
-            />
+            <HeroArtwork analytics={analytics} activeModel={activeModel} tilt={heroTilt} />
           </div>
         </div>
       </section>
 
-      {/* Managed Prediction Setup Status */}
-      <PredictionPipelineBanner
-        automationStatus={automationStatus}
-        isRunning={isPipelineRunning}
-        canGeneratePredictions={canGeneratePredictions}
-        onAutoBuild={onAutoBuild}
-        onNavigate={onNavigate}
-      />
-
-      {dataset.hasValidChurnLabels === false && dataset.churnReadinessMessage && !automationStatus && (
-        <div className="bg-amber-50 border border-amber-300 rounded-2xl p-4 flex flex-col sm:flex-row sm:items-center sm:justify-between gap-3 text-xs text-amber-950">
-          <div className="flex items-start gap-2.5">
-            <AlertTriangle className="w-4 h-4 text-amber-700 shrink-0 mt-0.5" />
-            <div>
-              <div className="font-bold">More Historical Data Required for Predictions</div>
-              <p className="mt-0.5">{dataset.churnReadinessMessage}</p>
-            </div>
-          </div>
-          <button
-            type="button"
-            onClick={() => onNavigate('data')}
-            className="px-3.5 py-2 bg-amber-900 text-white font-semibold rounded-xl shrink-0 cursor-pointer whitespace-nowrap"
-          >
-            Review Data Management
-          </button>
-        </div>
+      {/* Concise Status Notice Only When Action Is Required */}
+      {automationStatus && !automationStatus.predictionAvailable && (
+        <PredictionPipelineBanner
+          automationStatus={automationStatus}
+          isRunning={isPipelineRunning}
+          canGeneratePredictions={canGeneratePredictions}
+          onAutoBuild={onAutoBuild}
+          onNavigate={onNavigate}
+          compact
+        />
       )}
 
-      {/* 2. PREMIUM FLOATING GLASS KPI PANELS */}
-      {analytics.isUnlabeledColdStart ? (
-        <div className="grid grid-cols-1 sm:grid-cols-2 xl:grid-cols-4 gap-5">
-          <TiltKpiCard
-            index={0}
-            title={`Monitored ${tmpl.entityPlural}`}
-            value={analytics.totalCustomers}
-            subtitle="Active records (Cold-start mode)"
-            gradientClass="bg-gradient-to-br from-[#7655E8] via-[#6846DE] to-[#4E30BF]"
-            shadowClass="shadow-xl shadow-[#7655E8]/25"
-            icon={<Users className="w-5 h-5 text-white" />}
-          />
-
-          <TiltKpiCard
-            index={1}
-            title="Inactivity Watchlist"
-            value={analytics.behaviourMonitoring?.inactivityWatchlistCount ?? 0}
-            subtitle={
-              analytics.behaviourMonitoring?.inactivityThresholdDays
-                ? `Inactive > ${analytics.behaviourMonitoring.inactivityThresholdDays} days`
-                : 'Quiet activity signal (not assumed churn)'
-            }
-            gradientClass="bg-gradient-to-br from-[#FF786B] via-[#F2638A] to-[#E84FA8]"
-            shadowClass="shadow-xl shadow-[#E84FA8]/25"
-            icon={<UserMinus className="w-5 h-5 text-white" />}
-          />
-
-          <TiltKpiCard
-            index={2}
-            title="Data Readiness Score"
-            value={dataset.readiness?.readinessScore ?? 55}
-            suffix="/100"
-            subtitle={dataset.readiness?.overallLabel || 'Behaviour Monitoring Ready'}
-            gradientClass="bg-gradient-to-br from-[#397BFF] via-[#2798F2] to-[#35C5E8]"
-            shadowClass="shadow-xl shadow-[#397BFF]/25"
-            icon={<CheckCircle2 className="w-5 h-5 text-white" />}
-          />
-
-          <TiltKpiCard
-            index={3}
-            title="Low-Engagement Accounts"
-            value={analytics.behaviourMonitoring?.lowEngagementCount ?? 0}
-            subtitle="Awaiting observed churn outcomes"
-            gradientClass="bg-gradient-to-br from-[#B84DE0] via-[#9650E4] to-[#7655E8]"
-            shadowClass="shadow-xl shadow-[#B84DE0]/25"
-            icon={<Activity className="w-5 h-5 text-white" />}
-          />
-        </div>
-      ) : (
-        <div className="grid grid-cols-1 sm:grid-cols-2 xl:grid-cols-4 gap-5">
-          <TiltKpiCard
-            index={0}
-            title={`Total ${tmpl.entityPlural}`}
-            value={analytics.totalCustomers}
-            subtitle="Valid labeled records in dataset"
-            gradientClass="bg-gradient-to-br from-[#7655E8] via-[#6846DE] to-[#4E30BF]"
-            shadowClass="shadow-xl shadow-[#7655E8]/25"
-            icon={<Users className="w-5 h-5 text-white" />}
-          />
-
-          <TiltKpiCard
-            index={1}
-            title={tmpl.churnLabel}
-            value={analytics.churnedCount}
-            subtitle={
-              dataset.mapping.targetColumn
-                ? `Target = ${dataset.mapping.positiveClassValue}`
-                : 'Target unmapped'
-            }
-            gradientClass="bg-gradient-to-br from-[#FF786B] via-[#F2638A] to-[#E84FA8]"
-            shadowClass="shadow-xl shadow-[#E84FA8]/25"
-            icon={<UserMinus className="w-5 h-5 text-white" />}
-          />
-
-          <TiltKpiCard
-            index={2}
-            title={`Retained ${tmpl.entityPlural}`}
-            value={analytics.stayedCount}
-            subtitle="Active retained accounts"
-            gradientClass="bg-gradient-to-br from-[#397BFF] via-[#2798F2] to-[#35C5E8]"
-            shadowClass="shadow-xl shadow-[#397BFF]/25"
-            icon={<UserCheck className="w-5 h-5 text-white" />}
-          />
-
-          <TiltKpiCard
-            index={3}
-            title="Overall Churn Rate"
-            value={analytics.churnRate}
-            decimals={1}
-            suffix="%"
-            subtitle={`${analytics.churnedCount.toLocaleString()} of ${analytics.totalCustomers.toLocaleString()} ${tmpl.entityPlural.toLowerCase()}`}
-            gradientClass="bg-gradient-to-br from-[#B84DE0] via-[#9650E4] to-[#7655E8]"
-            shadowClass="shadow-xl shadow-[#B84DE0]/25"
-            icon={<Activity className="w-5 h-5 text-white" />}
-          />
-        </div>
-      )}
-
-      {/* Cold-Start Behaviour Monitoring & Watchlist */}
-      {analytics.isUnlabeledColdStart && analytics.behaviourMonitoring && (
-        <section className="bg-white/95 border border-purple-100/90 rounded-2xl shadow-sm shadow-purple-950/[0.04] p-6 space-y-4">
-          <div className="flex flex-col sm:flex-row sm:items-center sm:justify-between gap-3">
-            <div>
-              <div className="text-[11px] uppercase tracking-[0.16em] font-semibold text-[#397BFF]">
-                Cold-Start Behaviour Monitoring Active
-              </div>
-              <h2 className="font-display text-lg font-bold text-[#11142B]">
-                Engagement &amp; Inactivity Watchlist
-              </h2>
-              <p className="text-xs text-slate-600 mt-0.5">
-                Tracking {analytics.behaviourMonitoring.signalsDetected.join(', ') || 'portfolio metrics'} across{' '}
-                {analytics.behaviourMonitoring.activeAccountsCount.toLocaleString()}{' '}
-                {tmpl.entityPlural.toLowerCase()}. Record observed outcomes in Data Management as they happen.
-              </p>
-            </div>
-            <button
-              type="button"
-              onClick={() => onNavigate('data')}
-              className="inline-flex items-center gap-1.5 px-4 py-2 bg-[#11142B] hover:bg-[#1C2147] text-white text-xs font-semibold rounded-xl cursor-pointer whitespace-nowrap self-start sm:self-auto"
-            >
-              <span>Open Readiness &amp; Record Outcomes</span>
-              <ArrowRight className="w-3.5 h-3.5 text-[#35C5E8]" />
-            </button>
-          </div>
-
-          {analytics.behaviourMonitoring.watchlistSample.length > 0 ? (
-            <div className="overflow-x-auto">
-              <table className="w-full text-left border-collapse text-xs">
-                <thead>
-                  <tr className="border-b border-purple-100 text-[#4C4A6E] font-semibold">
-                    <th className="py-2 pr-3">{tmpl.entitySingular} ID</th>
-                    <th className="py-2 px-3">Last Activity</th>
-                    <th className="py-2 px-3 text-right">Days Quiet</th>
-                    <th className="py-2 px-3 text-right">Engagement</th>
-                    <th className="py-2 pl-3">Signal Note</th>
-                  </tr>
-                </thead>
-                <tbody className="divide-y divide-purple-50">
-                  {analytics.behaviourMonitoring.watchlistSample.slice(0, 6).map((item) => (
-                    <tr key={`${item.rowIndex}-${item.customerId}`}>
-                      <td className="py-2 pr-3 font-mono font-bold text-[#11142B]">
-                        {item.customerId}
-                      </td>
-                      <td className="py-2 px-3 font-mono text-slate-600">
-                        {item.lastDate || '—'}
-                      </td>
-                      <td className="py-2 px-3 text-right font-mono tabular-nums text-[#D97706] font-semibold">
-                        {item.daysSinceActivity !== null ? `${item.daysSinceActivity}d` : '—'}
-                      </td>
-                      <td className="py-2 px-3 text-right font-mono tabular-nums text-slate-700">
-                        {item.engagementValue ?? '—'}
-                      </td>
-                      <td className="py-2 pl-3 text-slate-600">{item.reason}</td>
-                    </tr>
-                  ))}
-                </tbody>
-              </table>
-            </div>
-          ) : (
-            <div className="text-xs text-slate-600 bg-[#F5F3FF]/60 border border-purple-100 rounded-xl p-4">
-              No inactive or low-engagement outliers breached threshold yet. Continue updating activity dates and recording observed churn outcomes to build your supervised baseline.
-            </div>
-          )}
-        </section>
-      )}
-
-      {/* 3. SECTION 01: THE CUSTOMER LANDSCAPE */}
-      <motion.section {...revealProps} className="space-y-5">
-        <div className="flex flex-col lg:flex-row lg:items-end lg:justify-between gap-4">
-          <div className="space-y-1">
-            <div className="text-[11px] uppercase tracking-[0.2em] font-semibold text-[#7655E8]">
-              01 · Portfolio Overview ({tmpl.shortLabel})
-            </div>
-            <h2 className="font-display text-2xl sm:text-3xl font-extrabold tracking-tight text-[#11142B]">
-              THE {tmpl.entitySingular.toUpperCase()}{' '}
-              <span className="bg-gradient-to-r from-[#7655E8] via-[#B84DE0] to-[#E84FA8] bg-clip-text text-transparent">
-                LANDSCAPE
-              </span>
+      {/* 2. FIVE-QUESTION EXECUTIVE SUMMARY (Questions 1–4) */}
+      <section className="space-y-4">
+        <div className="flex flex-col sm:flex-row sm:items-end sm:justify-between gap-2">
+          <div>
+            <h2 className="font-display text-xl sm:text-2xl font-bold text-[#11142B] tracking-tight">
+              Executive Portfolio Summary
             </h2>
-            {analytics.calculationExplanation && (
-              <p className="text-xs font-mono text-slate-600">
-                {analytics.calculationExplanation}
-              </p>
-            )}
+            <p className="text-xs sm:text-sm text-slate-600 mt-0.5">
+              Immediate answers on portfolio health, customer risk, value concentration, and revenue exposure.
+            </p>
           </div>
-
-          <div className="flex flex-wrap items-center gap-2.5">
+          <div className="flex items-center gap-2">
             <button
               type="button"
               onClick={() => exportChurnSummaryCsv(company, dataset, analytics)}
-              className="inline-flex items-center gap-1.5 px-3 py-2 rounded-xl border border-purple-200 bg-white hover:bg-[#F5F3FF] text-xs font-semibold text-[#11142B] cursor-pointer whitespace-nowrap"
+              className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-lg border border-purple-200 bg-white hover:bg-[#F5F3FF] text-xs font-semibold text-[#11142B] cursor-pointer whitespace-nowrap"
             >
               <Download className="w-3.5 h-3.5 text-[#397BFF]" />
-              <span>Export Summary CSV</span>
+              <span>Summary CSV</span>
             </button>
             <button
               type="button"
@@ -659,35 +493,230 @@ export const DashboardView: React.FC<DashboardViewProps> = ({
                   ? 'Download executive churn PDF report'
                   : 'Executive PDF reports require Starter plan or higher'
               }
-              className="inline-flex items-center gap-1.5 px-3 py-2 rounded-xl border border-purple-200 bg-white hover:bg-[#F5F3FF] text-xs font-semibold text-[#11142B] disabled:opacity-45 cursor-pointer whitespace-nowrap"
+              className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-lg border border-purple-200 bg-white hover:bg-[#F5F3FF] text-xs font-semibold text-[#11142B] disabled:opacity-45 cursor-pointer whitespace-nowrap"
             >
               <FileText className="w-3.5 h-3.5 text-[#E84FA8]" />
               <span>{plan.allowPdfReports ? 'Executive PDF' : 'PDF (Starter+)'}</span>
             </button>
-            <button
-              type="button"
-              onClick={() => onNavigate('analytics')}
-              className="inline-flex items-center gap-1.5 text-xs font-semibold text-[#7655E8] hover:text-[#E84FA8] transition-colors cursor-pointer whitespace-nowrap pl-1"
-            >
-              <span>Open Business Analytics</span>
-              <ArrowRight className="w-3.5 h-3.5" />
-            </button>
           </div>
         </div>
 
+        <div className="grid grid-cols-1 sm:grid-cols-2 xl:grid-cols-4 gap-5">
+          {/* Q1: How is my customer portfolio performing? */}
+          <TiltKpiCard
+            index={0}
+            title="Portfolio Performance"
+            value={analytics.isUnlabeledColdStart ? analytics.totalCustomers : 100 - analytics.churnRate}
+            decimals={analytics.isUnlabeledColdStart ? 0 : 1}
+            suffix={analytics.isUnlabeledColdStart ? '' : '%'}
+            subtitle={
+              analytics.isUnlabeledColdStart
+                ? `Monitoring ${analytics.totalCustomers.toLocaleString()} ${tmpl.entityPlural.toLowerCase()} (awaiting outcomes)`
+                : `${analytics.totalCustomers.toLocaleString()} total · ${analytics.churnRate.toFixed(1)}% historical churn`
+            }
+            gradientClass="bg-gradient-to-br from-[#7655E8] via-[#6846DE] to-[#4E30BF]"
+            shadowClass="shadow-xl shadow-[#7655E8]/25"
+            icon={<Users className="w-5 h-5 text-white" />}
+          />
+
+          {/* Q2: How many customers might leave? */}
+          <TiltKpiCard
+            index={1}
+            title="Customers at Risk"
+            value={
+              riskOverview
+                ? riskOverview.atRiskCount
+                : analytics.isUnlabeledColdStart
+                  ? analytics.behaviourMonitoring?.inactivityWatchlistCount ?? 0
+                  : 0
+            }
+            displayText={
+              !riskOverview && !analytics.isUnlabeledColdStart ? 'Unavailable' : undefined
+            }
+            subtitle={
+              riskOverview
+                ? `${riskOverview.highCount.toLocaleString()} high risk · ${riskOverview.medCount.toLocaleString()} moderate risk`
+                : analytics.isUnlabeledColdStart
+                  ? 'Inactivity watchlist (not confirmed churn)'
+                  : 'Activate churn predictions in Churn Analysis'
+            }
+            gradientClass="bg-gradient-to-br from-[#FF786B] via-[#F2638A] to-[#E84FA8]"
+            shadowClass="shadow-xl shadow-[#E84FA8]/25"
+            icon={<ShieldAlert className="w-5 h-5 text-white" />}
+          />
+
+          {/* Q3: Which customers are most valuable? */}
+          <TiltKpiCard
+            index={2}
+            title="High-Value Customers"
+            value={valueSummary?.valueAssessmentAvailable ? valueSummary.highValueCount : 0}
+            displayText={valueSummary?.valueAssessmentAvailable ? undefined : 'Unavailable'}
+            subtitle={
+              valueSummary?.valueAssessmentAvailable
+                ? highValueSharePct !== null
+                  ? `Top tier driving ~${highValueSharePct}% of portfolio revenue`
+                  : `Of ${valueSummary.totalCustomers.toLocaleString()} evaluated accounts`
+                : 'Add spend or tenure data to score value'
+            }
+            gradientClass="bg-gradient-to-br from-[#397BFF] via-[#2798F2] to-[#35C5E8]"
+            shadowClass="shadow-xl shadow-[#397BFF]/25"
+            icon={<Gem className="w-5 h-5 text-white" />}
+          />
+
+          {/* Q4: How much revenue is potentially exposed? */}
+          <TiltKpiCard
+            index={3}
+            title="Revenue Exposure"
+            value={
+              valueSummary?.riskPredictionsAvailable &&
+              valueSummary.estimatedExpectedRevenueExposure !== null
+                ? Math.round(valueSummary.estimatedExpectedRevenueExposure)
+                : 0
+            }
+            prefix="$"
+            displayText={
+              valueSummary?.riskPredictionsAvailable &&
+              valueSummary.estimatedExpectedRevenueExposure !== null
+                ? undefined
+                : 'Unavailable'
+            }
+            subtitle={
+              valueSummary?.riskPredictionsAvailable &&
+              valueSummary.estimatedExpectedRevenueExposure !== null
+                ? valueSummary.highValueAtRiskCount !== null
+                  ? `${valueSummary.highValueAtRiskCount.toLocaleString()} high-value accounts above risk cutoff`
+                  : 'Expected annual exposure from model risk'
+                : 'Exposure unavailable until churn predictions activate'
+            }
+            gradientClass="bg-gradient-to-br from-[#B84DE0] via-[#9650E4] to-[#7655E8]"
+            shadowClass="shadow-xl shadow-[#B84DE0]/25"
+            icon={<Activity className="w-5 h-5 text-white" />}
+          />
+        </div>
+      </section>
+
+      {/* 3. QUESTION 5: WHAT SHOULD I DO NEXT? + IMPORTANT INSIGHTS */}
+      <motion.section {...revealProps} className="grid grid-cols-1 lg:grid-cols-12 gap-6">
+        {/* Important Business Insights */}
+        <div className="lg:col-span-7 bg-white/95 border border-purple-100/90 rounded-2xl shadow-xs p-6 space-y-4">
+          <div className="flex items-center justify-between gap-3">
+            <div>
+              <h2 className="font-display text-lg font-bold text-[#11142B]">
+                Important Business Insights
+              </h2>
+              <p className="text-xs text-slate-500 mt-0.5">
+                Key signals discovered across your {tmpl.shortLabel.toLowerCase()} customer base
+              </p>
+            </div>
+            <button
+              type="button"
+              onClick={() => onNavigate('analytics')}
+              className="inline-flex items-center gap-1 text-xs font-semibold text-[#7655E8] hover:text-[#E84FA8] cursor-pointer whitespace-nowrap"
+            >
+              <span>All Insights</span>
+              <ArrowRight className="w-3.5 h-3.5" />
+            </button>
+          </div>
+
+          <div className="divide-y divide-purple-100/80">
+            {intelligenceInsights.slice(0, 3).map((item) => (
+              <div key={item.id} className="py-3.5 first:pt-1 last:pb-1 space-y-1.5">
+                <div className="flex items-baseline justify-between gap-3">
+                  <div className="font-semibold text-sm text-[#11142B] flex items-center gap-2">
+                    <TrendingUp className="w-4 h-4 text-[#7655E8] shrink-0" />
+                    <span>{item.title}</span>
+                  </div>
+                  <span className="font-mono tabular-nums text-sm font-bold text-[#7655E8] shrink-0">
+                    {item.statValue}
+                  </span>
+                </div>
+                <p className="text-xs text-slate-600 leading-relaxed">{item.explanation}</p>
+              </div>
+            ))}
+          </div>
+        </div>
+
+        {/* Recommended Next Actions (Q5) */}
+        <div className="lg:col-span-5 bg-white/95 border border-purple-100/90 rounded-2xl shadow-xs p-6 flex flex-col justify-between space-y-4">
+          <div className="space-y-3">
+            <div>
+              <h2 className="font-display text-lg font-bold text-[#11142B]">
+                What Should I Do Next?
+              </h2>
+              <p className="text-xs text-slate-500 mt-0.5">
+                Prioritised retention actions based on your live portfolio data
+              </p>
+            </div>
+
+            <div className="space-y-3">
+              {recommendedActions.map((act) => (
+                <div
+                  key={act.id}
+                  className="rounded-xl border border-purple-100 bg-[#F5F3FF]/50 p-3.5 space-y-2"
+                >
+                  <div className="flex items-start justify-between gap-2">
+                    <div className="text-xs font-bold text-[#11142B] flex items-center gap-1.5">
+                      {act.priority === 'Critical' ? (
+                        <AlertTriangle className="w-3.5 h-3.5 text-[#E04F44] shrink-0" />
+                      ) : (
+                        <CheckCircle2 className="w-3.5 h-3.5 text-[#7655E8] shrink-0" />
+                      )}
+                      <span>{act.title}</span>
+                    </div>
+                  </div>
+                  <p className="text-xs text-slate-600 leading-relaxed">{act.detail}</p>
+                  <button
+                    type="button"
+                    onClick={() => onNavigate(act.target)}
+                    className="inline-flex items-center gap-1 text-xs font-semibold text-[#7655E8] hover:text-[#E84FA8] cursor-pointer"
+                  >
+                    <span>{act.cta}</span>
+                    <ArrowRight className="w-3.5 h-3.5" />
+                  </button>
+                </div>
+              ))}
+            </div>
+          </div>
+        </div>
+      </motion.section>
+
+      {/* 4. IMPORTANT CHARTS & GRAPHS (Focused 2-Chart Summary) */}
+      <motion.section {...revealProps} className="space-y-4">
+        <div className="flex flex-col sm:flex-row sm:items-end sm:justify-between gap-2">
+          <div>
+            <h2 className="font-display text-xl font-bold text-[#11142B] tracking-tight">
+              Key Portfolio Trends
+            </h2>
+            <p className="text-xs text-slate-600 mt-0.5">
+              Retention split and primary attrition pattern ·{' '}
+              {valueSummary?.profitAvailable && valueSummary.totalPortfolioProfit !== null
+                ? `Tracked portfolio profit: ${formatCurrencyCompact(valueSummary.totalPortfolioProfit)}`
+                : valueSummary?.revenueBasisNote || tmpl.shortLabel}
+            </p>
+          </div>
+          <button
+            type="button"
+            onClick={() => onNavigate('analytics')}
+            className="inline-flex items-center gap-1.5 text-xs font-semibold text-[#7655E8] hover:text-[#E84FA8] cursor-pointer whitespace-nowrap self-start sm:self-auto"
+          >
+            <BarChart3 className="w-3.5 h-3.5" />
+            <span>Open Full Churn Patterns</span>
+            <ArrowRight className="w-3.5 h-3.5" />
+          </button>
+        </div>
+
         <div className="grid grid-cols-1 lg:grid-cols-12 gap-6">
-          {/* A. Customer Churn Distribution */}
-          <div className="lg:col-span-6 bg-white/95 border border-purple-100/90 rounded-2xl shadow-sm shadow-purple-950/[0.04] p-6 space-y-4 transition-all duration-200 hover:shadow-lg hover:shadow-[#7655E8]/[0.07] hover:border-purple-200">
+          <div className="lg:col-span-6 bg-white/95 border border-purple-100/90 rounded-2xl shadow-xs p-6 space-y-4">
             <div>
               <h3 className="font-display text-base font-bold text-[#11142B]">
-                {tmpl.entitySingular} Churn Distribution
+                {analytics.isUnlabeledColdStart
+                  ? `${tmpl.entitySingular} Portfolio Status`
+                  : `${tmpl.entitySingular} Churn Distribution`}
               </h3>
               <p className="text-xs text-slate-500 mt-0.5">
-                Churned vs. retained split across{' '}
-                <span className="font-mono tabular-nums">
-                  {analytics.totalCustomers.toLocaleString()}
-                </span>{' '}
-                {tmpl.entityPlural.toLowerCase()}
+                {analytics.isUnlabeledColdStart
+                  ? `Active monitoring across ${analytics.totalCustomers.toLocaleString()} ${tmpl.entityPlural.toLowerCase()}`
+                  : `Retained vs. churned across ${analytics.totalCustomers.toLocaleString()} ${tmpl.entityPlural.toLowerCase()}`}
               </p>
             </div>
             <ChurnDoughnutChart
@@ -697,16 +726,38 @@ export const DashboardView: React.FC<DashboardViewProps> = ({
             />
           </div>
 
-          {/* D. Revenue / Value Analysis */}
-          {analytics.monthlyChargesComparison && (
-            <div className="lg:col-span-6 bg-white/95 border border-purple-100/90 rounded-2xl shadow-sm shadow-purple-950/[0.04] p-6 space-y-4 transition-all duration-200 hover:shadow-lg hover:shadow-[#397BFF]/[0.07] hover:border-purple-200">
+          {analytics.contractStats ? (
+            <div className="lg:col-span-6 bg-white/95 border border-purple-100/90 rounded-2xl shadow-xs p-6 space-y-4">
+              <div>
+                <h3 className="font-display text-base font-bold text-[#11142B]">
+                  Retention by {tmpl.segmentLabel}
+                </h3>
+                <p className="text-xs text-slate-500 mt-0.5">
+                  Comparison across {dataset.mapping.contractColumn || tmpl.segmentLabel}
+                </p>
+              </div>
+              <GroupedChurnBarChart data={analytics.contractStats} xAxisLabel={tmpl.segmentLabel} />
+            </div>
+          ) : analytics.tenureStats ? (
+            <div className="lg:col-span-6 bg-white/95 border border-purple-100/90 rounded-2xl shadow-xs p-6 space-y-4">
+              <div>
+                <h3 className="font-display text-base font-bold text-[#11142B]">
+                  {tmpl.entitySingular} Retention Trends
+                </h3>
+                <p className="text-xs text-slate-500 mt-0.5">
+                  Retention and churn rates across {tmpl.tenureLabel.toLowerCase()} cohorts
+                </p>
+              </div>
+              <TenureTrendLineChart data={analytics.tenureStats} />
+            </div>
+          ) : analytics.monthlyChargesComparison ? (
+            <div className="lg:col-span-6 bg-white/95 border border-purple-100/90 rounded-2xl shadow-xs p-6 space-y-4">
               <div>
                 <h3 className="font-display text-base font-bold text-[#11142B]">
                   {tmpl.revenueLabel} Comparison
                 </h3>
                 <p className="text-xs text-slate-500 mt-0.5">
-                  Average {analytics.monthlyChargesComparison.columnName} comparing retained vs.
-                  churned {tmpl.entityPlural.toLowerCase()}
+                  Average {analytics.monthlyChargesComparison.columnName} by status
                 </p>
               </div>
               <AverageChargesBarChart
@@ -714,516 +765,38 @@ export const DashboardView: React.FC<DashboardViewProps> = ({
                 metricLabel={tmpl.revenueLabel}
               />
             </div>
-          )}
-
-          {/* Engagement / Frequency Comparison if mapped and revenue is not taking both slots */}
-          {analytics.frequencyComparison && (
-            <div className="lg:col-span-6 bg-white/95 border border-purple-100/90 rounded-2xl shadow-sm shadow-purple-950/[0.04] p-6 space-y-4 transition-all duration-200 hover:shadow-lg hover:shadow-[#35C5E8]/[0.08] hover:border-purple-200">
-              <div>
-                <h3 className="font-display text-base font-bold text-[#11142B]">
-                  {tmpl.frequencyLabel} Comparison
-                </h3>
-                <p className="text-xs text-slate-500 mt-0.5">
-                  Average {analytics.frequencyComparison.columnName} comparing retained vs. churned
-                </p>
+          ) : (
+            <div className="lg:col-span-6 bg-white/95 border border-purple-100/90 rounded-2xl shadow-xs p-6 flex flex-col justify-center items-start space-y-3">
+              <div className="w-10 h-10 rounded-xl bg-[#F5F3FF] text-[#7655E8] flex items-center justify-center">
+                <BrainCircuit className="w-5 h-5" />
               </div>
-              <AverageChargesBarChart
-                comparison={analytics.frequencyComparison}
-                valuePrefix=""
-                metricLabel={tmpl.frequencyLabel}
-              />
+              <h3 className="font-display text-base font-bold text-[#11142B]">
+                Segment Breakdown Not Mapped Yet
+              </h3>
+              <p className="text-xs text-slate-600 leading-relaxed">
+                Map a segment, plan, or tenure column in Data Management to compare retention rates across customer groups.
+              </p>
+              <button
+                type="button"
+                onClick={() => onNavigate('data')}
+                className="px-4 py-2 rounded-xl bg-[#11142B] text-white text-xs font-semibold cursor-pointer"
+              >
+                Configure Column Mapping
+              </button>
             </div>
           )}
         </div>
       </motion.section>
 
-      {/* 4. SECTION 02: WHERE CUSTOMERS DISAPPEAR */}
-      {(analytics.contractStats || analytics.tenureStats || analytics.paymentMethodStats) && (
-        <motion.section {...revealProps} className="space-y-5">
-          <div className="space-y-1">
-            <div className="text-[11px] uppercase tracking-[0.2em] font-semibold text-[#E84FA8]">
-              02 · Attrition Drivers
-            </div>
-            <h2 className="font-display text-2xl sm:text-3xl font-extrabold tracking-tight text-[#11142B]">
-              WHERE {tmpl.entityPlural.toUpperCase()}{' '}
-              <span className="bg-gradient-to-r from-[#FF786B] via-[#E84FA8] to-[#7655E8] bg-clip-text text-transparent">
-                DISAPPEAR
-              </span>
-            </h2>
-            <p className="text-sm text-slate-600">
-              Cohort attrition across {tmpl.segmentLabel.toLowerCase()},{' '}
-              {tmpl.tenureLabel.toLowerCase()}, and mapped categorical dimensions
-            </p>
-          </div>
-
-          <div className="grid grid-cols-1 lg:grid-cols-12 gap-6">
-            {analytics.contractStats && (
-              <div className="lg:col-span-6 bg-white/95 border border-purple-100/90 rounded-2xl shadow-sm shadow-purple-950/[0.04] p-6 space-y-4 transition-all duration-200 hover:shadow-lg hover:shadow-[#7655E8]/[0.07] hover:border-purple-200">
-                <div>
-                  <h3 className="font-display text-base font-bold text-[#11142B]">
-                    Churn by {tmpl.segmentLabel}
-                  </h3>
-                  <p className="text-xs text-slate-500 mt-0.5">
-                    Grouped comparison across &ldquo;{dataset.mapping.contractColumn}&rdquo;
-                  </p>
-                </div>
-                <GroupedChurnBarChart
-                  data={analytics.contractStats}
-                  xAxisLabel={tmpl.segmentLabel}
-                />
-              </div>
-            )}
-
-            {analytics.tenureStats && (
-              <div className="lg:col-span-6 bg-white/95 border border-purple-100/90 rounded-2xl shadow-sm shadow-purple-950/[0.04] p-6 space-y-4 transition-all duration-200 hover:shadow-lg hover:shadow-[#397BFF]/[0.07] hover:border-purple-200">
-                <div>
-                  <h3 className="font-display text-base font-bold text-[#11142B]">
-                    {tmpl.tenureLabel} Analysis
-                  </h3>
-                  <p className="text-xs text-slate-500 mt-0.5">
-                    Retained vs. churned counts across tenure cohorts
-                  </p>
-                </div>
-                <GroupedChurnBarChart
-                  data={analytics.tenureStats}
-                  xAxisLabel={tmpl.tenureLabel}
-                />
-              </div>
-            )}
-
-            {analytics.paymentMethodStats && (
-              <div className="lg:col-span-6 bg-white/95 border border-purple-100/90 rounded-2xl shadow-sm shadow-purple-950/[0.04] p-6 space-y-4 transition-all duration-200 hover:shadow-lg hover:shadow-[#E84FA8]/[0.07] hover:border-purple-200">
-                <div>
-                  <h3 className="font-display text-base font-bold text-[#11142B]">
-                    {analytics.paymentMethodColumn} Breakdown
-                  </h3>
-                  <p className="text-xs text-slate-500 mt-0.5">
-                    Churn percentage across &ldquo;{analytics.paymentMethodColumn}&rdquo; categories
-                  </p>
-                </div>
-                <CategoryChurnRateBarChart
-                  data={analytics.paymentMethodStats}
-                  barColor="#E84FA8"
-                  height={265}
-                />
-              </div>
-            )}
-
-            {analytics.tenureStats && (
-              <div className="lg:col-span-6 bg-white/95 border border-purple-100/90 rounded-2xl shadow-sm shadow-purple-950/[0.04] p-6 space-y-4 transition-all duration-200 hover:shadow-lg hover:shadow-[#35C5E8]/[0.08] hover:border-purple-200">
-                <div>
-                  <h3 className="font-display text-base font-bold text-[#11142B]">
-                    {tmpl.entitySingular} Retention Trends
-                  </h3>
-                  <p className="text-xs text-slate-500 mt-0.5">
-                    Retention rate (%) and churn rate (%) trajectory across tenure cohorts
-                  </p>
-                </div>
-                <TenureTrendLineChart data={analytics.tenureStats} />
-              </div>
-            )}
-          </div>
-
-          {missingOptionalCharts.length > 0 && (
-            <p className="text-xs text-slate-500">
-              Note: Visualisations for {missingOptionalCharts.join(', ')} are hidden because
-              matching columns are not present or mapped in this dataset.
-            </p>
-          )}
-        </motion.section>
-      )}
-
-      {/* 5. SECTION 03: INTELLIGENCE BEYOND THE NUMBERS */}
-      {intelligenceInsights.length > 0 && (
-        <motion.section {...revealProps} className="space-y-5">
-          <div className="space-y-1">
-            <div className="text-[11px] uppercase tracking-[0.2em] font-semibold text-[#397BFF]">
-              03 · Retention Intelligence
-            </div>
-            <h2 className="font-display text-2xl sm:text-3xl font-extrabold tracking-tight text-[#11142B]">
-              <span className="bg-gradient-to-r from-[#397BFF] via-[#7655E8] to-[#E84FA8] bg-clip-text text-transparent">
-                INTELLIGENCE
-              </span>{' '}
-              BEYOND THE NUMBERS
-            </h2>
-            <p className="text-sm text-slate-600">
-              Verified statistical findings and retention opportunities calculated from your{' '}
-              {tmpl.label} dataset{activeModel ? ' and trained ML feature weights' : ''}
-            </p>
-          </div>
-
-          <div className="bg-white/95 border border-purple-100/90 rounded-[24px] shadow-sm shadow-purple-950/[0.05] overflow-hidden">
-            <div className="bg-gradient-to-r from-[#11142B] via-[#211C59] to-[#4F257F] px-6 py-5 text-white flex flex-col sm:flex-row sm:items-center sm:justify-between gap-3">
-              <div className="flex items-center gap-3.5">
-                <div className="w-10 h-10 rounded-xl bg-white/12 border border-white/25 flex items-center justify-center shrink-0">
-                  <Cpu className="w-5 h-5 text-[#35C5E8]" />
-                </div>
-                <div>
-                  <div className="text-[10px] uppercase tracking-[0.18em] text-[#35C5E8] font-semibold">
-                    Automated Pattern Extraction
-                  </div>
-                  <div className="font-display text-sm sm:text-base font-bold tracking-tight">
-                    {tmpl.shortLabel} Customer Intelligence Engine
-                  </div>
-                </div>
-              </div>
-
-              <div className="text-xs font-mono text-indigo-100/90 shrink-0">
-                {intelligenceInsights.length} Verified Signals
-              </div>
-            </div>
-
-            <div className="p-6 grid grid-cols-1 md:grid-cols-2 xl:grid-cols-3 gap-5">
-              {intelligenceInsights.map((item) => {
-                const tone = INSIGHT_TONE_STYLES[item.tone];
-                return (
-                  <div
-                    key={item.id}
-                    className={`rounded-2xl border border-purple-100/90 bg-[#F5F3FF]/50 p-5 flex flex-col justify-between space-y-4 transition-all duration-200 hover:-translate-y-0.5 hover:bg-white hover:shadow-md ${tone.ringBorder}`}
-                  >
-                    <div className="space-y-3">
-                      <div className="flex items-start justify-between gap-3">
-                        <div className="min-w-0">
-                          <div className="text-[10px] uppercase tracking-[0.15em] font-semibold text-slate-500">
-                            {item.category}
-                          </div>
-                          <h3 className="font-display text-sm font-bold text-[#11142B] mt-1 leading-snug">
-                            {item.title}
-                          </h3>
-                        </div>
-                        <div
-                          className={`w-8 h-8 rounded-xl ${tone.iconBg} text-white flex items-center justify-center shrink-0 shadow-xs`}
-                        >
-                          <TrendingUp className="w-4 h-4" />
-                        </div>
-                      </div>
-
-                      <div className="flex items-baseline justify-between gap-2 pt-1">
-                        <span className="text-xs text-slate-500">{item.statLabel}</span>
-                        <span
-                          className={`text-xl font-extrabold font-mono tabular-nums ${tone.statColor}`}
-                        >
-                          {item.statValue}
-                        </span>
-                      </div>
-
-                      <div className="h-2 w-full rounded-full bg-purple-100/80 overflow-hidden">
-                        <div
-                          style={{ width: `${item.meterPercent}%` }}
-                          className={`h-full rounded-full bg-gradient-to-r ${tone.barGradient} transition-all duration-700`}
-                        />
-                      </div>
-
-                      <p className="text-xs text-slate-600 leading-relaxed">{item.explanation}</p>
-                    </div>
-
-                    <div className="pt-3 border-t border-purple-100/80 text-xs text-[#11142B] leading-relaxed">
-                      <span className="font-bold text-[#7655E8]">Recommendation: </span>
-                      {item.recommendation}
-                    </div>
-                  </div>
-                );
-              })}
-            </div>
-          </div>
-        </motion.section>
-      )}
-
-      {/* 6. SECTION 04: UNDERSTANDING THE RISK & PIPELINE DIAGNOSTICS */}
-      <motion.section {...revealProps} className="space-y-5">
-        <div className="space-y-1">
-          <div className="text-[11px] uppercase tracking-[0.2em] font-semibold text-[#B84DE0]">
-            04 · Predictive Scoring &amp; Pipeline
-          </div>
-          <h2 className="font-display text-2xl sm:text-3xl font-extrabold tracking-tight text-[#11142B]">
-            UNDERSTANDING THE{' '}
-            <span className="bg-gradient-to-r from-[#7655E8] via-[#397BFF] to-[#35C5E8] bg-clip-text text-transparent">
-              RISK
-            </span>
-          </h2>
-          <p className="text-sm text-slate-600">
-            Account-level churn risk estimates generated automatically for {company.name}
-          </p>
-        </div>
-
-        <div className="grid grid-cols-1 lg:grid-cols-12 gap-6">
-          <div className="lg:col-span-7 bg-white/95 border border-purple-100/90 rounded-2xl shadow-sm shadow-purple-950/[0.04] p-6 space-y-5">
-            <div className="flex flex-col sm:flex-row sm:items-center sm:justify-between gap-2">
-              <div>
-                <h3 className="font-display text-base font-bold text-[#11142B]">
-                  {tmpl.entitySingular} Risk Overview
-                </h3>
-                <p className="text-xs text-slate-500 mt-0.5">
-                  {riskOverview && activeModel
-                    ? `Prediction availability: Active · ${riskOverview.total.toLocaleString()} scored records`
-                    : 'Predictions activate automatically once valid historical churn labels are confirmed'}
-                </p>
-              </div>
-
-              {riskOverview && (
-                <button
-                  type="button"
-                  onClick={() => onNavigate('predictions')}
-                  className="inline-flex items-center gap-1.5 text-xs font-semibold text-[#7655E8] hover:text-[#E84FA8] transition-colors cursor-pointer whitespace-nowrap self-start sm:self-auto"
-                >
-                  <span>Inspect All Predictions</span>
-                  <ArrowRight className="w-3.5 h-3.5" />
-                </button>
-              )}
-            </div>
-
-            {riskOverview && activeModel ? (
-              <div className="space-y-5">
-                <div className="grid grid-cols-1 sm:grid-cols-3 gap-4">
-                  <CircularRiskRing
-                    label={`High-Risk ${tmpl.entityPlural}`}
-                    count={riskOverview.highCount}
-                    total={riskOverview.total}
-                    strokeStart="#FF786B"
-                    strokeEnd="#E84FA8"
-                    badgeTextClass="text-[#D63384]"
-                    description="Probability ≥ 65%"
-                  />
-                  <CircularRiskRing
-                    label={`Medium-Risk ${tmpl.entityPlural}`}
-                    count={riskOverview.medCount}
-                    total={riskOverview.total}
-                    strokeStart="#B84DE0"
-                    strokeEnd="#7655E8"
-                    badgeTextClass="text-[#7655E8]"
-                    description="Probability 35% – 64.9%"
-                  />
-                  <CircularRiskRing
-                    label={`Low-Risk ${tmpl.entityPlural}`}
-                    count={riskOverview.lowCount}
-                    total={riskOverview.total}
-                    strokeStart="#16C995"
-                    strokeEnd="#397BFF"
-                    badgeTextClass="text-[#0E9F6E]"
-                    description="Probability < 35%"
-                  />
-                </div>
-
-                <div className="space-y-2">
-                  <div className="flex items-center justify-between text-xs">
-                    <span className="font-semibold text-[#11142B]">
-                      Scored Risk Distribution
-                    </span>
-                    <span className="font-mono tabular-nums text-slate-600">
-                      Mean Churn Probability:{' '}
-                      <strong className="text-[#7655E8]">
-                        {riskOverview.avgProb.toFixed(1)}%
-                      </strong>
-                    </span>
-                  </div>
-                  <div className="h-3.5 w-full rounded-full bg-[#F5F3FF] border border-purple-100 overflow-hidden flex">
-                    <div
-                      style={{
-                        width: `${(riskOverview.highCount / riskOverview.total) * 100}%`,
-                      }}
-                      className="h-full bg-gradient-to-r from-[#FF786B] to-[#E84FA8]"
-                      title={`High Risk: ${riskOverview.highCount}`}
-                    />
-                    <div
-                      style={{
-                        width: `${(riskOverview.medCount / riskOverview.total) * 100}%`,
-                      }}
-                      className="h-full bg-gradient-to-r from-[#B84DE0] to-[#7655E8]"
-                      title={`Medium Risk: ${riskOverview.medCount}`}
-                    />
-                    <div
-                      style={{
-                        width: `${(riskOverview.lowCount / riskOverview.total) * 100}%`,
-                      }}
-                      className="h-full bg-gradient-to-r from-[#16C995] to-[#397BFF]"
-                      title={`Low Risk: ${riskOverview.lowCount}`}
-                    />
-                  </div>
-                </div>
-
-                <div className="space-y-2.5">
-                  <div className="text-[11px] uppercase tracking-[0.14em] font-bold text-[#4C4A6E]">
-                    Highest Churn Probability Accounts (Model Estimate)
-                  </div>
-                  <div className="overflow-x-auto">
-                    <table className="w-full text-left border-collapse text-xs">
-                      <thead>
-                        <tr className="border-b border-purple-100 text-[#4C4A6E] font-semibold">
-                          <th className="py-2 pr-3">{tmpl.entitySingular} ID</th>
-                          <th className="py-2 px-3">Split</th>
-                          <th className="py-2 px-3">Predicted Status</th>
-                          <th className="py-2 pl-3 text-right">Churn Probability</th>
-                        </tr>
-                      </thead>
-                      <tbody className="divide-y divide-purple-50">
-                        {riskOverview.topAtRisk.map((pred) => {
-                          const pct = pred.churnProbability * 100;
-                          return (
-                            <tr key={`${pred.rowIndex}-${pred.customerId}`}>
-                              <td className="py-2.5 pr-3 font-mono font-semibold text-[#11142B]">
-                                {pred.customerId}
-                              </td>
-                              <td className="py-2.5 px-3 text-slate-500">{pred.split}</td>
-                              <td className="py-2.5 px-3 font-medium text-[#D63384]">
-                                {pred.predictedChurn}
-                              </td>
-                              <td className="py-2.5 pl-3 text-right">
-                                <div className="inline-flex items-center gap-2.5">
-                                  <div className="w-20 h-1.5 rounded-full bg-purple-100 overflow-hidden">
-                                    <div
-                                      style={{ width: `${pct}%` }}
-                                      className="h-full rounded-full bg-gradient-to-r from-[#FF786B] to-[#E84FA8]"
-                                    />
-                                  </div>
-                                  <span className="font-mono tabular-nums font-bold text-[#11142B] w-11 text-right">
-                                    {pct.toFixed(1)}%
-                                  </span>
-                                </div>
-                              </td>
-                            </tr>
-                          );
-                        })}
-                      </tbody>
-                    </table>
-                  </div>
-                </div>
-              </div>
-            ) : (
-              <div className="rounded-2xl border border-dashed border-purple-200 bg-[#F5F3FF]/60 p-8 text-center space-y-4">
-                <div className="w-12 h-12 rounded-2xl bg-gradient-to-br from-[#7655E8] to-[#E84FA8] text-white flex items-center justify-center mx-auto shadow-md shadow-[#7655E8]/25">
-                  <ShieldAlert className="w-6 h-6" />
-                </div>
-                <div className="space-y-1 max-w-md mx-auto">
-                  <h4 className="font-display text-sm font-bold text-[#11142B]">
-                    {dataset.hasValidChurnLabels === false
-                      ? 'More historical data required.'
-                      : 'Predictions Are Not Active Yet'}
-                  </h4>
-                  <p className="text-xs text-slate-600 leading-relaxed">
-                    {dataset.hasValidChurnLabels === false
-                      ? 'Historical churn outcomes are missing or incomplete. Confirm your churn column in Data Management to activate predictions.'
-                      : `Run Managed prediction setup to score High, Moderate, and Low churn risk across your ${tmpl.label} accounts.`}
-                  </p>
-                </div>
-                {canGeneratePredictions && dataset.hasValidChurnLabels !== false && onAutoBuild && (
-                  <button
-                    type="button"
-                    onClick={onAutoBuild}
-                    className="inline-flex items-center gap-2 px-5 py-2.5 bg-gradient-to-r from-[#7655E8] to-[#E84FA8] hover:opacity-95 text-white text-xs font-bold rounded-xl shadow-md shadow-[#7655E8]/25 transition-all cursor-pointer whitespace-nowrap"
-                  >
-                    <BrainCircuit className="w-4 h-4" />
-                    <span>Build prediction model</span>
-                  </button>
-                )}
-              </div>
-            )}
-          </div>
-
-          <div className="lg:col-span-5 bg-white/95 border border-purple-100/90 rounded-2xl shadow-sm shadow-purple-950/[0.04] p-6 flex flex-col justify-between space-y-5">
-            <div className="space-y-4">
-              <div>
-                <h3 className="font-display text-base font-bold text-[#11142B]">
-                  Summary of Latest Analysis
-                </h3>
-                <p className="text-xs text-slate-500 mt-0.5">
-                  {tmpl.label} workspace data readiness &amp; prediction availability
-                </p>
-              </div>
-
-              <dl className="divide-y divide-purple-50 text-sm">
-                <div className="py-2.5 flex items-center justify-between gap-4">
-                  <dt className="text-slate-500">Source File</dt>
-                  <dd className="font-semibold text-[#11142B] truncate max-w-[200px]">
-                    {dataset.fileName}
-                  </dd>
-                </div>
-                <div className="py-2.5 flex items-center justify-between gap-4">
-                  <dt className="text-slate-500">Churn Outcome Field</dt>
-                  <dd className="font-mono text-xs font-semibold text-[#7655E8]">
-                    {dataset.mapping.targetColumn
-                      ? `${dataset.mapping.targetColumn} (${dataset.mapping.positiveClassValue})`
-                      : 'Unmapped'}
-                  </dd>
-                </div>
-                <div className="py-2.5 flex items-center justify-between gap-4">
-                  <dt className="text-slate-500">Customer Data Preparation</dt>
-                  <dd className="font-mono tabular-nums font-semibold text-[#11142B]">
-                    {dataset.mapping.featureColumns.length} prepared signals
-                  </dd>
-                </div>
-                <div className="py-2.5 flex items-center justify-between gap-4">
-                  <dt className="text-slate-500">Missing Values Checked</dt>
-                  <dd className="font-mono tabular-nums font-semibold text-[#11142B]">
-                    {missingTotal} cell(s)
-                  </dd>
-                </div>
-                {dataset.readiness && (
-                  <div className="py-2.5 flex items-center justify-between gap-4">
-                    <dt className="text-slate-500">Data Readiness Score</dt>
-                    <dd className="font-mono tabular-nums font-bold text-[#7655E8]">
-                      {dataset.readiness.readinessScore}/100 ({dataset.readiness.overallLabel})
-                    </dd>
-                  </div>
-                )}
-                <div className="py-2.5 flex items-center justify-between gap-4">
-                  <dt className="text-slate-500">Prediction Availability</dt>
-                  <dd className="font-semibold text-[#11142B] text-right flex items-center gap-1.5 justify-end">
-                    {activeModel && <CheckCircle2 className="w-3.5 h-3.5 text-[#16C995] shrink-0" />}
-                    <span>
-                      {activeModel ? 'Active (Predictions ready)' : 'More historical data required'}
-                    </span>
-                  </dd>
-                </div>
-                {activeModel && (
-                  <>
-                    <div className="py-2.5 flex items-center justify-between gap-4">
-                      <dt className="text-slate-500">Validation Reliability</dt>
-                      <dd className="font-mono tabular-nums font-bold text-[#397BFF]">
-                        {activeModel.accuracy.toFixed(1)}%
-                      </dd>
-                    </div>
-                    <div className="py-2.5 flex items-center justify-between gap-4">
-                      <dt className="text-slate-500">Churn Detection Balance</dt>
-                      <dd className="font-mono tabular-nums font-bold text-[#7655E8]">
-                        {activeModel.f1Score.toFixed(1)}%
-                      </dd>
-                    </div>
-                  </>
-                )}
-              </dl>
-            </div>
-
-            <div className="pt-3 border-t border-purple-100 flex items-center justify-between gap-3">
-              {activeModel ? (
-                <>
-                  <button
-                    type="button"
-                    onClick={() => onNavigate('performance')}
-                    className="flex-1 px-3 py-2.5 text-xs font-semibold text-[#11142B] bg-[#F5F3FF] hover:bg-purple-100 border border-purple-200/70 rounded-xl transition-colors cursor-pointer text-center whitespace-nowrap"
-                  >
-                    Model Performance
-                  </button>
-                  <button
-                    type="button"
-                    onClick={() => onNavigate('predictions')}
-                    className="flex-1 px-3 py-2.5 text-xs font-semibold text-white bg-gradient-to-r from-[#7655E8] to-[#E84FA8] hover:opacity-95 rounded-xl shadow-sm shadow-[#7655E8]/25 transition-all cursor-pointer text-center whitespace-nowrap"
-                  >
-                    Churn Predictions
-                  </button>
-                </>
-              ) : (
-                <button
-                  type="button"
-                  onClick={() => onNavigate('predictions')}
-                  className="w-full px-4 py-2.5 text-sm font-semibold text-white bg-gradient-to-r from-[#7655E8] to-[#E84FA8] hover:opacity-95 rounded-xl shadow-md shadow-[#7655E8]/25 transition-all cursor-pointer"
-                >
-                  Open Churn Predictions
-                </button>
-              )}
-            </div>
-          </div>
-        </div>
-      </motion.section>
+      {/* 5. SCROLLABLE CUSTOMER DIRECTORY (Card & List + Add / Edit / Inspect) */}
+      <CustomerDirectorySection
+        company={company}
+        dataset={dataset}
+        activeModel={activeModel}
+        canUploadAndAnalyse={canUploadAndAnalyse}
+        onWorkspaceMutated={onWorkspaceMutated}
+        onNavigateData={() => onNavigate('data')}
+      />
     </div>
   );
 };

@@ -1,11 +1,13 @@
 import * as XLSX from 'xlsx';
-import type { IndustryKey } from '../src/types/churn.ts';
+import type { IndustryKey, TemplateMode } from '../src/types/churn.ts';
 import {
   getIndustryDataTemplateColumns,
   getIndustryTemplate,
 } from '../src/utils/industryConfig.ts';
+import type { TrainedModelArtifact } from './mlEngine.ts';
 
-export type TemplateMode = 'labeled' | 'cold_start';
+export type { TemplateMode };
+export type LegacyCompatibleTemplateMode = TemplateMode | 'labeled' | 'cold_start';
 export type TemplateFormat = 'csv' | 'xlsx';
 
 const SAMPLE_ROWS_BY_INDUSTRY: Record<IndustryKey, Record<string, string>[]> = {
@@ -599,69 +601,922 @@ const SAMPLE_ROWS_BY_INDUSTRY: Record<IndustryKey, Record<string, string>[]> = {
   ],
 };
 
+export interface ImportGuideFieldSpec {
+  name: string;
+  category: string;
+  tier: 'Required' | 'Recommended' | 'Optional' | 'If Available';
+  acceptedFormat: string;
+  description: string;
+  exampleValue: string;
+  usedFor: string;
+}
+
+export const COMPREHENSIVE_FIELD_GUIDE_SPECS: ImportGuideFieldSpec[] = [
+  // Category 1 — Customer Identification
+  {
+    name: 'customer_id',
+    category: 'Customer Identification',
+    tier: 'Required',
+    acceptedFormat: 'Unique alphanumeric text (e.g. CUST-1001)',
+    description: 'Primary unique identifier per customer. Used to match tickets and deduplicate records.',
+    exampleValue: 'CUST-1001',
+    usedFor: 'Deduplication, Prediction Lookup, Ticket Matching',
+  },
+  {
+    name: 'customer_name',
+    category: 'Customer Identification',
+    tier: 'Optional',
+    acceptedFormat: 'Text (Synthetic example rows include [Example])',
+    description: 'Display name or organization account name.',
+    exampleValue: '[Example] Northwind Retail Ltd',
+    usedFor: 'Customer Directory & Retention Outreach Lists',
+  },
+  {
+    name: 'email',
+    category: 'Customer Identification',
+    tier: 'Optional',
+    acceptedFormat: 'Valid email (name@company.example)',
+    description: 'Primary customer contact email validated during import.',
+    exampleValue: 'billing@northwind.example',
+    usedFor: 'Account Verification & Contact Hygiene Checks',
+  },
+  {
+    name: 'company_name',
+    category: 'Customer Identification',
+    tier: 'Optional',
+    acceptedFormat: 'Text (B2B organization)',
+    description: 'Organization or workspace entity for B2B accounts.',
+    exampleValue: 'Northwind Operations',
+    usedFor: 'B2B Account Value Aggregation',
+  },
+  {
+    name: 'customer_type',
+    category: 'Customer Identification',
+    tier: 'Optional',
+    acceptedFormat: 'B2B / B2C / SMB / Enterprise',
+    description: 'Commercial classification of the customer account.',
+    exampleValue: 'B2B',
+    usedFor: 'Cohort Churn Segmentation',
+  },
+  {
+    name: 'country_region',
+    category: 'Customer Identification',
+    tier: 'Optional',
+    acceptedFormat: 'Country or Region name / ISO code',
+    description: 'Primary operating country or regional market.',
+    exampleValue: 'Malaysia',
+    usedFor: 'Regional Retention Analysis',
+  },
+  // Category 2 — Relationship & Subscription
+  {
+    name: 'customer_status',
+    category: 'Relationship & Subscription',
+    tier: 'Recommended',
+    acceptedFormat: 'Active / Trial / Paused / Cancelled / Churned',
+    description: 'Current operational status of the customer relationship.',
+    exampleValue: 'Active',
+    usedFor: 'Behaviour Monitoring & Renewal Consistency Checks',
+  },
+  {
+    name: 'registration_date',
+    category: 'Relationship & Subscription',
+    tier: 'Recommended',
+    acceptedFormat: 'YYYY-MM-DD',
+    description: 'Initial account sign-up or contract start date.',
+    exampleValue: '2025-04-12',
+    usedFor: 'Cohort Tenure Verification',
+  },
+  {
+    name: 'observation_date',
+    category: 'Relationship & Subscription',
+    tier: 'Recommended',
+    acceptedFormat: 'YYYY-MM-DD',
+    description: 'Point-in-time snapshot date when customer features were observed.',
+    exampleValue: '2026-08-15',
+    usedFor: 'Chronological Train/Test Validation Split',
+  },
+  {
+    name: 'subscription_end_date',
+    category: 'Relationship & Subscription',
+    tier: 'Optional',
+    acceptedFormat: 'YYYY-MM-DD (blank if ongoing)',
+    description: 'Scheduled contract or subscription expiration date.',
+    exampleValue: '2026-12-31',
+    usedFor: 'Renewal Window & Expired-Active Consistency Warnings',
+  },
+  {
+    name: 'tenure_months',
+    category: 'Relationship & Subscription',
+    tier: 'Recommended',
+    acceptedFormat: 'Non-negative number (months)',
+    description: 'Total length of customer relationship in months.',
+    exampleValue: '18',
+    usedFor: 'Lifecycle Churn Curves, ML Feature & Value Scoring',
+  },
+  {
+    name: 'plan_tier',
+    category: 'Relationship & Subscription',
+    tier: 'Recommended',
+    acceptedFormat: 'Starter / Growth / Enterprise / Month-to-month',
+    description: 'Commercial plan, tier, contract length, or segment.',
+    exampleValue: 'Growth',
+    usedFor: 'Segment Breakdown Charts & Retention Targeting',
+  },
+  {
+    name: 'billing_cycle',
+    category: 'Relationship & Subscription',
+    tier: 'Optional',
+    acceptedFormat: 'Monthly / Quarterly / Annual / Usage',
+    description: 'Billing cadence or contract renewal frequency.',
+    exampleValue: 'Annual',
+    usedFor: 'Renewal Risk Segmentation',
+  },
+  {
+    name: 'payment_method',
+    category: 'Relationship & Subscription',
+    tier: 'Recommended',
+    acceptedFormat: 'Credit Card / Auto-Debit / Bank Transfer / Manual Invoice',
+    description: 'Primary payment instrument on file.',
+    exampleValue: 'Credit Card',
+    usedFor: 'Involuntary Churn & Payment Friction Analysis',
+  },
+  // Category 3 — Financial & Revenue
+  {
+    name: 'monthly_revenue',
+    category: 'Financial & Revenue',
+    tier: 'Recommended',
+    acceptedFormat: 'Non-negative numeric (e.g. 249.00, no currency symbol needed)',
+    description: 'Monthly recurring revenue (MRR) or average monthly customer spend.',
+    exampleValue: '249.00',
+    usedFor: 'Customer Value Intelligence & Revenue Exposure',
+  },
+  {
+    name: 'total_revenue',
+    category: 'Financial & Revenue',
+    tier: 'Recommended',
+    acceptedFormat: 'Non-negative numeric',
+    description: 'Cumulative revenue collected across the customer lifetime.',
+    exampleValue: '4482.00',
+    usedFor: 'Value Segmentation & Concentration Analytics',
+  },
+  {
+    name: 'annual_revenue',
+    category: 'Financial & Revenue',
+    tier: 'Optional',
+    acceptedFormat: 'Non-negative numeric',
+    description: 'Annualized recurring revenue (ARR) or 12-month billing total.',
+    exampleValue: '2988.00',
+    usedFor: 'Direct Annual Exposure Calculations',
+  },
+  {
+    name: 'average_transaction_value',
+    category: 'Financial & Revenue',
+    tier: 'Optional',
+    acceptedFormat: 'Non-negative numeric',
+    description: 'Average invoice or order size for transactional businesses.',
+    exampleValue: '124.50',
+    usedFor: 'Value Estimation when MRR is absent',
+  },
+  {
+    name: 'contract_value',
+    category: 'Financial & Revenue',
+    tier: 'Optional',
+    acceptedFormat: 'Non-negative numeric',
+    description: 'Total committed contract or renewal value.',
+    exampleValue: '3200.00',
+    usedFor: 'Contract Renewal Value Exposure',
+  },
+  {
+    name: 'profit_margin',
+    category: 'Financial & Revenue',
+    tier: 'If Available',
+    acceptedFormat: 'Numeric percentage (0-100 or 0.0-1.0)',
+    description: 'Net or gross profit margin if cost accounting is tracked. Never assumed from revenue.',
+    exampleValue: '42.5',
+    usedFor: 'True Profit Contribution Analysis',
+  },
+  {
+    name: 'payment_status',
+    category: 'Financial & Revenue',
+    tier: 'Recommended',
+    acceptedFormat: 'Paid / Current / Pending / Late / Overdue / Failed',
+    description: 'Recent billing settlement health.',
+    exampleValue: 'Paid',
+    usedFor: 'Payment Reliability Scoring',
+  },
+  {
+    name: 'late_payment_count',
+    category: 'Financial & Revenue',
+    tier: 'Optional',
+    acceptedFormat: 'Non-negative integer',
+    description: 'Number of delayed or missed invoices during observation window.',
+    exampleValue: '0',
+    usedFor: 'Payment Health Penalty & Churn Signal',
+  },
+  {
+    name: 'outstanding_balance',
+    category: 'Financial & Revenue',
+    tier: 'Optional',
+    acceptedFormat: 'Non-negative numeric',
+    description: 'Unpaid overdue balance currently owed.',
+    exampleValue: '0.00',
+    usedFor: 'Billing Risk Assessment',
+  },
+  // Category 4 — Customer Satisfaction & Feedback
+  {
+    name: 'customer_satisfaction_score',
+    category: 'Satisfaction & Feedback',
+    tier: 'Recommended',
+    acceptedFormat: 'Numeric matching workspace scale (1-5, 1-10, 0-100, or NPS -100..100)',
+    description: 'Latest CSAT, NPS, or survey score reported by the customer.',
+    exampleValue: '4.4',
+    usedFor: 'Satisfaction vs Churn Comparison & Risk Drivers',
+  },
+  {
+    name: 'last_feedback_date',
+    category: 'Satisfaction & Feedback',
+    tier: 'Optional',
+    acceptedFormat: 'YYYY-MM-DD',
+    description: 'Date of most recent CSAT/NPS survey response.',
+    exampleValue: '2026-08-20',
+    usedFor: 'Feedback Recency Tracking',
+  },
+  {
+    name: 'survey_response_status',
+    category: 'Satisfaction & Feedback',
+    tier: 'Optional',
+    acceptedFormat: 'Responded / Pending / Declined / Not Sent',
+    description: 'Whether customer participated in recent satisfaction surveys.',
+    exampleValue: 'Responded',
+    usedFor: 'Feedback Coverage Monitoring',
+  },
+  // Category 5 — Complaints & Support Tickets Summary
+  {
+    name: 'total_complaints',
+    category: 'Complaints & Support Tickets',
+    tier: 'Recommended',
+    acceptedFormat: 'Non-negative integer',
+    description: 'Count of formal complaints logged by the customer.',
+    exampleValue: '0',
+    usedFor: 'Customer Intelligence Friction Alerts & ML Prediction',
+  },
+  {
+    name: 'total_tickets_raised',
+    category: 'Complaints & Support Tickets',
+    tier: 'Recommended',
+    acceptedFormat: 'Non-negative integer',
+    description: 'Total support tickets submitted (auto-reconciled with Ticket_Data to prevent double-counting).',
+    exampleValue: '1',
+    usedFor: 'Support Load Benchmarking & Churn Drivers',
+  },
+  {
+    name: 'open_tickets',
+    category: 'Complaints & Support Tickets',
+    tier: 'Recommended',
+    acceptedFormat: 'Non-negative integer',
+    description: 'Currently active open support tickets.',
+    exampleValue: '0',
+    usedFor: 'Active Escalation Watchlist',
+  },
+  {
+    name: 'resolved_tickets',
+    category: 'Complaints & Support Tickets',
+    tier: 'Optional',
+    acceptedFormat: 'Non-negative integer',
+    description: 'Total closed/resolved support requests.',
+    exampleValue: '1',
+    usedFor: 'Ticket Resolution Ratio',
+  },
+  {
+    name: 'unresolved_tickets',
+    category: 'Complaints & Support Tickets',
+    tier: 'Optional',
+    acceptedFormat: 'Non-negative integer',
+    description: 'Pending or stalled unresolved support tickets.',
+    exampleValue: '0',
+    usedFor: 'Urgent Retention Intervention Queue',
+  },
+  {
+    name: 'average_resolution_days',
+    category: 'Complaints & Support Tickets',
+    tier: 'Optional',
+    acceptedFormat: 'Non-negative numeric (days)',
+    description: 'Mean time in days to resolve customer support tickets.',
+    exampleValue: '1.5',
+    usedFor: 'Service SLA Churn Correlation',
+  },
+  // Category 6 — Engagement & Behaviour
+  {
+    name: 'purchase_frequency',
+    category: 'Engagement & Behaviour',
+    tier: 'Recommended',
+    acceptedFormat: 'Non-negative numeric',
+    description: 'Orders, check-ins, visits, or usage sessions per period.',
+    exampleValue: '12',
+    usedFor: 'Behaviour Monitoring & Customer Value Scoring',
+  },
+  {
+    name: 'last_activity_date',
+    category: 'Engagement & Behaviour',
+    tier: 'Recommended',
+    acceptedFormat: 'YYYY-MM-DD',
+    description: 'Most recent purchase, login, check-in, or billing interaction.',
+    exampleValue: '2026-09-18',
+    usedFor: 'Inactivity Watchlist Detection',
+  },
+  {
+    name: 'usage_score',
+    category: 'Engagement & Behaviour',
+    tier: 'Optional',
+    acceptedFormat: 'Numeric 0-100',
+    description: 'Product adoption or feature engagement index.',
+    exampleValue: '78',
+    usedFor: 'Engagement Drop Monitoring',
+  },
+  {
+    name: 'spend_growth',
+    category: 'Engagement & Behaviour',
+    tier: 'Optional',
+    acceptedFormat: 'Numeric percentage (e.g. 8.5 or -12.0)',
+    description: 'Period-over-period change in customer spending.',
+    exampleValue: '6.5',
+    usedFor: 'Customer Value Expansion / Contraction Signal',
+  },
+  // Category 7 — Churn & Retention
+  {
+    name: 'churn_status',
+    category: 'Churn & Retention',
+    tier: 'Required',
+    acceptedFormat: 'Churned / Retained / Unknown (or Yes / No — optional for New Businesses)',
+    description: 'Confirmed historical outcome label. Leave Unknown or omit for New Business monitoring.',
+    exampleValue: 'Retained',
+    usedFor: 'Descriptive Churn Rate & Supervised ML Training',
+  },
+  {
+    name: 'churn_date',
+    category: 'Churn & Retention',
+    tier: 'Optional',
+    acceptedFormat: 'YYYY-MM-DD (blank for retained customers)',
+    description: 'Date customer left. Automatically excluded from ML prediction inputs to prevent target leakage.',
+    exampleValue: '',
+    usedFor: 'Churn Timeline Audit (Excluded from ML)',
+  },
+  {
+    name: 'churn_reason',
+    category: 'Churn & Retention',
+    tier: 'Optional',
+    acceptedFormat: 'Text (e.g. Pricing, Support Delays, Low Usage)',
+    description: 'Post-cancellation exit reason. Automatically excluded from ML inputs to prevent leakage.',
+    exampleValue: '',
+    usedFor: 'Post-Outcome Attribution Review Only',
+  },
+];
+
+export const TICKET_LEVEL_COLUMN_SPECS: ImportGuideFieldSpec[] = [
+  {
+    name: 'ticket_id',
+    category: 'Ticket Record',
+    tier: 'Required',
+    acceptedFormat: 'Unique ticket identifier (e.g. TKT-9001)',
+    description: 'Unique support case ID used to deduplicate tickets and prevent double-counting.',
+    exampleValue: 'TKT-9001',
+    usedFor: 'Ticket Deduplication & Audit Trail',
+  },
+  {
+    name: 'customer_id',
+    category: 'Ticket Record',
+    tier: 'Required',
+    acceptedFormat: 'Matching Customer_ID from Customer_Data',
+    description: 'Foreign key linking ticket to customer profile.',
+    exampleValue: 'CUST-1001',
+    usedFor: 'Customer Ticket Aggregation',
+  },
+  {
+    name: 'ticket_created_date',
+    category: 'Ticket Record',
+    tier: 'Required',
+    acceptedFormat: 'YYYY-MM-DD',
+    description: 'Date support ticket or complaint was opened.',
+    exampleValue: '2026-08-12',
+    usedFor: 'Ticket Recency & Resolution SLA Calculation',
+  },
+  {
+    name: 'ticket_category',
+    category: 'Ticket Record',
+    tier: 'Recommended',
+    acceptedFormat: 'Billing / Technical / Service Quality / Cancellation Request / General',
+    description: 'Primary classification of customer support issue.',
+    exampleValue: 'Billing',
+    usedFor: 'Friction Root-Cause Categorisation',
+  },
+  {
+    name: 'ticket_priority',
+    category: 'Ticket Record',
+    tier: 'Recommended',
+    acceptedFormat: 'Low / Medium / High / Urgent',
+    description: 'Severity or urgency assigned to the ticket.',
+    exampleValue: 'High',
+    usedFor: 'Escalation Prioritisation',
+  },
+  {
+    name: 'ticket_status',
+    category: 'Ticket Record',
+    tier: 'Required',
+    acceptedFormat: 'Open / Pending / Resolved / Closed',
+    description: 'Current resolution state of the ticket.',
+    exampleValue: 'Open',
+    usedFor: 'Open vs Resolved Counts per Customer',
+  },
+  {
+    name: 'ticket_resolved_date',
+    category: 'Ticket Record',
+    tier: 'Optional',
+    acceptedFormat: 'YYYY-MM-DD (blank if still open)',
+    description: 'Date ticket was resolved or closed.',
+    exampleValue: '2026-08-15',
+    usedFor: 'Automatic Resolution Time Calculation',
+  },
+  {
+    name: 'resolution_duration_days',
+    category: 'Ticket Record',
+    tier: 'Optional',
+    acceptedFormat: 'Non-negative numeric (days)',
+    description: 'Elapsed days to resolve ticket.',
+    exampleValue: '3.0',
+    usedFor: 'Customer Avg Resolution Days',
+  },
+  {
+    name: 'escalated',
+    category: 'Ticket Record',
+    tier: 'Optional',
+    acceptedFormat: 'Yes / No',
+    description: 'Indicates whether ticket required management/tier-2 escalation.',
+    exampleValue: 'Yes',
+    usedFor: 'Escalation Count per Customer',
+  },
+];
+
+function buildTicketSampleRows(customerIds: string[]): Record<string, string>[] {
+  const c0 = customerIds[0] || 'CUST-1001';
+  const c1 = customerIds[1] || 'CUST-1002';
+  const c2 = customerIds[2] || 'CUST-1003';
+  const c3 = customerIds[3] || 'CUST-1004';
+  return [
+    {
+      ticket_id: 'TKT-9001',
+      customer_id: c0,
+      ticket_created_date: '2026-08-10',
+      ticket_category: 'Billing',
+      ticket_priority: 'High',
+      ticket_status: 'Open',
+      ticket_resolved_date: '',
+      resolution_duration_days: '',
+      escalated: 'Yes',
+    },
+    {
+      ticket_id: 'TKT-9002',
+      customer_id: c0,
+      ticket_created_date: '2026-07-14',
+      ticket_category: 'Service Quality',
+      ticket_priority: 'Urgent',
+      ticket_status: 'Resolved',
+      ticket_resolved_date: '2026-07-21',
+      resolution_duration_days: '7',
+      escalated: 'Yes',
+    },
+    {
+      ticket_id: 'TKT-9003',
+      customer_id: c1,
+      ticket_created_date: '2026-08-22',
+      ticket_category: 'Technical',
+      ticket_priority: 'Low',
+      ticket_status: 'Resolved',
+      ticket_resolved_date: '2026-08-23',
+      resolution_duration_days: '1',
+      escalated: 'No',
+    },
+    {
+      ticket_id: 'TKT-9004',
+      customer_id: c2,
+      ticket_created_date: '2026-09-01',
+      ticket_category: 'General',
+      ticket_priority: 'Medium',
+      ticket_status: 'Resolved',
+      ticket_resolved_date: '2026-09-03',
+      resolution_duration_days: '2',
+      escalated: 'No',
+    },
+    {
+      ticket_id: 'TKT-9005',
+      customer_id: c3,
+      ticket_created_date: '2026-08-28',
+      ticket_category: 'Cancellation Request',
+      ticket_priority: 'High',
+      ticket_status: 'Open',
+      ticket_resolved_date: '',
+      resolution_duration_days: '',
+      escalated: 'Yes',
+    },
+  ];
+}
+
 function escapeCsvField(val: string): string {
-  if (val.includes(',') || val.includes('"') || val.includes('\n')) {
-    return `"${val.replace(/"/g, '""')}"`;
+  const safe = /^[=+\-@]/.test(val) ? `'${val}` : val;
+  if (safe.includes(',') || safe.includes('"') || safe.includes('\n')) {
+    return `"${safe.replace(/"/g, '""')}"`;
   }
-  return val;
+  return safe;
+}
+
+export function normalizeTemplateMode(mode?: string): TemplateMode {
+  const lower = String(mode || '').trim().toLowerCase();
+  if (lower === 'new_business' || lower === 'cold_start') {
+    return 'new_business';
+  }
+  if (lower === 'tickets' || lower === 'ticket_data' || lower === 'support_tickets') {
+    return 'tickets';
+  }
+  if (lower === 'prediction_input') {
+    return 'prediction_input';
+  }
+  return 'established_historical';
+}
+
+function getTargetValueFromSample(sample: Record<string, string>): string {
+  return (
+    sample.churn ??
+    sample.exited ??
+    sample.churned ??
+    sample.discontinued ??
+    sample.lapsed ??
+    sample.dropped ??
+    'No'
+  );
 }
 
 export function generateIndustryTemplateExport(params: {
   industry: IndustryKey;
   format: TemplateFormat;
-  mode?: TemplateMode;
+  mode?: LegacyCompatibleTemplateMode;
+  scope?: 'comprehensive' | 'tickets' | 'pathway';
   customIndustryName?: string | null;
 }): {
   fileName: string;
   contentType: string;
   body: string | Buffer;
 } {
-  const { industry, format, mode = 'labeled', customIndustryName } = params;
+  const {
+    industry,
+    format,
+    mode = 'established_historical',
+    scope = 'comprehensive',
+    customIndustryName,
+  } = params;
+  const resolvedMode = normalizeTemplateMode(mode);
   const profile = getIndustryTemplate(industry, customIndustryName);
-  const columnSpecs = getIndustryDataTemplateColumns(industry);
+  const slug = industry.replace(/[^a-z0-9_]/gi, '_');
 
-  // In cold_start mode, omit the historical churn outcome column so new companies see a clean active-tracking template
-  const activeSpecs =
-    mode === 'cold_start'
-      ? columnSpecs.filter((col) => col.semanticRole !== 'target')
-      : columnSpecs;
+  // Standalone Ticket-Level Export
+  if (resolvedMode === 'tickets' || scope === 'tickets') {
+    const ticketHeaders = TICKET_LEVEL_COLUMN_SPECS.map((s) => s.name);
+    const ticketRows = buildTicketSampleRows(['CUST-1001', 'CUST-1002', 'CUST-1003', 'CUST-1004']);
 
-  const baseSampleRows = SAMPLE_ROWS_BY_INDUSTRY[industry] || SAMPLE_ROWS_BY_INDUSTRY.other;
-  const headers = activeSpecs.map((c) => c.name);
-  const rows = baseSampleRows.map((sample) => {
-    const row: Record<string, string> = {};
-    for (const col of activeSpecs) {
-      row[col.name] = sample[col.name] ?? col.exampleValue;
+    if (format === 'xlsx') {
+      const wb = XLSX.utils.book_new();
+      XLSX.utils.book_append_sheet(
+        wb,
+        XLSX.utils.json_to_sheet(ticketRows, { header: ticketHeaders }),
+        'Ticket_Data'
+      );
+      XLSX.utils.book_append_sheet(
+        wb,
+        XLSX.utils.json_to_sheet(
+          TICKET_LEVEL_COLUMN_SPECS.map((s) => ({
+            Field_Name: s.name,
+            Category: s.category,
+            Requirement_Tier: s.tier,
+            Accepted_Format: s.acceptedFormat,
+            Description: s.description,
+            Example: s.exampleValue,
+            Used_For: s.usedFor,
+          }))
+        ),
+        'Field_Guide'
+      );
+      XLSX.utils.book_append_sheet(
+        wb,
+        XLSX.utils.json_to_sheet([
+          {
+            Topic: 'Ticket Aggregation Rule',
+            Guidance:
+              'Upload Ticket_Data to link individual tickets to Customer_IDs. ChurnSight automatically computes Total_Tickets_Raised, Open_Tickets, Resolved_Tickets, and Average_Resolution_Days.',
+          },
+          {
+            Topic: 'Double-Counting Protection',
+            Guidance:
+              'Duplicate Ticket_IDs are deduplicated automatically and never added on top of pre-existing customer-level ticket counts.',
+          },
+          {
+            Topic: 'Synthetic Sample Marker',
+            Guidance:
+              'Replace the sample TKT-9001..TKT-9005 rows with your company support tickets using YYYY-MM-DD dates.',
+          },
+        ]),
+        'Instructions'
+      );
+      const buffer = XLSX.write(wb, { type: 'buffer', bookType: 'xlsx' }) as Buffer;
+      return {
+        fileName: `churnsight_${slug}_ticket_import_template.xlsx`,
+        contentType: 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
+        body: buffer,
+      };
     }
+
+    const csvLines = [
+      ticketHeaders.map(escapeCsvField).join(','),
+      ...ticketRows.map((r) => ticketHeaders.map((h) => escapeCsvField(r[h] ?? '')).join(',')),
+    ];
+    return {
+      fileName: `churnsight_${slug}_ticket_import_template.csv`,
+      contentType: 'text/csv; charset=utf-8',
+      body: csvLines.join('\n'),
+    };
+  }
+
+  const templateColMode: 'new_business' | 'established_historical' =
+    resolvedMode === 'new_business' ? 'new_business' : 'established_historical';
+  const columnSpecs = getIndustryDataTemplateColumns(industry, templateColMode);
+  const baseSampleRows = SAMPLE_ROWS_BY_INDUSTRY[industry] || SAMPLE_ROWS_BY_INDUSTRY.other;
+
+  const hasIdCol = columnSpecs.some((s) => s.semanticRole === 'id');
+  const hasTenureCol = columnSpecs.some((s) => s.semanticRole === 'tenure');
+  const hasSegmentCol = columnSpecs.some((s) => s.semanticRole === 'segment');
+  const hasRevenueCol = columnSpecs.some((s) => s.semanticRole === 'revenue');
+  const hasFreqCol = columnSpecs.some((s) => s.semanticRole === 'frequency');
+  const hasDateCol = columnSpecs.some((s) => s.semanticRole === 'date');
+  const hasTargetCol = columnSpecs.some((s) => s.semanticRole === 'target');
+
+  // Include ALL supported customer fields from COMPREHENSIVE_FIELD_GUIDE_SPECS alongside industry-tailored headers
+  const extraImportCols =
+    scope === 'comprehensive'
+      ? COMPREHENSIVE_FIELD_GUIDE_SPECS.map((g) => g.name).filter((colName) => {
+          if (columnSpecs.some((s) => s.name === colName)) return false;
+          if (colName === 'customer_id' && hasIdCol) return false;
+          if (colName === 'tenure_months' && hasTenureCol) return false;
+          if (colName === 'plan_tier' && hasSegmentCol) return false;
+          if (colName === 'monthly_revenue' && hasRevenueCol) return false;
+          if (colName === 'purchase_frequency' && hasFreqCol) return false;
+          if (colName === 'last_activity_date' && hasDateCol) return false;
+          if (colName === 'churn_status' && (hasTargetCol || templateColMode === 'new_business')) {
+            return false;
+          }
+          if (
+            (colName === 'observation_date' || colName === 'churn_date' || colName === 'churn_reason') &&
+            templateColMode === 'new_business'
+          ) {
+            return false;
+          }
+          return true;
+        })
+      : [];
+
+  const baseHeaders = columnSpecs.map((c) => c.name);
+  const headers = [...baseHeaders, ...extraImportCols];
+  const sampleNames = [
+    '[Example] Acme Horizon Corp',
+    '[Example] Meridian Retail Group',
+    '[Example] Crestline Logistics',
+    '[Example] Harborview Studio',
+    '[Example] Summit Cloud Partners',
+    '[Example] Cedarbrook Health',
+  ];
+  const sampleCountries = ['United States', 'United Kingdom', 'Malaysia', 'Canada', 'Singapore', 'Australia'];
+  const sampleTicketSummaries = [
+    { total: '2', open: '1', resolved: '1', unresolved: '1', avgDays: '7.0' },
+    { total: '1', open: '0', resolved: '1', unresolved: '0', avgDays: '1.0' },
+    { total: '1', open: '0', resolved: '1', unresolved: '0', avgDays: '2.0' },
+    { total: '1', open: '1', resolved: '0', unresolved: '1', avgDays: '' },
+    { total: '0', open: '0', resolved: '0', unresolved: '0', avgDays: '' },
+    { total: '0', open: '0', resolved: '0', unresolved: '0', avgDays: '' },
+  ];
+
+  const rows = baseSampleRows.map((sample, idx) => {
+    const outcomeVal = getTargetValueFromSample(sample);
+    const isChurned =
+      templateColMode !== 'new_business' &&
+      (outcomeVal === 'Yes' || outcomeVal === '1' || outcomeVal === 'Churned');
+    const row: Record<string, string> = {};
+
+    for (const col of columnSpecs) {
+      if (col.name === 'registration_date') {
+        const regDates = [
+          '2026-06-14',
+          '2024-09-10',
+          '2025-11-02',
+          '2026-03-21',
+          '2023-08-05',
+          '2025-07-18',
+        ];
+        row[col.name] = regDates[idx % regDates.length];
+      } else if (col.name === 'customer_status') {
+        const statuses = ['At-Risk', 'Active', 'Active', 'Trial', 'Active', 'Active'];
+        row[col.name] = statuses[idx % statuses.length];
+      } else if (col.name === 'observation_date') {
+        const obsDates = [
+          '2026-08-01',
+          '2026-08-05',
+          '2026-08-12',
+          '2026-08-18',
+          '2026-08-25',
+          '2026-08-29',
+        ];
+        row[col.name] = obsDates[idx % obsDates.length];
+      } else if (col.name === 'churn_status') {
+        row[col.name] = isChurned ? 'Churned' : 'Retained';
+      } else if (col.name === 'churn_date') {
+        row[col.name] = isChurned ? `2026-09-${String(10 + idx * 3).padStart(2, '0')}` : '';
+      } else {
+        row[col.name] = sample[col.name] ?? col.exampleValue;
+      }
+    }
+
+    if (scope === 'comprehensive') {
+      const tenureNum = Number(
+        sample.tenure_months ||
+          sample.months_enrolled ||
+          sample.months_subscribed ||
+          sample.customer_lifetime_months ||
+          12
+      );
+      const revNum = Number(
+        sample.monthly_charges ||
+          sample.mrr ||
+          sample.monthly_dues ||
+          sample.monthly_premium ||
+          sample.tuition_fee ||
+          sample.avg_order_value ||
+          sample.revenue ||
+          95
+      );
+      const totalRev = Number((revNum * Math.max(1, tenureNum)).toFixed(2));
+      const annualRev = Number((revNum * 12).toFixed(2));
+      const tktSummary = sampleTicketSummaries[idx % sampleTicketSummaries.length];
+
+      const regDates = [
+        '2026-06-14',
+        '2024-09-10',
+        '2025-11-02',
+        '2026-03-21',
+        '2023-08-05',
+        '2025-07-18',
+      ];
+      const obsDates = [
+        '2026-08-01',
+        '2026-08-05',
+        '2026-08-12',
+        '2026-08-18',
+        '2026-08-25',
+        '2026-08-29',
+      ];
+      const billingCycles = ['Monthly', 'Annual', 'Annual', 'Monthly', 'Annual', 'Quarterly'];
+      const margins = ['28.5', '44.0', '39.5', '24.0', '48.2', '36.8'];
+      const usageScores = ['34', '88', '76', '41', '93', '81'];
+      const spendGrowths = ['-14.5', '11.2', '6.8', '-8.0', '14.5', '4.2'];
+
+      const extras: Record<string, string> = {
+        customer_name: sampleNames[idx % sampleNames.length],
+        email: `contact${idx + 1}@example-customer.test`,
+        company_name: sampleNames[idx % sampleNames.length].replace('[Example] ', ''),
+        customer_type: idx % 2 === 0 ? 'B2B' : 'SMB',
+        country_region: sampleCountries[idx % sampleCountries.length],
+        customer_status: isChurned ? 'Cancelled' : idx === 3 ? 'At-Risk' : 'Active',
+        registration_date: regDates[idx % regDates.length],
+        observation_date: obsDates[idx % obsDates.length],
+        subscription_end_date: isChurned ? '' : '2027-06-30',
+        billing_cycle: billingCycles[idx % billingCycles.length],
+        payment_method: sample.payment_method || (idx % 2 === 0 ? 'Credit Card' : 'Auto-Debit'),
+        total_revenue: String(totalRev),
+        annual_revenue: String(annualRev),
+        average_transaction_value: String(Number(revNum.toFixed(2))),
+        contract_value: String(annualRev),
+        profit_margin: margins[idx % margins.length],
+        payment_status: isChurned ? 'Late' : 'Paid',
+        late_payment_count: isChurned ? '2' : '0',
+        outstanding_balance: isChurned ? String(Number(revNum.toFixed(2))) : '0.00',
+        customer_satisfaction_score: isChurned ? (idx % 2 === 0 ? '2.1' : '2.6') : idx % 2 === 0 ? '4.7' : '4.3',
+        last_feedback_date: '2026-08-20',
+        survey_response_status: idx % 3 === 0 ? 'Pending' : 'Responded',
+        total_complaints: isChurned ? '3' : '0',
+        total_tickets_raised: tktSummary.total,
+        open_tickets: tktSummary.open,
+        resolved_tickets: tktSummary.resolved,
+        unresolved_tickets: tktSummary.unresolved,
+        average_resolution_days: tktSummary.avgDays,
+        usage_score: usageScores[idx % usageScores.length],
+        spend_growth: spendGrowths[idx % spendGrowths.length],
+        churn_reason: isChurned ? 'Service Escalation / Pricing' : '',
+      };
+
+      for (const extraCol of extraImportCols) {
+        if (row[extraCol] === undefined) {
+          row[extraCol] = extras[extraCol] ?? '';
+        }
+      }
+    }
+
     return row;
   });
 
-  const slug = industry.replace(/[^a-z0-9_]/gi, '_');
-  const suffix = mode === 'cold_start' ? 'cold_start_template' : 'historical_template';
+  const sampleCustomerIds = rows.map(
+    (r) =>
+      r.customer_id ||
+      r.account_id ||
+      r.workspace_id ||
+      r.member_id ||
+      r.patient_id ||
+      r.policyholder_id ||
+      r.learner_id ||
+      'CUST-1001'
+  );
+
+  const suffix =
+    templateColMode === 'new_business'
+      ? 'new_business_monitoring_template'
+      : scope === 'comprehensive'
+        ? 'import_centre_template'
+        : 'established_historical_template';
 
   if (format === 'xlsx') {
     const wb = XLSX.utils.book_new();
     const dataSheet = XLSX.utils.json_to_sheet(rows, { header: headers });
-    XLSX.utils.book_append_sheet(wb, dataSheet, 'Customer_Data_Template');
+    XLSX.utils.book_append_sheet(wb, dataSheet, 'Customer_Data');
 
-    const guideRows = columnSpecs.map((spec) => ({
-      Column_Name: spec.name,
-      Display_Label: spec.displayName,
-      Requirement_Tier: spec.tier.toUpperCase(),
-      Data_Type: spec.dataType,
-      Semantic_Role: spec.semanticRole,
-      Accepted_Formats: spec.acceptedFormats,
-      Description: spec.description,
-      Example_Value: spec.exampleValue,
-      Cold_Start_Guidance:
-        spec.coldStartNote ||
-        (spec.tier === 'required'
-          ? 'Include for analytics and customer tracking.'
-          : 'Recommended when available.'),
-    }));
+    const ticketRows = buildTicketSampleRows(sampleCustomerIds);
+    const ticketSheet = XLSX.utils.json_to_sheet(ticketRows, {
+      header: TICKET_LEVEL_COLUMN_SPECS.map((s) => s.name),
+    });
+    XLSX.utils.book_append_sheet(wb, ticketSheet, 'Ticket_Data');
 
-    const guideSheet = XLSX.utils.json_to_sheet(guideRows);
-    XLSX.utils.book_append_sheet(wb, guideSheet, 'Column_Guide_and_Formats');
+    const guideRows = [
+      ...COMPREHENSIVE_FIELD_GUIDE_SPECS.map((g) => ({
+        Field_Name: g.name,
+        Category: g.category,
+        Requirement_Tier: g.tier,
+        Accepted_Format: g.acceptedFormat,
+        Description: g.description,
+        Example: g.exampleValue,
+        Used_For: g.usedFor,
+      })),
+      ...TICKET_LEVEL_COLUMN_SPECS.map((g) => ({
+        Field_Name: g.name,
+        Category: `Ticket_Data Sheet · ${g.category}`,
+        Requirement_Tier: g.tier,
+        Accepted_Format: g.acceptedFormat,
+        Description: g.description,
+        Example: g.exampleValue,
+        Used_For: g.usedFor,
+      })),
+    ];
+    XLSX.utils.book_append_sheet(wb, XLSX.utils.json_to_sheet(guideRows), 'Field_Guide');
+
+    const instructionRows = [
+      {
+        Rule_Area: 'Date Formats',
+        Instructions: 'Use ISO YYYY-MM-DD format (e.g. 2026-09-15). Avoid ambiguous text dates.',
+      },
+      {
+        Rule_Area: 'Currency & Revenue Values',
+        Instructions:
+          'Enter plain non-negative numbers (e.g. 249.50). Currency symbols are optional but must not mix text notes.',
+      },
+      {
+        Rule_Area: 'Churn_Status Accepted Values',
+        Instructions:
+          templateColMode === 'new_business'
+            ? 'New Business mode: Do not fabricate churn outcomes. Leave Unknown or omit churn_status until real outcomes occur.'
+            : 'Use Churned, Retained, or Unknown (Yes / No and 1 / 0 are also supported).',
+      },
+      {
+        Rule_Area: 'Satisfaction Score Scales',
+        Instructions:
+          'Match your configured ChurnSight workspace scale: CSAT 1–5, 1–10, 0–100, or NPS (-100 to +100).',
+      },
+      {
+        Rule_Area: 'Missing Values & Duplicates',
+        Instructions:
+          'Each Customer_ID and Ticket_ID should appear only once. Leave unavailable metrics blank rather than entering zeros unless the true value is 0.',
+      },
+      {
+        Rule_Area: 'Multi-Sheet Ticket Linking',
+        Instructions:
+          'Rows in Ticket_Data are automatically aggregated per Customer_ID during upload and reconciled without double-counting customer summary ticket columns.',
+      },
+      {
+        Rule_Area: 'Industry Adaptation',
+        Instructions: `Tailored for ${profile.label}. Rename or map additional industry-specific columns in the Import Centre Column Mapping step.`,
+      },
+    ];
+    XLSX.utils.book_append_sheet(wb, XLSX.utils.json_to_sheet(instructionRows), 'Instructions');
 
     const buffer = XLSX.write(wb, { type: 'buffer', bookType: 'xlsx' }) as Buffer;
     return {
@@ -677,12 +1532,134 @@ export function generateIndustryTemplateExport(params: {
     ...rows.map((r) => headers.map((h) => escapeCsvField(r[h] ?? '')).join(',')),
   ];
 
-  // Keep customIndustryName referenced cleanly for future metadata extensions
-  void profile;
-
   return {
     fileName: `churnsight_${slug}_${suffix}.csv`,
     contentType: 'text/csv; charset=utf-8',
     body: csvLines.join('\n'),
+  };
+}
+
+export function generatePredictionInputTemplateExport(params: {
+  industry: IndustryKey;
+  format: TemplateFormat;
+  artifact: TrainedModelArtifact;
+  customIndustryName?: string | null;
+}): {
+  fileName: string;
+  contentType: string;
+  body: string | Buffer;
+  columns: { name: string; kind: string; exampleValue: string; acceptedValues: string }[];
+} {
+  const { industry, format, artifact, customIndustryName } = params;
+  const profile = getIndustryTemplate(industry, customIndustryName);
+  const idColName = artifact.mapping.idColumn || 'customer_id';
+
+  const featureMetaList = artifact.features;
+  const headers = [idColName, ...featureMetaList.map((f) => f.column)];
+
+  const columns = [
+    {
+      name: idColName,
+      kind: 'identifier',
+      exampleValue: 'CURR-1001',
+      acceptedValues: 'Unique current customer ID',
+    },
+    ...featureMetaList.map((feat) => {
+      if (feat.kind === 'numeric') {
+        return {
+          name: feat.column,
+          kind: 'numeric',
+          exampleValue: String(Number(feat.median.toFixed(2))),
+          acceptedValues: `Numeric value (training median: ${Number(feat.median.toFixed(2))})`,
+        };
+      }
+      return {
+        name: feat.column,
+        kind: 'categorical',
+        exampleValue: feat.mode || feat.categories[0] || 'Standard',
+        acceptedValues: feat.categories.slice(0, 8).join(', ') || feat.mode,
+      };
+    }),
+  ];
+
+  const sampleCount = 3;
+  const rows: Record<string, string>[] = [];
+  for (let i = 0; i < sampleCount; i++) {
+    const row: Record<string, string> = {};
+    row[idColName] = `CURR-${1001 + i}`;
+    for (const feat of featureMetaList) {
+      if (feat.kind === 'numeric') {
+        const delta = i === 0 ? 0 : i === 1 ? feat.std * 0.5 : -feat.std * 0.5;
+        const val = Math.max(0, feat.median + delta);
+        row[feat.column] = String(Number(val.toFixed(2)));
+      } else {
+        const cats = feat.categories.length > 0 ? feat.categories : [feat.mode];
+        row[feat.column] = cats[i % cats.length] || feat.mode;
+      }
+    }
+    rows.push(row);
+  }
+
+  const slug = industry.replace(/[^a-z0-9_]/gi, '_');
+  const versionTag = (artifact.evaluation.version || 'v1').replace(/[^a-z0-9_]/gi, '_');
+  const baseName = `churnsight_${slug}_prediction_input_${versionTag}`;
+
+  if (format === 'xlsx') {
+    const wb = XLSX.utils.book_new();
+    const inputSheet = XLSX.utils.json_to_sheet(rows, { header: headers });
+    XLSX.utils.book_append_sheet(wb, inputSheet, 'Current_Customers_To_Score');
+
+    const specRows = [
+      {
+        Column_Name: idColName,
+        Input_Role: 'Customer Identifier (Required)',
+        Data_Type: 'identifier',
+        Accepted_Values_Or_Range: 'Unique current customer ID',
+        Example: 'CURR-1001',
+      },
+      ...columns.slice(1).map((c) => ({
+        Column_Name: c.name,
+        Input_Role: `Model Input Feature (${artifact.evaluation.modelName} ${artifact.evaluation.version})`,
+        Data_Type: c.kind,
+        Accepted_Values_Or_Range: c.acceptedValues,
+        Example: c.exampleValue,
+      })),
+    ];
+    const specSheet = XLSX.utils.json_to_sheet(specRows);
+    XLSX.utils.book_append_sheet(wb, specSheet, 'Model_Input_Specification');
+
+    const noteSheet = XLSX.utils.json_to_sheet([
+      {
+        Rule: 'No Future Outcome Columns',
+        Detail: `This Current Customer Prediction Template is tailored for ${profile.label} (${artifact.evaluation.modelName} ${artifact.evaluation.version}) and intentionally excludes Churn_Status and Churn_Date.`,
+      },
+      {
+        Rule: 'Upload Destination',
+        Detail:
+          'Fill in active customers and upload this file in Churn Predictions → Batch Scoring to generate forward-looking churn risk probabilities.',
+      },
+    ]);
+    XLSX.utils.book_append_sheet(wb, noteSheet, 'Scoring_Instructions');
+
+    const buffer = XLSX.write(wb, { type: 'buffer', bookType: 'xlsx' }) as Buffer;
+    return {
+      fileName: `${baseName}.xlsx`,
+      contentType:
+        'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
+      body: buffer,
+      columns,
+    };
+  }
+
+  const csvLines = [
+    headers.map(escapeCsvField).join(','),
+    ...rows.map((r) => headers.map((h) => escapeCsvField(r[h] ?? '')).join(',')),
+  ];
+
+  return {
+    fileName: `${baseName}.csv`,
+    contentType: 'text/csv; charset=utf-8',
+    body: csvLines.join('\n'),
+    columns,
   };
 }

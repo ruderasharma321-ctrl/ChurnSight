@@ -7,6 +7,7 @@ import {
   CheckCircle2,
   ClipboardCheck,
   Clock,
+  Info,
   Lock,
   ShieldCheck,
   Sparkles,
@@ -112,7 +113,7 @@ export const DataReadinessPanel: React.FC<DataReadinessPanelProps> = ({
     <section className="bg-white border border-purple-100/90 rounded-2xl shadow-sm shadow-purple-950/[0.04] p-6 space-y-6">
       {/* Header & Overall Readiness Score */}
       <div className="flex flex-col lg:flex-row lg:items-center lg:justify-between gap-4 border-b border-purple-100 pb-5">
-        <div className="space-y-1.5">
+        <div className="space-y-1.5 min-w-0 flex-1">
           <div className="flex flex-wrap items-center gap-2">
             <span className="text-xs font-bold text-[#7655E8]">Data Readiness Centre</span>
             <span
@@ -129,7 +130,7 @@ export const DataReadinessPanel: React.FC<DataReadinessPanelProps> = ({
           </p>
         </div>
 
-        <div className="flex items-center gap-4 bg-[#F5F3FF] border border-purple-200/80 rounded-2xl px-5 py-3.5 shrink-0">
+        <div className="flex items-center gap-4 bg-[#F5F3FF] border border-purple-200/80 rounded-2xl px-5 py-3.5 shrink-0 self-start lg:self-auto">
           <div>
             <div className="text-[11px] font-semibold text-[#4C4A6E]">Data Readiness Score</div>
             <div className="text-2xl font-extrabold font-mono tabular-nums text-[#11142B]">
@@ -150,6 +151,36 @@ export const DataReadinessPanel: React.FC<DataReadinessPanelProps> = ({
           </div>
         </div>
       </div>
+
+      {/* Class Imbalance & Target Leakage Safeguard Alerts */}
+      {readiness.datasetProfile.classImbalanceWarning && (
+        <div className="bg-amber-50 border border-amber-300 rounded-xl p-4 flex items-start gap-3 text-xs text-amber-950">
+          <AlertTriangle className="w-4 h-4 text-amber-700 shrink-0 mt-0.5" />
+          <div>
+            <div className="font-bold">Class Imbalance Warning</div>
+            <p className="mt-0.5 leading-relaxed">
+              {readiness.datasetProfile.classImbalanceWarning}
+            </p>
+          </div>
+        </div>
+      )}
+
+      {readiness.datasetProfile.leakageColumnsExcluded &&
+        readiness.datasetProfile.leakageColumnsExcluded.length > 0 && (
+          <div className="bg-[#F5F3FF] border border-purple-200 rounded-xl p-4 flex items-start gap-3 text-xs text-[#15152F]">
+            <Info className="w-4 h-4 text-[#7655E8] shrink-0 mt-0.5" />
+            <div>
+              <div className="font-bold">Target Leakage Protection Active</div>
+              <p className="mt-0.5 leading-relaxed">
+                Post-outcome date or leakage columns (
+                <span className="font-mono font-semibold text-[#5B3AD6]">
+                  {readiness.datasetProfile.leakageColumnsExcluded.join(', ')}
+                </span>
+                ) are retained for reporting and automatically excluded from predictive ML features.
+              </p>
+            </div>
+          </div>
+        )}
 
       {/* 4 Readiness Outcomes Grid */}
       <div className="grid grid-cols-1 md:grid-cols-2 xl:grid-cols-4 gap-4">

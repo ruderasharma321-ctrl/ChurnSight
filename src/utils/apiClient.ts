@@ -1,12 +1,22 @@
 const SESSION_TOKEN_STORAGE_KEY = 'churnsight_session_token';
 let inMemorySessionToken: string | null = null;
+const unauthorizedListeners = new Set<() => void>();
+
+export function subscribeUnauthorized(listener: () => void): () => void {
+  unauthorizedListeners.add(listener);
+  return () => {
+    unauthorizedListeners.delete(listener);
+  };
+}
 
 export function getClientSessionToken(): string | null {
   if (inMemorySessionToken) {
     return inMemorySessionToken;
   }
   try {
-    const stored = window.sessionStorage.getItem(SESSION_TOKEN_STORAGE_KEY);
+    const stored =
+      window.sessionStorage.getItem(SESSION_TOKEN_STORAGE_KEY) ||
+      window.localStorage.getItem(SESSION_TOKEN_STORAGE_KEY);
     if (stored) {
       inMemorySessionToken = stored;
     }
@@ -16,13 +26,23 @@ export function getClientSessionToken(): string | null {
   }
 }
 
-export function setClientSessionToken(token: string | null | undefined): void {
+export function setClientSessionToken(
+  token: string | null | undefined,
+  persist = true
+): void {
   inMemorySessionToken = token || null;
   try {
     if (token) {
-      window.sessionStorage.setItem(SESSION_TOKEN_STORAGE_KEY, token);
+      if (persist) {
+        window.localStorage.setItem(SESSION_TOKEN_STORAGE_KEY, token);
+        window.sessionStorage.removeItem(SESSION_TOKEN_STORAGE_KEY);
+      } else {
+        window.sessionStorage.setItem(SESSION_TOKEN_STORAGE_KEY, token);
+        window.localStorage.removeItem(SESSION_TOKEN_STORAGE_KEY);
+      }
     } else {
       window.sessionStorage.removeItem(SESSION_TOKEN_STORAGE_KEY);
+      window.localStorage.removeItem(SESSION_TOKEN_STORAGE_KEY);
     }
   } catch {
     // Ignore storage restriction errors; inMemorySessionToken remains active
@@ -31,6 +51,15 @@ export function setClientSessionToken(token: string | null | undefined): void {
 
 const RAW_API_BASE = (import.meta.env.VITE_API_BASE_URL || '').trim().replace(/\/+$/, '');
 
+function isEmbeddedOrCrossOrigin(): boolean {
+  if (RAW_API_BASE) return true;
+  try {
+    return window.self !== window.top;
+  } catch {
+    return true;
+  }
+}
+
 export function resolveApiUrl(input: RequestInfo | URL): RequestInfo | URL {
   if (typeof input === 'string' && input.startsWith('/') && RAW_API_BASE) {
     return `${RAW_API_BASE}${input}`;
@@ -38,11 +67,22 @@ export function resolveApiUrl(input: RequestInfo | URL): RequestInfo | URL {
   return input;
 }
 
+const PUBLIC_AUTH_401_ENDPOINTS = [
+  '/api/auth/login',
+  '/api/auth/register-company',
+  '/api/auth/forgot-password',
+  '/api/auth/status',
+  '/api/auth/me',
+];
+
 export async function apiFetch(input: RequestInfo | URL, init: RequestInit = {}): Promise<Response> {
   const headers = new Headers(init.headers);
   const token = getClientSessionToken();
   if (token && !headers.has('Authorization')) {
     headers.set('Authorization', `Bearer ${token}`);
+  }
+  if (isEmbeddedOrCrossOrigin() && !headers.has('X-ChurnSight-Embedded')) {
+    headers.set('X-ChurnSight-Embedded', '1');
   }
 
   const res = await fetch(resolveApiUrl(input), {
@@ -54,6 +94,17 @@ export async function apiFetch(input: RequestInfo | URL, init: RequestInit = {})
 
   if (res.status === 401) {
     setClientSessionToken(null);
+    const urlStr = typeof input === 'string' ? input : input.toString();
+    const isPublicAuthCall = PUBLIC_AUTH_401_ENDPOINTS.some((ep) => urlStr.includes(ep));
+    if (!isPublicAuthCall) {
+      unauthorizedListeners.forEach((cb) => {
+        try {
+          cb();
+        } catch {
+          // ignore listener errors
+        }
+      });
+    }
   }
 
   return res;
