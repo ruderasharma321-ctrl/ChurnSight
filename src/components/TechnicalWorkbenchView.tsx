@@ -192,8 +192,7 @@ export const TechnicalWorkbenchView: React.FC<TechnicalWorkbenchViewProps> = ({
               Technical ML Studio
             </h1>
             <p className="text-sm text-slate-300 leading-relaxed max-w-xl">
-              Inspect underlying algorithms, configure hold-out split validation and tree depth,
-              audit target leakage checks, and compare versioned runs side by side.
+              Configure algorithms, split strategies, leakage checks, and versioned model runs.
             </p>
             <div className="flex flex-wrap items-center gap-3 pt-1">
               <button
@@ -224,10 +223,19 @@ export const TechnicalWorkbenchView: React.FC<TechnicalWorkbenchViewProps> = ({
                   <span>Building Version</span>
                 </span>
               ) : activeModel ? (
-                <span className="inline-flex items-center gap-2 text-xs font-semibold text-[#35C5E8]">
-                  <span className="w-2 h-2 rounded-full bg-[#35C5E8]" />
+                <span
+                  className={`inline-flex items-center gap-2 text-xs font-semibold ${
+                    activeModel.isOutdated ? 'text-amber-300' : 'text-[#35C5E8]'
+                  }`}
+                >
+                  <span
+                    className={`w-2 h-2 rounded-full ${
+                      activeModel.isOutdated ? 'bg-amber-300' : 'bg-[#35C5E8]'
+                    }`}
+                  />
                   <span>
                     {activeModel.version} · {activeModel.splitStrategy || 'stratified'}
+                    {activeModel.isOutdated ? ' · Outdated' : ''}
                   </span>
                 </span>
               ) : (
@@ -302,7 +310,7 @@ export const TechnicalWorkbenchView: React.FC<TechnicalWorkbenchViewProps> = ({
                 Algorithm, Split Strategy &amp; Hyperparameters
               </h2>
               <span className="text-xs text-slate-500">
-                Override Managed prediction setup defaults to benchmark specific model configurations.
+                Override defaults to benchmark model configurations.
               </span>
             </div>
           </div>
@@ -537,6 +545,19 @@ export const TechnicalWorkbenchView: React.FC<TechnicalWorkbenchViewProps> = ({
       {/* Technical Evaluation Detail when Active Model Exists */}
       {activeModel && !isTraining && (
         <>
+          {activeModel.isOutdated && (
+            <div className="bg-amber-50 border border-amber-300 rounded-2xl p-4 flex items-start gap-3 text-xs text-amber-950">
+              <AlertTriangle className="w-4 h-4 text-amber-700 shrink-0 mt-0.5" />
+              <div className="space-y-0.5">
+                <div className="font-bold">Outdated · Source dataset deleted</div>
+                <p>
+                  {activeModel.outdatedReason ||
+                    'Source dataset for this model version was removed. Build a new version on the active dataset.'}
+                </p>
+              </div>
+            </div>
+          )}
+
           {activeModel.leakageWarnings && activeModel.leakageWarnings.length > 0 && (
             <div className="bg-amber-50 border border-amber-300 rounded-2xl p-4 flex items-start gap-3 text-xs text-amber-950">
               <AlertTriangle className="w-4 h-4 text-amber-700 shrink-0 mt-0.5" />
@@ -800,8 +821,16 @@ export const TechnicalWorkbenchView: React.FC<TechnicalWorkbenchViewProps> = ({
                         }
                       >
                         <td className="py-2.5 pr-4 font-mono text-xs font-bold text-[#7655E8]">
-                          {run.version}
+                          <span>{run.version}</span>
                           {run.modelId === activeModel.modelId ? ' · Active' : ''}
+                          {run.isOutdated && (
+                            <span
+                              title={run.outdatedReason || 'Source dataset deleted'}
+                              className="ml-1.5 font-sans font-semibold text-[11px] text-amber-700"
+                            >
+                              · Outdated
+                            </span>
+                          )}
                         </td>
                         <td className="py-2.5 px-3 text-[#15152F]">{run.modelName}</td>
                         <td className="py-2.5 px-3 text-xs text-slate-600">

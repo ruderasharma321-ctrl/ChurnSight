@@ -269,6 +269,22 @@ export const CustomerValueView: React.FC<CustomerValueViewProps> = ({
             <span className="font-mono tabular-nums">
               {summary.totalCustomers.toLocaleString()} customers evaluated
             </span>
+            {summary.activeCustomersCount !== undefined && (
+              <>
+                <span aria-hidden="true">·</span>
+                <span className="font-mono tabular-nums text-[#059669] font-medium">
+                  {summary.activeCustomersCount.toLocaleString()} Active
+                </span>
+              </>
+            )}
+            {summary.churnedCustomersCount !== undefined && summary.churnedCustomersCount > 0 && (
+              <>
+                <span aria-hidden="true">·</span>
+                <span className="font-mono tabular-nums text-[#DC2626] font-medium">
+                  {summary.churnedCustomersCount.toLocaleString()} Already Churned
+                </span>
+              </>
+            )}
             <span aria-hidden="true">·</span>
             <span>{summary.revenueBasisNote}</span>
           </div>
@@ -326,10 +342,10 @@ export const CustomerValueView: React.FC<CustomerValueViewProps> = ({
           <div className="flex flex-wrap items-center justify-between gap-3 pb-4 border-b border-purple-100">
             <div>
               <h2 className="text-base font-bold text-[#11142B]">
-                Configurable Value Assessment Criteria & Cutoffs
+                Customer Value Criteria &amp; Cutoffs
               </h2>
               <p className="text-xs text-slate-500 mt-0.5">
-                Only detected dataset fields receive active weight; missing fields are automatically excluded and weights re-normalize cleanly.
+                Missing dataset fields are excluded automatically and remaining weights re-normalize.
               </p>
             </div>
             <div className="flex items-center gap-2">
@@ -579,7 +595,7 @@ export const CustomerValueView: React.FC<CustomerValueViewProps> = ({
               </span>
             </div>
             <p className="text-xs text-slate-500 mb-4">
-              Data-driven segmentation from active portfolio criteria rather than arbitrary fixed labels.
+              Percentile-based value tiers from active scoring criteria.
             </p>
           </div>
 
@@ -587,7 +603,7 @@ export const CustomerValueView: React.FC<CustomerValueViewProps> = ({
             <ResponsiveContainer width="100%" height="100%">
               <BarChart data={summary.segmentDistribution} margin={{ top: 8, right: 12, left: 0, bottom: 0 }}>
                 <CartesianGrid strokeDasharray="3 3" stroke="#E2E8F0" vertical={false} />
-                <XAxis dataKey="segment" tick={{ fontSize: 12, fill: '#4755E9' }} />
+                <XAxis dataKey="segment" tick={{ fontSize: 12, fill: '#475569' }} />
                 <YAxis tick={{ fontSize: 11, fill: '#64748B' }} allowDecimals={false} />
                 <Tooltip
                   formatter={(value: unknown, name?: string | number) => [
@@ -633,7 +649,7 @@ export const CustomerValueView: React.FC<CustomerValueViewProps> = ({
               )}
             </div>
             <p className="text-xs text-slate-500 mb-4">
-              Combines composite customer value score (0–100) with estimated churn probability from the active model.
+              Value score (0–100) vs. predicted churn probability.
             </p>
           </div>
 
@@ -799,10 +815,10 @@ export const CustomerValueView: React.FC<CustomerValueViewProps> = ({
         <div className="p-5 border-b border-purple-100 flex flex-wrap items-center justify-between gap-3">
           <div>
             <h2 className="text-base font-bold text-[#11142B]">
-              Customer Value & Exposure Ledger
+              Customer Value &amp; Exposure Ledger
             </h2>
             <p className="text-xs text-slate-500 mt-0.5">
-              Select any customer row to inspect exact weighted score contributions and risk evidence.
+              Click any row to inspect score weights and risk drivers
             </p>
           </div>
 
@@ -842,66 +858,109 @@ export const CustomerValueView: React.FC<CustomerValueViewProps> = ({
             <thead>
               <tr className="border-b border-purple-100 bg-[#F5F3FF]/50 text-slate-600">
                 <th className="py-3 px-4 font-semibold">Customer</th>
+                <th className="py-3 px-4 font-semibold">Actual Status</th>
                 <th className="py-3 px-4 font-semibold">Segment</th>
                 <th className="py-3 px-4 font-semibold text-right">Value Score</th>
                 <th className="py-3 px-4 font-semibold">Value Tier</th>
                 <th className="py-3 px-4 font-semibold text-right">Annualized Rev</th>
-                <th className="py-3 px-4 font-semibold text-right">Churn Prob</th>
+                <th className="py-3 px-4 font-semibold text-right">Predicted Risk</th>
                 <th className="py-3 px-4 font-semibold text-right">Expected Exposure</th>
                 <th className="py-3 px-4 font-semibold">Priority Matrix</th>
               </tr>
             </thead>
             <tbody className="divide-y divide-purple-50">
-              {filteredCustomers.slice(0, 60).map((c) => (
-                <tr
-                  key={`${c.rowIndex}-${c.customerId}`}
-                  onClick={() => setSelectedCustomer(c)}
-                  className="hover:bg-[#F5F3FF]/60 transition-colors cursor-pointer"
-                >
-                  <td className="py-3 px-4">
-                    <div className="font-mono font-semibold text-[#11142B]">{c.customerId}</div>
-                    {c.customerName !== '—' && (
-                      <div className="text-[11px] text-slate-500 truncate max-w-[160px]">
-                        {c.customerName}
-                      </div>
-                    )}
-                  </td>
-                  <td className="py-3 px-4 text-slate-700">{c.segment}</td>
-                  <td className="py-3 px-4 text-right font-mono tabular-nums font-bold text-[#11142B]">
-                    {c.valueScore.toFixed(1)}
-                  </td>
-                  <td className="py-3 px-4 font-medium text-[#11142B]">{c.valueSegment}</td>
-                  <td className="py-3 px-4 text-right font-mono tabular-nums text-slate-700">
-                    {formatCurrency(c.annualizedRevenue)}
-                  </td>
-                  <td className="py-3 px-4 text-right font-mono tabular-nums text-slate-700">
-                    {c.churnProbability !== null
-                      ? `${(c.churnProbability * 100).toFixed(1)}%`
-                      : 'Unavailable'}
-                  </td>
-                  <td className="py-3 px-4 text-right font-mono tabular-nums font-semibold text-[#11142B]">
-                    {formatCurrency(c.expectedRevenueExposure)}
-                  </td>
-                  <td className="py-3 px-4">
-                    <span
-                      className={`font-semibold ${
-                        c.quadrant === 'critical_retention_priority'
-                          ? 'text-[#E04F44]'
-                          : c.quadrant === 'protect_and_maintain'
-                            ? 'text-emerald-700'
-                            : c.quadrant === 'monitor_and_assess'
-                              ? 'text-amber-700'
-                              : 'text-slate-600'
-                      }`}
-                    >
-                      {c.quadrantLabel}
-                    </span>
-                  </td>
-                </tr>
-              ))}
+              {filteredCustomers.slice(0, 60).map((c) => {
+                const isInactive =
+                  c.riskApplicable === false ||
+                  c.actualStatus === 'Churned' ||
+                  c.actualStatus === 'Inconsistent';
+                const statusBadgeClass =
+                  c.actualStatus === 'Churned'
+                    ? 'bg-[#DC2626]/10 text-[#DC2626] border-[#DC2626]/25'
+                    : c.actualStatus === 'Inconsistent'
+                      ? 'bg-amber-50 text-amber-700 border-amber-200'
+                      : c.actualStatus === 'Unknown'
+                        ? 'bg-slate-100 text-slate-600 border-slate-200'
+                        : 'bg-[#059669]/10 text-[#059669] border-[#059669]/25';
+
+                return (
+                  <tr
+                    key={`${c.rowIndex}-${c.customerId}`}
+                    onClick={() => setSelectedCustomer(c)}
+                    className="hover:bg-[#F5F3FF]/60 transition-colors cursor-pointer"
+                  >
+                    <td className="py-3 px-4">
+                      <div className="font-mono font-semibold text-[#11142B]">{c.customerId}</div>
+                      {c.customerName !== '—' && (
+                        <div className="text-[11px] text-slate-500 truncate max-w-[160px]">
+                          {c.customerName}
+                        </div>
+                      )}
+                    </td>
+                    <td className="py-3 px-4 whitespace-nowrap">
+                      <span
+                        className={`inline-block px-2 py-0.5 rounded-md text-[11px] font-semibold border ${statusBadgeClass}`}
+                      >
+                        {c.actualStatus || 'Active'}
+                      </span>
+                    </td>
+                    <td className="py-3 px-4 text-slate-700">{c.segment}</td>
+                    <td className="py-3 px-4 text-right font-mono tabular-nums font-bold text-[#11142B]">
+                      {c.valueScore.toFixed(1)}
+                    </td>
+                    <td className="py-3 px-4 font-medium text-[#11142B]">{c.valueSegment}</td>
+                    <td className="py-3 px-4 text-right font-mono tabular-nums text-slate-700">
+                      {formatCurrency(c.annualizedRevenue)}
+                    </td>
+                    <td className="py-3 px-4 text-right font-mono tabular-nums text-slate-700">
+                      {isInactive ? (
+                        <span className="font-sans font-semibold text-slate-500">Not Applicable</span>
+                      ) : c.churnProbability !== null ? (
+                        <span
+                          className={
+                            c.predictedRiskLabel === 'High Risk'
+                              ? 'font-bold text-[#EA580C]'
+                              : c.predictedRiskLabel === 'Medium Risk'
+                                ? 'font-bold text-[#7655E8]'
+                                : 'font-semibold text-[#059669]'
+                          }
+                        >
+                          {(c.churnProbability * 100).toFixed(1)}%
+                        </span>
+                      ) : (
+                        'Unavailable'
+                      )}
+                    </td>
+                    <td className="py-3 px-4 text-right font-mono tabular-nums font-semibold text-[#11142B]">
+                      {isInactive ? (
+                        <span className="font-sans font-normal text-slate-500">Not Applicable</span>
+                      ) : (
+                        formatCurrency(c.expectedRevenueExposure)
+                      )}
+                    </td>
+                    <td className="py-3 px-4">
+                      <span
+                        className={`font-semibold ${
+                          isInactive
+                            ? 'text-slate-500'
+                            : c.quadrant === 'critical_retention_priority'
+                              ? 'text-[#EA580C]'
+                              : c.quadrant === 'protect_and_maintain'
+                                ? 'text-[#059669]'
+                                : c.quadrant === 'monitor_and_assess'
+                                  ? 'text-[#7655E8]'
+                                  : 'text-slate-600'
+                        }`}
+                      >
+                        {c.quadrantLabel}
+                      </span>
+                    </td>
+                  </tr>
+                );
+              })}
               {filteredCustomers.length === 0 && (
                 <tr>
-                  <td colSpan={8} className="py-8 text-center text-slate-500">
+                  <td colSpan={9} className="py-8 text-center text-slate-500">
                     No customers match the active search or segment filter.
                   </td>
                 </tr>
@@ -946,7 +1005,11 @@ export const CustomerValueView: React.FC<CustomerValueViewProps> = ({
               <div className="p-3 rounded-xl bg-[#F5F3FF]/60 border border-purple-100">
                 <div className="text-slate-500">Expected Exposure</div>
                 <div className="text-lg font-bold font-mono tabular-nums text-[#11142B] mt-1">
-                  {formatCurrency(selectedCustomer.expectedRevenueExposure)}
+                  {selectedCustomer.riskApplicable === false ||
+                  selectedCustomer.actualStatus === 'Churned' ||
+                  selectedCustomer.actualStatus === 'Inconsistent'
+                    ? 'Not Applicable'
+                    : formatCurrency(selectedCustomer.expectedRevenueExposure)}
                 </div>
               </div>
             </div>
@@ -975,14 +1038,20 @@ export const CustomerValueView: React.FC<CustomerValueViewProps> = ({
 
             <div className="space-y-2">
               <h4 className="text-xs font-bold text-[#11142B] uppercase tracking-wider">
-                Churn Risk & Service Signals
+                Actual Status &amp; Churn Risk Signals
               </h4>
               <div className="p-3.5 rounded-xl border border-slate-200 text-xs space-y-1.5">
                 <div className="font-semibold text-[#11142B]">
-                  {selectedCustomer.quadrantLabel}
-                  {selectedCustomer.churnProbability !== null
-                    ? ` (${(selectedCustomer.churnProbability * 100).toFixed(1)}% probability)`
-                    : ''}
+                  Actual Status: {selectedCustomer.actualStatus || 'Active'} ·{' '}
+                  {selectedCustomer.riskApplicable === false ||
+                  selectedCustomer.actualStatus === 'Churned' ||
+                  selectedCustomer.actualStatus === 'Inconsistent'
+                    ? 'Predicted Risk: Not Applicable'
+                    : `${selectedCustomer.quadrantLabel}${
+                        selectedCustomer.churnProbability !== null
+                          ? ` (${(selectedCustomer.churnProbability * 100).toFixed(1)}% probability)`
+                          : ''
+                      }`}
                 </div>
                 <ul className="list-disc pl-4 text-slate-600 space-y-1">
                   {selectedCustomer.riskFactors.map((rf, idx) => (

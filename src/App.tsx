@@ -38,12 +38,14 @@ import {
   ColumnMapping,
   CompanyWorkspaceInfo,
   DatasetState,
+  DuplicateIdHandlingMode,
   ModelEvaluationResult,
   NavTab,
   PredictionPipelineStatus,
   SatisfactionScale,
   StagedDatasetImport,
   TrainModelRequest,
+  UploadedDatasetSummary,
   UploadPathway,
   UserAccount,
   WorkspaceUsageSummary,
@@ -181,6 +183,7 @@ export default function App() {
   const profileMenuRef = useRef<HTMLDivElement | null>(null);
 
   const [dataset, setDataset] = useState<DatasetState | null>(null);
+  const [uploadedDatasets, setUploadedDatasets] = useState<UploadedDatasetSummary[]>([]);
   const [stagedImport, setStagedImport] = useState<StagedDatasetImport | null>(null);
   const [analytics, setAnalytics] = useState<AnalyticsSummary | null>(null);
   const [activeModel, setActiveModel] = useState<ModelEvaluationResult | null>(null);
@@ -197,6 +200,7 @@ export default function App() {
 
   const clearWorkspaceState = useCallback(() => {
     setDataset(null);
+    setUploadedDatasets([]);
     setStagedImport(null);
     setAnalytics(null);
     setActiveModel(null);
@@ -230,6 +234,7 @@ export default function App() {
           setAuth((prev) => (prev ? { ...prev, company: data.company } : prev));
         }
         setDataset(data.dataset || null);
+        setUploadedDatasets(Array.isArray(data.uploadedDatasets) ? data.uploadedDatasets : []);
         setStagedImport(null);
         setAnalytics(data.analytics || null);
         setActiveModel(data.activeModel || null);
@@ -538,6 +543,9 @@ export default function App() {
       }
       setStagedImport(null);
       setDataset(data.dataset);
+      if (Array.isArray(data.uploadedDatasets)) {
+        setUploadedDatasets(data.uploadedDatasets);
+      }
       setAnalytics(data.analytics);
       setUsage(data.usage || null);
       setActiveModel(data.activeModel || null);
@@ -588,6 +596,7 @@ export default function App() {
     mapping: ColumnMapping;
     churnDefinition: ChurnDefinition;
     importMode?: 'valid_only' | 'all';
+    duplicateStrategy?: DuplicateIdHandlingMode;
     satisfactionScale?: SatisfactionScale;
   }) => {
     setIsDatasetLoading(true);
@@ -609,6 +618,9 @@ export default function App() {
       }
       setStagedImport(null);
       setDataset(data.dataset);
+      if (Array.isArray(data.uploadedDatasets)) {
+        setUploadedDatasets(data.uploadedDatasets);
+      }
       setAnalytics(data.analytics);
       setUsage(data.usage || null);
       setActiveModel(data.activeModel || null);
@@ -620,6 +632,80 @@ export default function App() {
     } finally {
       setIsDatasetLoading(false);
       setIsPipelineRunning(false);
+    }
+  };
+
+  const handleActivateDataset = async (datasetId: string) => {
+    setIsDatasetLoading(true);
+    setIsPipelineRunning(true);
+    setGlobalError(null);
+    try {
+      const res = await apiFetch(`/api/datasets/${encodeURIComponent(datasetId)}/activate`, {
+        method: 'POST',
+      });
+      if (handleAuthErrorIf401(res.status)) return;
+      const data = await res.json();
+      if (!res.ok) {
+        throw new Error(data.error || 'Failed to load selected dataset.');
+      }
+      if (data.company) {
+        setAuth((prev) => (prev ? { ...prev, company: data.company } : prev));
+      }
+      setStagedImport(null);
+      setDataset(data.dataset || null);
+      if (Array.isArray(data.uploadedDatasets)) {
+        setUploadedDatasets(data.uploadedDatasets);
+      }
+      setAnalytics(data.analytics || null);
+      setActiveModel(data.activeModel || null);
+      setModelHistory(data.modelHistory || []);
+      if (Array.isArray(data.batchScores)) {
+        setBatchScores(data.batchScores);
+      }
+      setAutomationStatus(data.automationStatus || null);
+      if (data.usage) setUsage(data.usage);
+    } catch (err: unknown) {
+      setGlobalError(err instanceof Error ? err.message : 'Failed to load selected dataset.');
+      throw err;
+    } finally {
+      setIsDatasetLoading(false);
+      setIsPipelineRunning(false);
+    }
+  };
+
+  const handleDeleteDataset = async (datasetId: string) => {
+    setIsDatasetLoading(true);
+    setGlobalError(null);
+    try {
+      const res = await apiFetch(`/api/datasets/${encodeURIComponent(datasetId)}`, {
+        method: 'DELETE',
+      });
+      if (handleAuthErrorIf401(res.status)) return;
+      const data = await res.json();
+      if (!res.ok) {
+        throw new Error(data.error || 'Failed to delete dataset.');
+      }
+      if (data.company) {
+        setAuth((prev) => (prev ? { ...prev, company: data.company } : prev));
+      }
+      setStagedImport(null);
+      setDataset(data.dataset || null);
+      if (Array.isArray(data.uploadedDatasets)) {
+        setUploadedDatasets(data.uploadedDatasets);
+      }
+      setAnalytics(data.analytics || null);
+      setActiveModel(data.activeModel || null);
+      setModelHistory(data.modelHistory || []);
+      if (Array.isArray(data.batchScores)) {
+        setBatchScores(data.batchScores);
+      }
+      setAutomationStatus(data.automationStatus || null);
+      if (data.usage) setUsage(data.usage);
+    } catch (err: unknown) {
+      setGlobalError(err instanceof Error ? err.message : 'Failed to delete dataset.');
+      throw err;
+    } finally {
+      setIsDatasetLoading(false);
     }
   };
 
@@ -717,6 +803,7 @@ export default function App() {
       setActiveModel(data.activeModel || null);
       setModelHistory(data.modelHistory || []);
       setAutomationStatus(data.automationStatus || null);
+      if (data.analytics !== undefined) setAnalytics(data.analytics);
       if (data.usage) setUsage(data.usage);
     } finally {
       setIsPipelineRunning(false);
@@ -739,6 +826,7 @@ export default function App() {
       }
       setActiveModel(data.activeModel);
       setModelHistory(data.modelHistory || []);
+      if (data.analytics !== undefined) setAnalytics(data.analytics);
       if (data.automationStatus !== undefined) {
         setAutomationStatus(data.automationStatus);
       }
@@ -794,6 +882,7 @@ export default function App() {
       setAuth((prev) => (prev ? { ...prev, company: data.company } : prev));
     }
     if (data.dataset !== undefined) setDataset(data.dataset);
+    if (Array.isArray(data.uploadedDatasets)) setUploadedDatasets(data.uploadedDatasets);
     if (data.analytics !== undefined) setAnalytics(data.analytics);
     if (data.activeModel !== undefined) setActiveModel(data.activeModel);
     if (data.modelHistory !== undefined) setModelHistory(data.modelHistory);
@@ -1195,6 +1284,7 @@ export default function App() {
                   <CustomerDataView
                     company={company}
                     dataset={dataset}
+                    uploadedDatasets={uploadedDatasets}
                     analytics={analytics}
                     activeModel={activeModel}
                     stagedImport={stagedImport}
@@ -1207,6 +1297,8 @@ export default function App() {
                     onStageUpload={handleStageUpload}
                     onCommitStaged={handleCommitStaged}
                     onCancelStaged={() => setStagedImport(null)}
+                    onDeleteDataset={handleDeleteDataset}
+                    onActivateDataset={handleActivateDataset}
                     onUpdateMapping={handleUpdateMapping}
                     onSaveChurnDefinition={handleSaveChurnDefinition}
                     onRecordOutcome={handleRecordOutcome}

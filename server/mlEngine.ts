@@ -39,6 +39,15 @@ import {
   getIndustryDataTemplateColumns,
   getIndustryTemplate,
 } from '../src/utils/industryConfig.ts';
+import {
+  classifyPredictedRiskLabel,
+  computeActiveCustomerRiskSummary,
+  computeHistoricalPerformance,
+  detectStatusColumnHints,
+  getPeriodBounds,
+  resolveCustomerStatusRecord,
+  type ResolvedCustomerStatus,
+} from './customerStatusEngine.ts';
 
 export interface StoredDataset {
   state: DatasetState;
@@ -1807,7 +1816,9 @@ export function computeAnalytics(
   rows: Record<string, string>[],
   mapping: ColumnMapping,
   filters: AnalyticsFilters = {},
-  churnDefinition?: ChurnDefinition
+  churnDefinition?: ChurnDefinition,
+  activeArtifact?: TrainedModelArtifact | null,
+  valueRiskTotals?: { highValueAtRiskCount: number | null; highValueAtRiskRevenue: number | null }
 ): AnalyticsSummary {
   const headers = columns.map((c) => c.name);
   const hasContractCol = Boolean(
@@ -1832,16 +1843,29 @@ export function computeAnalytics(
       ? paymentMethodColumn
       : null;
 
-  // Determine whether historical binary churn outcomes exist in this dataset
+  const statusHints = detectStatusColumnHints(columns, mapping);
+  const resolvedAll: ResolvedCustomerStatus[] = rows.map((row, idx) =>
+    resolveCustomerStatusRecord(row, idx + 1, statusHints, churnDefinition)
+  );
+
+  // Determine whether historical binary churn outcomes exist in this dataset (excluding inconsistent records)
   let hasPositiveLabel = false;
   let hasNegativeLabel = false;
   let labeledRowCount = 0;
-  for (const row of rows) {
-    const c = isRowChurned(row, mapping);
+  for (let i = 0; i < rows.length; i++) {
+    const resolved = resolvedAll[i];
+    if (resolved.isInconsistent) continue;
+    const c = isRowChurned(rows[i], mapping);
     if (c !== null) {
       labeledRowCount++;
       if (c) hasPositiveLabel = true;
       else hasNegativeLabel = true;
+    } else if (resolved.isActualChurned) {
+      labeledRowCount++;
+      hasPositiveLabel = true;
+    } else if (resolved.isActive) {
+      labeledRowCount++;
+      hasNegativeLabel = true;
     }
   }
   const isUnlabeledColdStart = labeledRowCount === 0 || !(hasPositiveLabel && hasNegativeLabel);
@@ -1851,8 +1875,11 @@ export function computeAnalytics(
   const tenureOptionsSet = new Set<string>();
   const paymentOptionsSet = new Set<string>();
 
-  for (const row of rows) {
-    if (!isUnlabeledColdStart && isRowChurned(row, mapping) === null) continue;
+  for (let i = 0; i < rows.length; i++) {
+    const row = rows[i];
+    const resolved = resolvedAll[i];
+    if (resolved.isInconsistent) continue;
+    if (!isUnlabeledColdStart && resolved.actualStatus === 'Unknown' && isRowChurned(row, mapping) === null) continue;
     if (hasContractCol && mapping.contractColumn) {
       const raw = row[mapping.contractColumn];
       contractOptionsSet.add(isMissingValue(raw) ? 'Missing' : raw.trim());
@@ -1874,23 +1901,11 @@ export function computeAnalytics(
     ...(tenureOptionsSet.has('73+ mo') ? ['73+ mo'] : []),
   ].filter((label) => tenureOptionsSet.has(label));
 
-  const filterOptions: AnalyticsFilterOptions = {
-    contracts: Array.from(contractOptionsSet).sort(),
-    tenureGroups: orderedTenureLabels,
-    paymentMethods: Array.from(paymentOptionsSet).sort(),
-  };
-
-  // Apply active filters
-  const filteredRows: { row: Record<string, string>; churned: boolean }[] = [];
-  for (const row of rows) {
-    const rawChurn = isRowChurned(row, mapping);
-    if (!isUnlabeledColdStart && rawChurn === null) continue;
-    const churned = rawChurn === true;
-
-    if (!isUnlabeledColdStart) {
-      if (filters.churnStatus === 'Churned' && !churned) continue;
-      if (filters.churnStatus === 'Stayed' && churned) continue;
-    }
+  // Filter rows by dimension filters (before reportingPeriod & churnStatus so historical performance reflects active cohort)
+  const dimensionFilteredPairs: { row: Record<string, string>; resolved: ResolvedCustomerStatus }[] = [];
+  for (let i = 0; i < rows.length; i++) {
+    const row = rows[i];
+    const resolved = resolvedAll[i];
 
     if (filters.contract && filters.contract !== 'ALL' && hasContractCol && mapping.contractColumn) {
       const raw = row[mapping.contractColumn];
@@ -1911,6 +1926,56 @@ export function computeAnalytics(
       if (label !== filters.paymentMethod) continue;
     }
 
+    dimensionFilteredPairs.push({ row, resolved });
+  }
+
+  const historicalPerformance = computeHistoricalPerformance({
+    resolvedRows: dimensionFilteredPairs.map((p) => p.resolved),
+    churnDefinition,
+    selectedPeriod: filters.reportingPeriod || 'ALL',
+    isUnlabeledColdStart,
+    hasTargetMapping: Boolean(mapping.targetColumn),
+  });
+
+  const filterOptions: AnalyticsFilterOptions = {
+    contracts: Array.from(contractOptionsSet).sort(),
+    tenureGroups: orderedTenureLabels,
+    paymentMethods: Array.from(paymentOptionsSet).sort(),
+    reportingPeriods: historicalPerformance.availablePeriods,
+  };
+
+  const granularity = churnDefinition?.reportingPeriod || 'monthly';
+  const periodBounds =
+    filters.reportingPeriod && filters.reportingPeriod !== 'ALL'
+      ? getPeriodBounds(filters.reportingPeriod, granularity)
+      : null;
+
+  // Apply active filters (including churnStatus & reportingPeriod) for visual charts
+  const filteredRows: { row: Record<string, string>; churned: boolean }[] = [];
+  for (const { row, resolved } of dimensionFilteredPairs) {
+    if (resolved.isInconsistent) continue;
+    if (!isUnlabeledColdStart && resolved.actualStatus === 'Unknown' && isRowChurned(row, mapping) === null) continue;
+
+    let churned = resolved.isActualChurned;
+    if (periodBounds) {
+      if (!historicalPerformance.historicalRateReliable) continue;
+      const joinedBeforeOrAtStart =
+        resolved.registrationDateTs === null || resolved.registrationDateTs <= periodBounds.startTs;
+      const notChurnedBeforeStart =
+        !(resolved.isActualChurned && resolved.churnDateTs !== null && resolved.churnDateTs < periodBounds.startTs);
+      if (!joinedBeforeOrAtStart || !notChurnedBeforeStart) continue;
+      churned =
+        resolved.isActualChurned &&
+        resolved.churnDateTs !== null &&
+        resolved.churnDateTs >= periodBounds.startTs &&
+        resolved.churnDateTs <= periodBounds.endTs;
+    }
+
+    if (!isUnlabeledColdStart) {
+      if (filters.churnStatus === 'Churned' && !churned) continue;
+      if (filters.churnStatus === 'Stayed' && churned) continue;
+    }
+
     filteredRows.push({ row, churned });
   }
 
@@ -1928,12 +1993,12 @@ export function computeAnalytics(
   }
 
   const churnRate =
-    !isUnlabeledColdStart && totalCustomers > 0
+    historicalPerformance.historicalRateReliable && totalCustomers > 0
       ? Number(((churnedCount / totalCustomers) * 100).toFixed(1))
       : 0;
   const churnedPercentage = churnRate;
   const stayedPercentage =
-    !isUnlabeledColdStart && totalCustomers > 0
+    historicalPerformance.historicalRateReliable && totalCustomers > 0
       ? Number(((stayedCount / totalCustomers) * 100).toFixed(1))
       : 0;
 
@@ -2243,8 +2308,9 @@ export function computeAnalytics(
     }
   }
 
-  const calculationExplanation = isUnlabeledColdStart
-    ? `Cold-Start / Active Customer Monitoring: ${totalCustomers.toLocaleString()} active accounts profiled. Historical churn rate and predictive risk scores remain withheld until both churned and retained outcomes are observed or uploaded.`
+  const calculationExplanation = !historicalPerformance.historicalRateReliable
+    ? historicalPerformance.historicalRateNotice ||
+      `Cold-Start / Active Customer Monitoring: ${totalCustomers.toLocaleString()} active accounts profiled.`
     : formatChurnCalculationExplanation(churnDefinition, churnedCount, totalCustomers);
 
   const behaviourMonitoring = computeBehaviourMonitoring(
@@ -2254,6 +2320,13 @@ export function computeAnalytics(
     churnDefinition,
     !isUnlabeledColdStart
   );
+
+  const activeRiskSummary = computeActiveCustomerRiskSummary({
+    resolvedRows: dimensionFilteredPairs.map((p) => p.resolved),
+    predictions: activeArtifact?.evaluation?.predictions || null,
+    highValueAtRiskCount: valueRiskTotals?.highValueAtRiskCount ?? null,
+    highValueAtRiskRevenue: valueRiskTotals?.highValueAtRiskRevenue ?? null,
+  });
 
   return {
     totalCustomers,
@@ -2265,6 +2338,8 @@ export function computeAnalytics(
     isUnlabeledColdStart,
     calculationExplanation,
     behaviourMonitoring,
+    historicalPerformance,
+    activeRiskSummary,
     contractStats,
     tenureStats,
     monthlyChargesStats,
@@ -2615,15 +2690,24 @@ export function trainAndEvaluateModel(
   versionNumber = 1
 ): TrainedModelArtifact {
   const { columns, mapping } = dataset.state;
-  const validRows: { rowIndex: number; row: Record<string, string>; label: number }[] = [];
+  const statusHints = detectStatusColumnHints(columns, mapping);
+  const validRows: {
+    rowIndex: number;
+    row: Record<string, string>;
+    label: number;
+    resolved: ResolvedCustomerStatus;
+  }[] = [];
 
   dataset.rows.forEach((row, idx) => {
+    const resolved = resolveCustomerStatusRecord(row, idx + 1, statusHints);
+    if (resolved.isInconsistent) return;
     const churned = isRowChurned(row, mapping);
     if (churned !== null) {
       validRows.push({
         rowIndex: idx + 1,
         row,
         label: churned ? 1 : 0,
+        resolved,
       });
     }
   });
@@ -2934,12 +3018,19 @@ export function trainAndEvaluateModel(
   const predictions: CustomerPrediction[] = validRows.map((item) => {
     const x = encodeRow(item.row, features);
     const prob = Number(predictProb(x).toFixed(4));
+    const riskCat = classifyRisk(prob);
     const customerId =
       mapping.idColumn && item.row[mapping.idColumn]
         ? item.row[mapping.idColumn]
         : `CUST-${String(item.rowIndex).padStart(4, '0')}`;
 
     const customerName = extractCustomerNameFromRow(item.row);
+    const actualStatus = item.resolved.actualStatus !== 'Unknown'
+      ? item.resolved.actualStatus
+      : item.label === 1
+        ? 'Churned'
+        : 'Active';
+    const isChurned = actualStatus === 'Churned' || actualStatus === 'Inconsistent';
 
     return {
       rowIndex: item.rowIndex,
@@ -2947,9 +3038,13 @@ export function trainAndEvaluateModel(
       ...(customerName ? { customerName } : {}),
       split: testRowIndices.has(item.rowIndex) ? 'Unseen Test' : 'Training',
       actualChurn: item.label === 1 ? 'Churned' : 'Stayed',
+      actualStatus,
+      statusConflictReason: item.resolved.conflictReason,
+      riskApplicable: !isChurned,
+      predictedRiskLabel: isChurned ? 'Not Applicable' : classifyPredictedRiskLabel(riskCat),
       predictedChurn: prob >= 0.5 ? 'Likely to Churn' : 'Likely to Stay',
       churnProbability: prob,
-      riskCategory: classifyRisk(prob),
+      riskCategory: riskCat,
       attributes: item.row,
     };
   });

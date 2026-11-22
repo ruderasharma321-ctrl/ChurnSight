@@ -296,6 +296,29 @@ export interface ModelCompatibilityReport {
   message: string;
 }
 
+export type DuplicateIdHandlingMode = 'skip' | 'update' | 'replace';
+
+export interface DuplicateCustomerConflictSummary {
+  existingCount: number;
+  conflictCount: number;
+  sampleDuplicateIds: string[];
+  existingDatasetFileName: string | null;
+}
+
+export interface UploadedDatasetSummary {
+  datasetId: string;
+  fileName: string;
+  sourceFormat: 'csv' | 'xlsx';
+  uploadPathway?: UploadPathway;
+  uploadMode?: 'customer' | 'tickets';
+  uploadedAt: string;
+  customerCount: number;
+  ticketCount: number;
+  importStatus: 'Active' | 'Imported' | 'Partial (Errors Excluded)';
+  isActive: boolean;
+  isSample?: boolean;
+}
+
 export interface DatasetState {
   datasetId: string;
   fileName: string;
@@ -354,6 +377,7 @@ export interface StagedDatasetImport {
   rowValidation?: RowValidationReport;
   ticketAggregation?: TicketAggregationSummary | null;
   modelCompatibility?: ModelCompatibilityReport | null;
+  duplicateConflict?: DuplicateCustomerConflictSummary | null;
 }
 
 export interface BehaviourWatchlistItem {
@@ -422,17 +446,78 @@ export interface AdditionalChartBreakdown {
   stats: CategoryChurnStat[];
 }
 
+export type CustomerActualStatus = 'Active' | 'Churned' | 'Inconsistent' | 'Unknown';
+
+export type PredictedRiskLabel = 'High Risk' | 'Medium Risk' | 'Low Risk' | 'Not Applicable';
+
+export interface InconsistentCustomerRecord {
+  rowIndex: number;
+  customerId: string;
+  customerName?: string;
+  reason: string;
+}
+
+export interface HistoricalPeriodPoint {
+  period: string;
+  label: string;
+  customersAtStart: number;
+  actualChurned: number;
+  retainedCount: number;
+  churnRate: number | null;
+  reliable: boolean;
+}
+
+export interface HistoricalChurnPerformance {
+  reportingPeriodGranularity: ReportingPeriod;
+  selectedPeriod: string; // 'ALL' or specific period key (e.g. '2026-09', '2026-Q3', '2026')
+  availablePeriods: string[];
+  customersAtStartOfPeriod: number;
+  actualChurnedCount: number;
+  retainedCount: number;
+  historicalChurnRate: number | null;
+  historicalRateReliable: boolean;
+  historicalRateNotice: string | null;
+  inconsistentRecordsCount: number;
+  inconsistentRecordsSample: InconsistentCustomerRecord[];
+  unknownStatusCount: number;
+  hasDateColumns: boolean;
+  historicalTrends: HistoricalPeriodPoint[];
+  formulaDescription: string;
+}
+
+export interface ActiveProbabilityBucket {
+  bucket: string;
+  rangeLabel: string;
+  count: number;
+  percentage: number;
+}
+
+export interface ActiveCustomerRiskSummary {
+  totalActiveCustomers: number;
+  scoredActiveCustomers: number;
+  activeHighRiskCount: number;
+  activeMediumRiskCount: number;
+  activeLowRiskCount: number;
+  excludedChurnedCount: number;
+  excludedInconsistentCount: number;
+  activeProbabilityDistribution: ActiveProbabilityBucket[];
+  highValueActiveAtRiskCount: number | null;
+  highValueActiveAtRiskRevenue: number | null;
+}
+
 export interface AnalyticsFilters {
   contract?: string;
   churnStatus?: 'ALL' | 'Churned' | 'Stayed';
   tenureGroup?: string;
   paymentMethod?: string;
+  reportingPeriod?: string;
 }
 
 export interface AnalyticsFilterOptions {
   contracts: string[];
   tenureGroups: string[];
   paymentMethods: string[];
+  reportingPeriods?: string[];
 }
 
 export interface AnalyticsSummary {
@@ -445,6 +530,8 @@ export interface AnalyticsSummary {
   isUnlabeledColdStart?: boolean;
   calculationExplanation?: string;
   behaviourMonitoring?: BehaviourMonitoringSummary | null;
+  historicalPerformance?: HistoricalChurnPerformance;
+  activeRiskSummary?: ActiveCustomerRiskSummary | null;
   contractStats: CategoryChurnStat[] | null;
   tenureStats: CategoryChurnStat[] | null;
   monthlyChargesStats: CategoryChurnStat[] | null;
@@ -496,6 +583,10 @@ export interface CustomerPrediction {
   customerName?: string;
   split: 'Training' | 'Unseen Test';
   actualChurn: 'Churned' | 'Stayed';
+  actualStatus?: CustomerActualStatus;
+  statusConflictReason?: string | null;
+  riskApplicable?: boolean;
+  predictedRiskLabel?: PredictedRiskLabel;
   predictedChurn: 'Likely to Churn' | 'Likely to Stay';
   churnProbability: number; // 0..1
   riskCategory: RiskCategory;
@@ -542,6 +633,8 @@ export interface ModelEvaluationResult {
   trainedAt: string;
   datasetId?: string;
   datasetSize?: number;
+  isOutdated?: boolean;
+  outdatedReason?: string | null;
   splitStrategy?: SplitStrategy;
   dateColumnUsed?: string | null;
   leakageWarnings?: string[];
@@ -775,6 +868,10 @@ export interface CustomerValueRecord {
   customerId: string;
   customerName: string;
   segment: string;
+  actualStatus?: CustomerActualStatus;
+  statusConflictReason?: string | null;
+  riskApplicable?: boolean;
+  predictedRiskLabel?: PredictedRiskLabel;
   valueScore: number; // 0..100 composite weighted percentile
   valueSegment: ValueSegmentTier;
   valueFactors: CustomerValueFactorContribution[];
@@ -783,12 +880,12 @@ export interface CustomerValueRecord {
   annualizedRevenue: number | null;
   profitContribution: number | null;
   profitMarginPct: number | null;
-  churnProbability: number | null; // null when no validated model prediction applies
+  churnProbability: number | null; // null when no validated model prediction applies or customer already churned
   riskCategory: RiskCategory | null;
   riskAvailable: boolean;
   quadrant: ValueMatrixQuadrant;
   quadrantLabel: string;
-  expectedRevenueExposure: number | null; // annualizedRevenue * churnProbability ONLY when both exist
+  expectedRevenueExposure: number | null; // annualizedRevenue * churnProbability ONLY when both exist and customer is Active
   riskFactors: string[];
   retentionPriority: 'Critical' | 'High' | 'Medium' | 'Low' | 'Unavailable';
 }
@@ -826,6 +923,9 @@ export interface CustomerValueSummary {
   datasetId: string;
   generatedAt: string;
   totalCustomers: number;
+  activeCustomersCount?: number;
+  churnedCustomersCount?: number;
+  inconsistentCustomersCount?: number;
   valueAssessmentAvailable: boolean;
   unavailableReason: string | null;
   revenueAvailable: boolean;
@@ -840,8 +940,8 @@ export interface CustomerValueSummary {
   highValueAtRiskCount: number | null;
   totalPortfolioRevenue: number | null;
   totalPortfolioProfit: number | null;
-  atRiskCustomersRevenue: number | null; // Full revenue of customers above highRiskCutoff
-  estimatedExpectedRevenueExposure: number | null; // Sum(annualRevenue * P(churn))
+  atRiskCustomersRevenue: number | null; // Full revenue of ACTIVE customers above highRiskCutoff
+  estimatedExpectedRevenueExposure: number | null; // Sum(annualRevenue * P(churn)) across ACTIVE customers
   highValueAtRiskRevenue: number | null;
   config: CustomerValueConfig;
   criteriaAvailability: ValueCriterionAvailability[];

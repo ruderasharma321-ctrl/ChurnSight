@@ -1,6 +1,5 @@
 import crypto from 'crypto';
 import fs from 'fs';
-import os from 'os';
 import path from 'path';
 import type {
   BusinessModel,
@@ -25,13 +24,21 @@ import {
   INDUSTRY_PROFILES,
 } from '../src/utils/industryConfig.ts';
 import { getSubscriptionPlanSpec } from '../src/utils/subscriptionPlans.ts';
+import { ensurePgSchema, pgQuery, pgWithTransaction } from './database.ts';
 import {
-  isRemoteStoreConfigured,
+  getPersistenceStatus,
+  isDiskPersistenceAllowed,
+  isKvConfigured,
+  isPostgresConfigured,
+  remoteDeleteKey,
   remoteGetJson,
+  remoteMGetJson,
+  remoteSetAdd,
   remoteSetJson,
+  remoteSetMembers,
 } from './remoteStore.ts';
 
-interface StoredCompany {
+export interface StoredCompany {
   id: string;
   name: string;
   email: string;
@@ -50,7 +57,7 @@ interface StoredCompany {
   createdAt: string;
 }
 
-interface StoredUser {
+export interface StoredUser {
   id: string;
   companyId: string;
   fullName: string;
@@ -64,7 +71,7 @@ interface StoredUser {
   lastLoginAt: string | null;
 }
 
-interface StoredSession {
+export interface StoredSession {
   tokenHash: string; // sha256 of opaque cookie token
   userId: string;
   companyId: string;
@@ -85,6 +92,7 @@ export type AuthErrorCode =
   | 'ACCOUNT_NOT_FOUND'
   | 'INVALID_PASSWORD'
   | 'ACCOUNT_DEACTIVATED'
+  | 'DATABASE_NOT_CONFIGURED'
   | 'VALIDATION_ERROR';
 
 export class AuthServiceError extends Error {
@@ -107,17 +115,31 @@ export interface AuthContext {
   rememberMe: boolean;
 }
 
-const DATA_DIR =
-  process.env.CHURNSIGHT_DATA_DIR ||
-  (process.env.VERCEL ? path.join(os.tmpdir(), 'churnsight-data') : path.resolve(process.cwd(), '.data'));
-const DB_FILE = path.join(DATA_DIR, 'churnsight_auth.json');
+function getLocalDataDir(): string | null {
+  if (!isDiskPersistenceAllowed()) return null;
+  const custom = (process.env.CHURNSIGHT_DATA_DIR || '').trim();
+  return custom ? path.resolve(custom) : path.resolve(process.cwd(), '.data');
+}
 
-const REMOTE_AUTH_KEY = 'churnsight:auth:v1';
+function getDbFilePath(): string | null {
+  const dir = getLocalDataDir();
+  return dir ? path.join(dir, 'churnsight_auth.json') : null;
+}
+
+const REMOTE_LEGACY_AUTH_KEY = 'churnsight:auth:v1';
+const KV_CMP_IDS_KEY = 'churnsight:cmp_ids';
+const KV_USR_IDS_KEY = 'churnsight:usr_ids';
+const kvCompanyKey = (companyId: string) => `churnsight:cmp:${companyId}`;
+const kvUserKey = (userId: string) => `churnsight:usr:${userId}`;
+const kvSessionKey = (tokenHash: string) => `churnsight:sess:${tokenHash}`;
+const kvEmailIndexKey = (emailLower: string) => `churnsight:idx:email:${emailLower}`;
+
 const SESSION_SHORT_MS = 8 * 60 * 60 * 1000; // 8 hours
 const SESSION_REMEMBER_MS = 30 * 24 * 60 * 60 * 1000; // 30 days
 const MAX_IMAGE_DATA_URL_LENGTH = 750_000; // ~550KB image limit
 
 let lastDiskMtimeMs = 0;
+let loadedDiskFile: string | null = null;
 let db: AuthDatabase = loadDbFromDisk();
 let lastRemoteHydratedAt = 0;
 let pendingRemoteWrite: Promise<void> | null = null;
@@ -134,15 +156,20 @@ function sanitizeLoadedDb(parsed: Partial<AuthDatabase> | null | undefined): Aut
 }
 
 function loadDbFromDisk(): AuthDatabase {
+  const dbFile = getDbFilePath();
+  if (!dbFile) {
+    return { companies: [], users: [], sessions: [] };
+  }
   try {
-    if (fs.existsSync(DB_FILE)) {
-      const stat = fs.statSync(DB_FILE);
-      const raw = fs.readFileSync(DB_FILE, 'utf-8');
+    if (fs.existsSync(dbFile)) {
+      const stat = fs.statSync(dbFile);
+      const raw = fs.readFileSync(dbFile, 'utf-8');
       if (!raw.trim()) {
         return { companies: [], users: [], sessions: [] };
       }
       const parsed = JSON.parse(raw) as Partial<AuthDatabase>;
       lastDiskMtimeMs = stat.mtimeMs;
+      loadedDiskFile = dbFile;
       return sanitizeLoadedDb(parsed);
     }
   } catch (err) {
@@ -152,81 +179,482 @@ function loadDbFromDisk(): AuthDatabase {
 }
 
 function syncDbFromDiskIfNewer(): void {
-  if (isRemoteStoreConfigured()) return;
+  if (isPostgresConfigured() || isKvConfigured()) return;
+  const dbFile = getDbFilePath();
+  if (!dbFile) return;
   try {
-    if (!fs.existsSync(DB_FILE)) return;
-    const stat = fs.statSync(DB_FILE);
-    if (stat.mtimeMs > lastDiskMtimeMs) {
-      const raw = fs.readFileSync(DB_FILE, 'utf-8');
+    if (!fs.existsSync(dbFile)) {
+      if (loadedDiskFile && loadedDiskFile !== dbFile) {
+        db = { companies: [], users: [], sessions: [] };
+        lastDiskMtimeMs = 0;
+        loadedDiskFile = dbFile;
+      }
+      return;
+    }
+    const stat = fs.statSync(dbFile);
+    if (loadedDiskFile !== dbFile || stat.mtimeMs > lastDiskMtimeMs) {
+      const raw = fs.readFileSync(dbFile, 'utf-8');
       if (!raw.trim()) return;
       const parsed = JSON.parse(raw) as Partial<AuthDatabase>;
       db = sanitizeLoadedDb(parsed);
       lastDiskMtimeMs = stat.mtimeMs;
+      loadedDiskFile = dbFile;
     }
   } catch (err) {
     console.error('Failed to sync auth store from disk:', err);
   }
 }
 
+export function assertPersistenceConfigured(): void {
+  const status = getPersistenceStatus();
+  if (!status.persistent) {
+    throw new AuthServiceError(
+      status.message,
+      'DATABASE_NOT_CONFIGURED',
+      503
+    );
+  }
+}
+
+function enqueueRemoteWrite(taskFn: () => Promise<void>): void {
+  const prev = pendingRemoteWrite || Promise.resolve();
+  const next = prev.catch(() => undefined).then(taskFn);
+  pendingRemoteWrite = next;
+}
+
+function upsertCachedCompany(company: StoredCompany): void {
+  const idx = db.companies.findIndex((c) => c.id === company.id);
+  if (idx >= 0) db.companies[idx] = company;
+  else db.companies.push(company);
+}
+
+function upsertCachedUser(user: StoredUser): void {
+  const idx = db.users.findIndex((u) => u.id === user.id);
+  if (idx >= 0) db.users[idx] = user;
+  else db.users.push(user);
+}
+
+function upsertCachedSession(session: StoredSession): void {
+  const idx = db.sessions.findIndex((s) => s.tokenHash === session.tokenHash);
+  if (idx >= 0) db.sessions[idx] = session;
+  else db.sessions.push(session);
+}
+
+function mapPgCompanyRow(r: Record<string, any>): StoredCompany {
+  return {
+    id: String(r.id),
+    name: String(r.name),
+    email: String(r.email),
+    registrationNumber: r.registration_number ? String(r.registration_number) : null,
+    logoDataUrl: r.logo_data_url ? String(r.logo_data_url) : null,
+    industry: (r.industry || 'telecommunications') as IndustryKey,
+    customIndustryName: r.custom_industry_name ? String(r.custom_industry_name) : null,
+    country: r.country ? String(r.country) : 'Malaysia',
+    businessType: (r.business_type || 'B2C') as BusinessType,
+    businessModel: (r.business_model || 'Subscription / Recurring') as BusinessModel,
+    customerRelationshipType: r.customer_relationship_type || undefined,
+    subscriptionPlan: (r.subscription_plan || 'free_trial') as SubscriptionPlanTier,
+    satisfactionScale: (r.satisfaction_scale || '1-5') as SatisfactionScale,
+    churnDefinition: r.churn_definition || undefined,
+    privacySettings: r.privacy_settings || undefined,
+    createdAt:
+      r.created_at instanceof Date ? r.created_at.toISOString() : String(r.created_at),
+  };
+}
+
+function mapPgUserRow(r: Record<string, any>): StoredUser {
+  return {
+    id: String(r.id),
+    companyId: String(r.company_id),
+    fullName: String(r.full_name),
+    email: normalizeEmail(String(r.email)),
+    passwordHash: String(r.password_hash),
+    role: String(r.role) as UserRole,
+    isActive: Boolean(r.is_active),
+    avatarDataUrl: r.avatar_data_url ? String(r.avatar_data_url) : null,
+    permissions: r.permissions || { canUploadAndAnalyse: true, canGeneratePredictions: true },
+    createdAt:
+      r.created_at instanceof Date ? r.created_at.toISOString() : String(r.created_at),
+    lastLoginAt: r.last_login_at
+      ? r.last_login_at instanceof Date
+        ? r.last_login_at.toISOString()
+        : String(r.last_login_at)
+      : null,
+  };
+}
+
+function mapPgSessionRow(r: Record<string, any>): StoredSession {
+  return {
+    tokenHash: String(r.token_hash),
+    userId: String(r.user_id),
+    companyId: String(r.company_id),
+    rememberMe: Boolean(r.remember_me),
+    createdAt:
+      r.created_at instanceof Date ? r.created_at.toISOString() : String(r.created_at),
+    expiresAt:
+      r.expires_at instanceof Date ? r.expires_at.toISOString() : String(r.expires_at),
+  };
+}
+
+async function pgUpsertCompany(company: StoredCompany): Promise<void> {
+  await pgQuery(
+    `INSERT INTO companies (
+      id, name, name_lower, email, registration_number, logo_data_url, industry,
+      custom_industry_name, country, business_type, business_model, customer_relationship_type,
+      subscription_plan, satisfaction_scale, churn_definition, privacy_settings, created_at
+    ) VALUES (
+      $1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17
+    )
+    ON CONFLICT (id) DO UPDATE SET
+      name = EXCLUDED.name,
+      name_lower = EXCLUDED.name_lower,
+      email = EXCLUDED.email,
+      registration_number = EXCLUDED.registration_number,
+      logo_data_url = EXCLUDED.logo_data_url,
+      industry = EXCLUDED.industry,
+      custom_industry_name = EXCLUDED.custom_industry_name,
+      country = EXCLUDED.country,
+      business_type = EXCLUDED.business_type,
+      business_model = EXCLUDED.business_model,
+      customer_relationship_type = EXCLUDED.customer_relationship_type,
+      subscription_plan = EXCLUDED.subscription_plan,
+      satisfaction_scale = EXCLUDED.satisfaction_scale,
+      churn_definition = EXCLUDED.churn_definition,
+      privacy_settings = EXCLUDED.privacy_settings`,
+    [
+      company.id,
+      company.name,
+      company.name.trim().toLowerCase(),
+      company.email,
+      company.registrationNumber,
+      company.logoDataUrl,
+      company.industry || 'telecommunications',
+      company.customIndustryName ?? null,
+      company.country || 'Malaysia',
+      company.businessType || 'B2C',
+      company.businessModel || 'Subscription / Recurring',
+      company.customerRelationshipType ?? null,
+      company.subscriptionPlan || 'free_trial',
+      company.satisfactionScale || '1-5',
+      company.churnDefinition ? JSON.stringify(company.churnDefinition) : null,
+      company.privacySettings ? JSON.stringify(company.privacySettings) : null,
+      company.createdAt,
+    ]
+  );
+}
+
+async function pgUpsertUser(user: StoredUser): Promise<void> {
+  await pgQuery(
+    `INSERT INTO users (
+      id, company_id, full_name, email, email_lower, password_hash, role,
+      is_active, avatar_data_url, permissions, created_at, last_login_at
+    ) VALUES (
+      $1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12
+    )
+    ON CONFLICT (id) DO UPDATE SET
+      full_name = EXCLUDED.full_name,
+      email = EXCLUDED.email,
+      email_lower = EXCLUDED.email_lower,
+      password_hash = EXCLUDED.password_hash,
+      role = EXCLUDED.role,
+      is_active = EXCLUDED.is_active,
+      avatar_data_url = EXCLUDED.avatar_data_url,
+      permissions = EXCLUDED.permissions,
+      last_login_at = EXCLUDED.last_login_at`,
+    [
+      user.id,
+      user.companyId,
+      user.fullName,
+      user.email,
+      normalizeEmail(user.email),
+      user.passwordHash,
+      user.role,
+      user.isActive,
+      user.avatarDataUrl,
+      JSON.stringify(user.permissions),
+      user.createdAt,
+      user.lastLoginAt,
+    ]
+  );
+}
+
+async function kvPersistCompany(company: StoredCompany): Promise<void> {
+  await Promise.all([
+    remoteSetJson(kvCompanyKey(company.id), company),
+    remoteSetAdd(KV_CMP_IDS_KEY, company.id),
+  ]);
+}
+
+async function kvPersistUser(user: StoredUser): Promise<void> {
+  await Promise.all([
+    remoteSetJson(kvUserKey(user.id), user),
+    remoteSetAdd(KV_USR_IDS_KEY, user.id),
+    remoteSetJson(kvEmailIndexKey(normalizeEmail(user.email)), user.id),
+  ]);
+}
+
+async function kvPersistSession(session: StoredSession): Promise<void> {
+  const ttlSec = Math.max(60, Math.ceil((new Date(session.expiresAt).getTime() - Date.now()) / 1000));
+  await remoteSetJson(kvSessionKey(session.tokenHash), session, ttlSec);
+}
+
+async function hydrateFromPostgres(): Promise<void> {
+  await ensurePgSchema();
+  const [cmpRes, usrRes, sessRes] = await Promise.all([
+    pgQuery('SELECT * FROM companies ORDER BY created_at ASC'),
+    pgQuery('SELECT * FROM users ORDER BY created_at ASC'),
+    pgQuery('SELECT * FROM sessions WHERE expires_at > NOW()'),
+  ]);
+  db = {
+    companies: cmpRes.rows.map(mapPgCompanyRow),
+    users: usrRes.rows.map(mapPgUserRow),
+    sessions: sessRes.rows.map(mapPgSessionRow),
+  };
+  lastRemoteHydratedAt = Date.now();
+}
+
+async function hydrateFromKv(): Promise<void> {
+  const [cmpIds, usrIds] = await Promise.all([
+    remoteSetMembers(KV_CMP_IDS_KEY),
+    remoteSetMembers(KV_USR_IDS_KEY),
+  ]);
+
+  if (cmpIds.length === 0 && usrIds.length === 0) {
+    // Seamless read migration from legacy single-key KV blob if present
+    const legacy = await remoteGetJson<Partial<AuthDatabase>>(REMOTE_LEGACY_AUTH_KEY);
+    if (legacy && ((legacy.companies?.length || 0) > 0 || (legacy.users?.length || 0) > 0)) {
+      const cleaned = sanitizeLoadedDb(legacy);
+      db = cleaned;
+      await Promise.all([
+        ...cleaned.companies.map(kvPersistCompany),
+        ...cleaned.users.map(kvPersistUser),
+        ...cleaned.sessions.map(kvPersistSession),
+      ]);
+      lastRemoteHydratedAt = Date.now();
+      return;
+    }
+  }
+
+  const [companiesRaw, usersRaw] = await Promise.all([
+    cmpIds.length > 0 ? remoteMGetJson<StoredCompany>(cmpIds.map(kvCompanyKey)) : Promise.resolve([]),
+    usrIds.length > 0 ? remoteMGetJson<StoredUser>(usrIds.map(kvUserKey)) : Promise.resolve([]),
+  ]);
+
+  const companies = companiesRaw.filter((c): c is StoredCompany => Boolean(c));
+  const users = usersRaw.filter((u): u is StoredUser => Boolean(u));
+
+  // Keep valid in-memory sessions and merge cleanly
+  const now = Date.now();
+  const validExistingSessions = db.sessions.filter((s) => new Date(s.expiresAt).getTime() > now);
+
+  db = {
+    companies,
+    users,
+    sessions: validExistingSessions,
+  };
+  lastRemoteHydratedAt = Date.now();
+}
+
 export async function ensureAuthHydrated(force = false): Promise<void> {
-  if (!isRemoteStoreConfigured()) {
-    syncDbFromDiskIfNewer();
-    return;
-  }
-  // On serverless instances, re-hydrate periodically or when memory is empty so concurrent instances stay consistent
-  const stale = Date.now() - lastRemoteHydratedAt > 2000;
-  if (!force && !stale && db.users.length > 0) {
-    return;
-  }
-  try {
+  if (isPostgresConfigured()) {
+    const stale = Date.now() - lastRemoteHydratedAt > 2000;
+    if (!force && !stale && db.users.length > 0) return;
     if (pendingRemoteWrite) {
       await pendingRemoteWrite;
     }
-    const remote = await remoteGetJson<Partial<AuthDatabase>>(REMOTE_AUTH_KEY);
-    if (remote) {
-      db = sanitizeLoadedDb(remote);
-      saveDbToDiskOnly();
-    }
-    lastRemoteHydratedAt = Date.now();
-  } catch (err) {
-    console.error('Failed to hydrate auth store from remote KV:', err);
+    await hydrateFromPostgres();
+    return;
   }
+
+  if (isKvConfigured()) {
+    const stale = Date.now() - lastRemoteHydratedAt > 2000;
+    if (!force && !stale && db.users.length > 0) return;
+    if (pendingRemoteWrite) {
+      await pendingRemoteWrite;
+    }
+    await hydrateFromKv();
+    return;
+  }
+
+  syncDbFromDiskIfNewer();
+}
+
+/**
+ * Direct session lookup across serverless instances by SHA-256 token hash.
+ * Ensures a session created on Instance A is immediately recognized on Instance B.
+ */
+export async function hydrateSessionByToken(rawToken: string | undefined): Promise<AuthContext | null> {
+  if (!rawToken) return null;
+  const tokenHash = hashSessionToken(rawToken);
+
+  if (isPostgresConfigured()) {
+    if (pendingRemoteWrite) {
+      await pendingRemoteWrite;
+    }
+    await ensurePgSchema();
+    const res = await pgQuery(
+      `SELECT
+         s.token_hash, s.user_id, s.company_id, s.remember_me, s.created_at AS s_created_at, s.expires_at,
+         u.full_name, u.email AS u_email, u.password_hash, u.role, u.is_active, u.avatar_data_url, u.permissions, u.created_at AS u_created_at, u.last_login_at,
+         c.name AS c_name, c.email AS c_email, c.registration_number, c.logo_data_url, c.industry, c.custom_industry_name,
+         c.country, c.business_type, c.business_model, c.customer_relationship_type, c.subscription_plan,
+         c.satisfaction_scale, c.churn_definition, c.privacy_settings, c.created_at AS c_created_at
+       FROM sessions s
+       JOIN users u ON u.id = s.user_id AND u.company_id = s.company_id
+       JOIN companies c ON c.id = s.company_id
+       WHERE s.token_hash = $1 AND s.expires_at > NOW() AND u.is_active = TRUE
+       LIMIT 1`,
+      [tokenHash]
+    );
+    if (res.rows.length === 0) {
+      db.sessions = db.sessions.filter((s) => s.tokenHash !== tokenHash);
+      return null;
+    }
+    const r = res.rows[0];
+    const company = mapPgCompanyRow({
+      id: r.company_id,
+      name: r.c_name,
+      email: r.c_email,
+      registration_number: r.registration_number,
+      logo_data_url: r.logo_data_url,
+      industry: r.industry,
+      custom_industry_name: r.custom_industry_name,
+      country: r.country,
+      business_type: r.business_type,
+      business_model: r.business_model,
+      customer_relationship_type: r.customer_relationship_type,
+      subscription_plan: r.subscription_plan,
+      satisfaction_scale: r.satisfaction_scale,
+      churn_definition: r.churn_definition,
+      privacy_settings: r.privacy_settings,
+      created_at: r.c_created_at,
+    });
+    const user = mapPgUserRow({
+      id: r.user_id,
+      company_id: r.company_id,
+      full_name: r.full_name,
+      email: r.u_email,
+      password_hash: r.password_hash,
+      role: r.role,
+      is_active: r.is_active,
+      avatar_data_url: r.avatar_data_url,
+      permissions: r.permissions,
+      created_at: r.u_created_at,
+      last_login_at: r.last_login_at,
+    });
+    const session = mapPgSessionRow({
+      token_hash: r.token_hash,
+      user_id: r.user_id,
+      company_id: r.company_id,
+      remember_me: r.remember_me,
+      created_at: r.s_created_at,
+      expires_at: r.expires_at,
+    });
+    upsertCachedCompany(company);
+    upsertCachedUser(user);
+    upsertCachedSession(session);
+    return {
+      tokenHash,
+      user: toPublicUser(user),
+      company: toPublicCompany(company),
+      expiresAt: session.expiresAt,
+      rememberMe: session.rememberMe,
+    };
+  }
+
+  if (isKvConfigured()) {
+    if (pendingRemoteWrite) {
+      await pendingRemoteWrite;
+    }
+    const sess = await remoteGetJson<StoredSession>(kvSessionKey(tokenHash));
+    if (!sess || new Date(sess.expiresAt).getTime() <= Date.now()) {
+      // Fallback to legacy blob check in case session existed before upgrade
+      const legacy = await remoteGetJson<Partial<AuthDatabase>>(REMOTE_LEGACY_AUTH_KEY);
+      const legacySess = legacy?.sessions?.find((s) => s.tokenHash === tokenHash);
+      if (legacySess && new Date(legacySess.expiresAt).getTime() > Date.now()) {
+        const legacyUser = legacy?.users?.find((u) => u.id === legacySess.userId);
+        const legacyCmp = legacy?.companies?.find((c) => c.id === legacySess.companyId);
+        if (legacyUser && legacyCmp && legacyUser.isActive) {
+          upsertCachedCompany(legacyCmp);
+          upsertCachedUser(legacyUser);
+          upsertCachedSession(legacySess);
+          await Promise.all([
+            kvPersistCompany(legacyCmp),
+            kvPersistUser(legacyUser),
+            kvPersistSession(legacySess),
+          ]);
+          return {
+            tokenHash,
+            user: toPublicUser(legacyUser),
+            company: toPublicCompany(legacyCmp),
+            expiresAt: legacySess.expiresAt,
+            rememberMe: Boolean(legacySess.rememberMe),
+          };
+        }
+      }
+      db.sessions = db.sessions.filter((s) => s.tokenHash !== tokenHash);
+      return null;
+    }
+
+    const [user, company] = await Promise.all([
+      remoteGetJson<StoredUser>(kvUserKey(sess.userId)),
+      remoteGetJson<StoredCompany>(kvCompanyKey(sess.companyId)),
+    ]);
+    if (!user || !company || !user.isActive) {
+      await remoteDeleteKey(kvSessionKey(tokenHash)).catch(() => undefined);
+      db.sessions = db.sessions.filter((s) => s.tokenHash !== tokenHash);
+      return null;
+    }
+    upsertCachedCompany(company);
+    upsertCachedUser(user);
+    upsertCachedSession(sess);
+    return {
+      tokenHash,
+      user: toPublicUser(user),
+      company: toPublicCompany(company),
+      expiresAt: sess.expiresAt,
+      rememberMe: Boolean(sess.rememberMe),
+    };
+  }
+
+  syncDbFromDiskIfNewer();
+  return getSessionContext(rawToken);
 }
 
 export async function flushPendingAuthWrites(): Promise<void> {
   if (pendingRemoteWrite) {
-    await pendingRemoteWrite;
+    const current = pendingRemoteWrite;
+    try {
+      await current;
+    } finally {
+      if (pendingRemoteWrite === current) {
+        pendingRemoteWrite = null;
+      }
+    }
   }
 }
 
 function saveDbToDiskOnly(): void {
+  const dir = getLocalDataDir();
+  const dbFile = getDbFilePath();
+  if (!dir || !dbFile) return;
   try {
-    if (!fs.existsSync(DATA_DIR)) {
-      fs.mkdirSync(DATA_DIR, { recursive: true });
+    if (!fs.existsSync(dir)) {
+      fs.mkdirSync(dir, { recursive: true });
     }
-    const tmpFile = `${DB_FILE}.${process.pid}.tmp`;
+    const tmpFile = `${dbFile}.${process.pid}.tmp`;
     fs.writeFileSync(tmpFile, JSON.stringify(db, null, 2), { encoding: 'utf-8', mode: 0o600 });
-    fs.renameSync(tmpFile, DB_FILE);
-    lastDiskMtimeMs = fs.statSync(DB_FILE).mtimeMs;
+    fs.renameSync(tmpFile, dbFile);
+    lastDiskMtimeMs = fs.statSync(dbFile).mtimeMs;
+    loadedDiskFile = dbFile;
   } catch (err) {
-    console.error('Failed to persist auth store:', err);
+    console.error('Failed to persist auth store to local disk:', err);
   }
 }
 
-function saveDbToDisk(): void {
-  saveDbToDiskOnly();
-  if (isRemoteStoreConfigured()) {
-    const snapshot = JSON.parse(JSON.stringify(db)) as AuthDatabase;
-    const writeTask = (pendingRemoteWrite || Promise.resolve())
-      .catch(() => undefined)
-      .then(() => remoteSetJson(REMOTE_AUTH_KEY, snapshot))
-      .then(() => {
-        lastRemoteHydratedAt = Date.now();
-      })
-      .catch((err) => {
-        console.error('Failed to persist auth store to remote KV:', err);
-      });
-    pendingRemoteWrite = writeTask;
+function persistDiskIfLocal(): void {
+  if (!isPostgresConfigured() && !isKvConfigured()) {
+    saveDbToDiskOnly();
   }
 }
 
@@ -344,12 +772,12 @@ function toPublicCompany(c: StoredCompany): CompanyWorkspaceInfo {
   };
 }
 
-function pruneExpiredSessions(): void {
+function pruneExpiredSessionsInMemory(): void {
   const now = Date.now();
   const before = db.sessions.length;
   db.sessions = db.sessions.filter((s) => new Date(s.expiresAt).getTime() > now);
   if (db.sessions.length !== before) {
-    saveDbToDisk();
+    persistDiskIfLocal();
   }
 }
 
@@ -357,6 +785,8 @@ export function registerCompanyAndAdmin(input: RegisterCompanyRequest): {
   company: CompanyWorkspaceInfo;
   user: UserAccount;
 } {
+  assertPersistenceConfigured();
+
   const companyName = (input.companyName || '').trim();
   const companyEmail = normalizeEmail(input.companyEmail || '');
   const registrationNumber = (input.registrationNumber || '').trim() || null;
@@ -402,8 +832,12 @@ export function registerCompanyAndAdmin(input: RegisterCompanyRequest): {
   syncDbFromDiskIfNewer();
 
   if (
-    db.users.some((u) => normalizeEmail(u.email) === adminEmail || normalizeEmail(u.email) === companyEmail) ||
-    db.companies.some((c) => normalizeEmail(c.email) === companyEmail || normalizeEmail(c.email) === adminEmail)
+    db.users.some(
+      (u) => normalizeEmail(u.email) === adminEmail || normalizeEmail(u.email) === companyEmail
+    ) ||
+    db.companies.some(
+      (c) => normalizeEmail(c.email) === companyEmail || normalizeEmail(c.email) === adminEmail
+    )
   ) {
     throw new AuthServiceError(
       'This email is already registered. Please log in.',
@@ -433,6 +867,7 @@ export function registerCompanyAndAdmin(input: RegisterCompanyRequest): {
     businessModel,
     customerRelationshipType,
     subscriptionPlan: 'free_trial',
+    satisfactionScale: '1-5',
     churnDefinition: buildDefaultChurnDefinition(industry),
     privacySettings: buildDefaultPrivacySettings(),
     createdAt: now,
@@ -454,7 +889,66 @@ export function registerCompanyAndAdmin(input: RegisterCompanyRequest): {
 
   db.companies.push(company);
   db.users.push(adminUser);
-  saveDbToDisk();
+  persistDiskIfLocal();
+
+  if (isPostgresConfigured()) {
+    enqueueRemoteWrite(async () => {
+      await pgWithTransaction(async (client) => {
+        await client.query(
+          `INSERT INTO companies (
+            id, name, name_lower, email, registration_number, logo_data_url, industry,
+            custom_industry_name, country, business_type, business_model, customer_relationship_type,
+            subscription_plan, satisfaction_scale, churn_definition, privacy_settings, created_at
+          ) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17)`,
+          [
+            company.id,
+            company.name,
+            company.name.trim().toLowerCase(),
+            company.email,
+            company.registrationNumber,
+            company.logoDataUrl,
+            company.industry,
+            company.customIndustryName ?? null,
+            company.country,
+            company.businessType,
+            company.businessModel,
+            company.customerRelationshipType ?? null,
+            company.subscriptionPlan,
+            company.satisfactionScale,
+            JSON.stringify(company.churnDefinition),
+            JSON.stringify(company.privacySettings),
+            company.createdAt,
+          ]
+        );
+        await client.query(
+          `INSERT INTO users (
+            id, company_id, full_name, email, email_lower, password_hash, role,
+            is_active, avatar_data_url, permissions, created_at, last_login_at
+          ) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12)`,
+          [
+            adminUser.id,
+            adminUser.companyId,
+            adminUser.fullName,
+            adminUser.email,
+            normalizeEmail(adminUser.email),
+            adminUser.passwordHash,
+            adminUser.role,
+            adminUser.isActive,
+            adminUser.avatarDataUrl,
+            JSON.stringify(adminUser.permissions),
+            adminUser.createdAt,
+            adminUser.lastLoginAt,
+          ]
+        );
+      });
+      lastRemoteHydratedAt = Date.now();
+    });
+  } else if (isKvConfigured()) {
+    enqueueRemoteWrite(async () => {
+      await Promise.all([kvPersistCompany(company), kvPersistUser(adminUser)]);
+      lastRemoteHydratedAt = Date.now();
+    });
+  }
 
   return {
     company: toPublicCompany(company),
@@ -477,7 +971,7 @@ function issueSessionForStoredUser(
   maxAgeSeconds: number | null;
   context: AuthContext;
 } {
-  pruneExpiredSessions();
+  pruneExpiredSessionsInMemory();
 
   const nowMs = Date.now();
   const ttlMs = rememberMe ? SESSION_REMEMBER_MS : SESSION_SHORT_MS;
@@ -486,16 +980,45 @@ function issueSessionForStoredUser(
 
   const rawToken = crypto.randomBytes(32).toString('hex');
   const tokenHash = hashSessionToken(rawToken);
-
-  db.sessions.push({
+  const newSession: StoredSession = {
     tokenHash,
     userId: user.id,
     companyId: company.id,
     rememberMe,
     createdAt: new Date(nowMs).toISOString(),
     expiresAt,
-  });
-  saveDbToDisk();
+  };
+
+  db.sessions.push(newSession);
+  persistDiskIfLocal();
+
+  if (isPostgresConfigured()) {
+    enqueueRemoteWrite(async () => {
+      await pgWithTransaction(async (client) => {
+        await client.query(`UPDATE users SET last_login_at = $1 WHERE id = $2`, [
+          user.lastLoginAt,
+          user.id,
+        ]);
+        await client.query(
+          `INSERT INTO sessions (token_hash, user_id, company_id, remember_me, created_at, expires_at)
+           VALUES ($1, $2, $3, $4, $5, $6)`,
+          [
+            newSession.tokenHash,
+            newSession.userId,
+            newSession.companyId,
+            newSession.rememberMe,
+            newSession.createdAt,
+            newSession.expiresAt,
+          ]
+        );
+        await client.query(`DELETE FROM sessions WHERE expires_at <= NOW()`);
+      });
+    });
+  } else if (isKvConfigured()) {
+    enqueueRemoteWrite(async () => {
+      await Promise.all([kvPersistUser(user), kvPersistSession(newSession)]);
+    });
+  }
 
   return {
     rawToken,
@@ -520,6 +1043,7 @@ export function createSessionForUser(
   maxAgeSeconds: number | null;
   context: AuthContext;
 } {
+  assertPersistenceConfigured();
   syncDbFromDiskIfNewer();
   const user = db.users.find((u) => u.id === userId);
   if (!user || !user.isActive) {
@@ -538,8 +1062,9 @@ export function authenticateUser(input: LoginRequest): {
   maxAgeSeconds: number | null;
   context: AuthContext;
 } {
+  assertPersistenceConfigured();
   syncDbFromDiskIfNewer();
-  pruneExpiredSessions();
+  pruneExpiredSessionsInMemory();
 
   const email = normalizeEmail(input.email || '');
   const password = input.password || '';
@@ -588,8 +1113,8 @@ export function authenticateUser(input: LoginRequest): {
   return issueSessionForStoredUser(user, company, rememberMe);
 }
 
-const REMEMBER_SLIDING_THRESHOLD_MS = 25 * 24 * 60 * 60 * 1000; // renew if < 25 days left
-const SHORT_SLIDING_THRESHOLD_MS = 4 * 60 * 60 * 1000; // renew if < 4 hours left
+const REMEMBER_SLIDING_THRESHOLD_MS = 25 * 24 * 60 * 60 * 1000;
+const SHORT_SLIDING_THRESHOLD_MS = 4 * 60 * 60 * 1000;
 
 export function getSessionContext(rawToken: string | undefined): AuthContext | null {
   syncDbFromDiskIfNewer();
@@ -600,7 +1125,7 @@ export function getSessionContext(rawToken: string | undefined): AuthContext | n
 
   if (new Date(session.expiresAt).getTime() <= Date.now()) {
     db.sessions = db.sessions.filter((s) => s.tokenHash !== tokenHash);
-    saveDbToDisk();
+    persistDiskIfLocal();
     return null;
   }
 
@@ -608,7 +1133,7 @@ export function getSessionContext(rawToken: string | undefined): AuthContext | n
   const company = db.companies.find((c) => c.id === session.companyId);
   if (!user || !company || !user.isActive) {
     db.sessions = db.sessions.filter((s) => s.tokenHash !== tokenHash);
-    saveDbToDisk();
+    persistDiskIfLocal();
     return null;
   }
 
@@ -639,7 +1164,12 @@ export function refreshSessionIfNeeded(
   const expiresMs = new Date(session.expiresAt).getTime();
   if (expiresMs <= nowMs) {
     db.sessions = db.sessions.filter((s) => s.tokenHash !== tokenHash);
-    saveDbToDisk();
+    persistDiskIfLocal();
+    if (isPostgresConfigured()) {
+      enqueueRemoteWrite(() => pgQuery(`DELETE FROM sessions WHERE token_hash = $1`, [tokenHash]).then(() => undefined));
+    } else if (isKvConfigured()) {
+      enqueueRemoteWrite(() => remoteDeleteKey(kvSessionKey(tokenHash)));
+    }
     return null;
   }
 
@@ -647,7 +1177,7 @@ export function refreshSessionIfNeeded(
   const company = db.companies.find((c) => c.id === session.companyId);
   if (!user || !company || !user.isActive) {
     db.sessions = db.sessions.filter((s) => s.tokenHash !== tokenHash);
-    saveDbToDisk();
+    persistDiskIfLocal();
     return null;
   }
 
@@ -660,7 +1190,17 @@ export function refreshSessionIfNeeded(
   let refreshed = false;
   if (forceExtend || remainingMs < thresholdMs) {
     session.expiresAt = new Date(nowMs + ttlMs).toISOString();
-    saveDbToDisk();
+    persistDiskIfLocal();
+    if (isPostgresConfigured()) {
+      enqueueRemoteWrite(() =>
+        pgQuery(`UPDATE sessions SET expires_at = $1 WHERE token_hash = $2`, [
+          session.expiresAt,
+          tokenHash,
+        ]).then(() => undefined)
+      );
+    } else if (isKvConfigured()) {
+      enqueueRemoteWrite(() => kvPersistSession(session));
+    }
     refreshed = true;
   }
 
@@ -680,24 +1220,47 @@ export function refreshSessionIfNeeded(
 export function revokeSession(rawToken: string | undefined): void {
   if (!rawToken) return;
   const tokenHash = hashSessionToken(rawToken);
-  const before = db.sessions.length;
   db.sessions = db.sessions.filter((s) => s.tokenHash !== tokenHash);
-  if (db.sessions.length !== before) {
-    saveDbToDisk();
+  persistDiskIfLocal();
+
+  if (isPostgresConfigured()) {
+    enqueueRemoteWrite(() =>
+      pgQuery(`DELETE FROM sessions WHERE token_hash = $1`, [tokenHash]).then(() => undefined)
+    );
+  } else if (isKvConfigured()) {
+    enqueueRemoteWrite(() => remoteDeleteKey(kvSessionKey(tokenHash)));
   }
 }
 
 export function revokeUserSessions(userId: string, exceptTokenHash?: string): void {
-  const before = db.sessions.length;
+  const removedHashes = db.sessions
+    .filter((s) => s.userId === userId && (!exceptTokenHash || s.tokenHash !== exceptTokenHash))
+    .map((s) => s.tokenHash);
   db.sessions = db.sessions.filter(
     (s) => s.userId !== userId || (exceptTokenHash && s.tokenHash === exceptTokenHash)
   );
-  if (db.sessions.length !== before) {
-    saveDbToDisk();
+  persistDiskIfLocal();
+
+  if (isPostgresConfigured()) {
+    enqueueRemoteWrite(async () => {
+      if (exceptTokenHash) {
+        await pgQuery(`DELETE FROM sessions WHERE user_id = $1 AND token_hash <> $2`, [
+          userId,
+          exceptTokenHash,
+        ]);
+      } else {
+        await pgQuery(`DELETE FROM sessions WHERE user_id = $1`, [userId]);
+      }
+    });
+  } else if (isKvConfigured() && removedHashes.length > 0) {
+    enqueueRemoteWrite(async () => {
+      await Promise.all(removedHashes.map((h) => remoteDeleteKey(kvSessionKey(h))));
+    });
   }
 }
 
 export function checkEmailRegisteredForReset(emailInput: string): boolean {
+  assertPersistenceConfigured();
   syncDbFromDiskIfNewer();
   const email = normalizeEmail(emailInput || '');
   if (!isValidEmail(email)) {
@@ -710,6 +1273,7 @@ export function updateOwnProfile(
   userId: string,
   updates: { fullName?: string; avatarDataUrl?: string | null }
 ): UserAccount {
+  assertPersistenceConfigured();
   syncDbFromDiskIfNewer();
   const user = db.users.find((u) => u.id === userId);
   if (!user) throw new Error('User account not found.');
@@ -726,7 +1290,12 @@ export function updateOwnProfile(
     user.avatarDataUrl = validateImageDataUrl(updates.avatarDataUrl);
   }
 
-  saveDbToDisk();
+  persistDiskIfLocal();
+  if (isPostgresConfigured()) {
+    enqueueRemoteWrite(() => pgUpsertUser(user));
+  } else if (isKvConfigured()) {
+    enqueueRemoteWrite(() => kvPersistUser(user));
+  }
   return toPublicUser(user);
 }
 
@@ -737,6 +1306,7 @@ export function changeOwnPassword(
   confirmNewPassword: string,
   currentTokenHash?: string
 ): void {
+  assertPersistenceConfigured();
   syncDbFromDiskIfNewer();
   const user = db.users.find((u) => u.id === userId);
   if (!user) throw new Error('User account not found.');
@@ -760,8 +1330,13 @@ export function changeOwnPassword(
   }
 
   user.passwordHash = hashPassword(newPassword);
-  saveDbToDisk();
-  // Invalidate any other active sessions for this user
+  persistDiskIfLocal();
+
+  if (isPostgresConfigured()) {
+    enqueueRemoteWrite(() => pgUpsertUser(user));
+  } else if (isKvConfigured()) {
+    enqueueRemoteWrite(() => kvPersistUser(user));
+  }
   revokeUserSessions(userId, currentTokenHash);
 }
 
@@ -784,6 +1359,7 @@ export function updateCompanyProfile(
     privacySettings?: Partial<DataPrivacySettings>;
   }
 ): CompanyWorkspaceInfo {
+  assertPersistenceConfigured();
   syncDbFromDiskIfNewer();
   const company = db.companies.find((c) => c.id === companyId);
   if (!company) throw new Error('Company workspace not found.');
@@ -886,7 +1462,6 @@ export function updateCompanyProfile(
       ...basePrivacy,
       allowSharedModelContribution: allowShared,
       optInCrossCompanyBaseline: optInBaseline,
-      // Always reflect honest validation reality: no unvalidated pre-trained cross-company weights exist yet
       crossCompanyValidationStatus:
         allowShared || optInBaseline
           ? 'unvalidated_architecture_only'
@@ -895,7 +1470,12 @@ export function updateCompanyProfile(
     };
   }
 
-  saveDbToDisk();
+  persistDiskIfLocal();
+  if (isPostgresConfigured()) {
+    enqueueRemoteWrite(() => pgUpsertCompany(company));
+  } else if (isKvConfigured()) {
+    enqueueRemoteWrite(() => kvPersistCompany(company));
+  }
   return toPublicCompany(company);
 }
 
@@ -928,6 +1508,8 @@ export function createCompanyUser(
     permissions?: Partial<UserPermissions>;
   }
 ): UserAccount {
+  assertPersistenceConfigured();
+  syncDbFromDiskIfNewer();
   const company = db.companies.find((c) => c.id === companyId);
   if (!company) {
     throw new Error('Company workspace not found.');
@@ -956,7 +1538,6 @@ export function createCompanyUser(
   if (pwError) {
     throw new Error(pwError);
   }
-  syncDbFromDiskIfNewer();
   if (db.users.some((u) => normalizeEmail(u.email) === email)) {
     throw new Error('An account with this email address already exists.');
   }
@@ -990,7 +1571,12 @@ export function createCompanyUser(
   };
 
   db.users.push(user);
-  saveDbToDisk();
+  persistDiskIfLocal();
+  if (isPostgresConfigured()) {
+    enqueueRemoteWrite(() => pgUpsertUser(user));
+  } else if (isKvConfigured()) {
+    enqueueRemoteWrite(() => kvPersistUser(user));
+  }
   return toPublicUser(user);
 }
 
@@ -1005,6 +1591,8 @@ export function updateCompanyUser(
     newPassword?: string;
   }
 ): UserAccount {
+  assertPersistenceConfigured();
+  syncDbFromDiskIfNewer();
   const user = db.users.find((u) => u.id === targetUserId && u.companyId === companyId);
   if (!user) {
     throw new Error('User not found in your company workspace.');
@@ -1014,6 +1602,8 @@ export function updateCompanyUser(
     (u) => u.companyId === companyId && u.role === 'FIRM_ADMIN' && u.isActive
   );
 
+  let sessionsInvalidated = false;
+
   if (updates.isActive !== undefined && !updates.isActive) {
     if (user.id === actingUserId) {
       throw new Error('You cannot deactivate your own active administrator account.');
@@ -1022,7 +1612,7 @@ export function updateCompanyUser(
       throw new Error('At least one active Firm Admin must remain in the company workspace.');
     }
     user.isActive = false;
-    revokeUserSessions(user.id);
+    sessionsInvalidated = true;
   } else if (updates.isActive === true) {
     user.isActive = true;
   }
@@ -1062,9 +1652,17 @@ export function updateCompanyUser(
       throw new Error(pwError);
     }
     user.passwordHash = hashPassword(updates.newPassword);
-    revokeUserSessions(user.id);
+    sessionsInvalidated = true;
   }
 
-  saveDbToDisk();
+  persistDiskIfLocal();
+  if (isPostgresConfigured()) {
+    enqueueRemoteWrite(() => pgUpsertUser(user));
+  } else if (isKvConfigured()) {
+    enqueueRemoteWrite(() => kvPersistUser(user));
+  }
+  if (sessionsInvalidated) {
+    revokeUserSessions(user.id);
+  }
   return toPublicUser(user);
 }

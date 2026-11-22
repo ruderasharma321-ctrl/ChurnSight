@@ -31,6 +31,7 @@ const DEFAULT_FILTERS: AnalyticsFilters = {
   churnStatus: 'ALL',
   tenureGroup: 'ALL',
   paymentMethod: 'ALL',
+  reportingPeriod: 'ALL',
 };
 
 export const DataAnalysisView: React.FC<DataAnalysisViewProps> = ({
@@ -72,7 +73,8 @@ export const DataAnalysisView: React.FC<DataAnalysisViewProps> = ({
       (!nextFilters.contract || nextFilters.contract === 'ALL') &&
       (!nextFilters.churnStatus || nextFilters.churnStatus === 'ALL') &&
       (!nextFilters.tenureGroup || nextFilters.tenureGroup === 'ALL') &&
-      (!nextFilters.paymentMethod || nextFilters.paymentMethod === 'ALL');
+      (!nextFilters.paymentMethod || nextFilters.paymentMethod === 'ALL') &&
+      (!nextFilters.reportingPeriod || nextFilters.reportingPeriod === 'ALL');
 
     if (isDefault) {
       setFilteredAnalytics(analytics);
@@ -126,9 +128,12 @@ export const DataAnalysisView: React.FC<DataAnalysisViewProps> = ({
     (filters.contract && filters.contract !== 'ALL') ||
     (filters.churnStatus && filters.churnStatus !== 'ALL') ||
     (filters.tenureGroup && filters.tenureGroup !== 'ALL') ||
-    (filters.paymentMethod && filters.paymentMethod !== 'ALL');
+    (filters.paymentMethod && filters.paymentMethod !== 'ALL') ||
+    (filters.reportingPeriod && filters.reportingPeriod !== 'ALL');
 
   const baseTotal = analytics?.totalCustomers ?? activeData.totalCustomers;
+  const hp = activeData.historicalPerformance;
+  const historicalRateReliable = hp ? hp.historicalRateReliable : !activeData.isUnlabeledColdStart;
 
   return (
     <div className="space-y-6">
@@ -137,32 +142,52 @@ export const DataAnalysisView: React.FC<DataAnalysisViewProps> = ({
         <div>
           <h1 className="text-2xl font-bold text-[#15152F] tracking-tight">Business Analytics</h1>
           <p className="text-sm text-slate-600 mt-0.5">
-            {tmpl.label} charts computed dynamically from{' '}
             <span className="font-semibold text-[#15152F]">{dataset.fileName}</span>
-            {dataset.isSample ? ' (Demonstration Data)' : ''} ·{' '}
+            {dataset.isSample ? ' (Demo)' : ''} ·{' '}
             <span className="font-mono tabular-nums font-bold text-[#7655E8]">
               {activeData.totalCustomers.toLocaleString()}
             </span>
-            {hasActiveFilter ? ` of ${baseTotal.toLocaleString()} filtered` : ''} valid records
+            {hasActiveFilter ? ` of ${baseTotal.toLocaleString()} filtered` : ''} records
           </p>
         </div>
 
         <div className="text-xs font-medium text-slate-600 font-mono tabular-nums bg-white border border-purple-100 rounded-xl px-3.5 py-2 shadow-xs">
-          {activeData.isUnlabeledColdStart ? (
+          {activeData.isUnlabeledColdStart || !historicalRateReliable ? (
             <>
-              Mode:{' '}
-              <span className="font-bold text-[#397BFF]">
-                Cold-Start Segmentation &amp; Monitoring
+              Historical Churn Rate:{' '}
+              <span className="font-bold text-amber-700">
+                {activeData.isUnlabeledColdStart ? 'Unavailable (Cold-Start)' : 'Unavailable'}
               </span>
             </>
           ) : (
             <>
               Historical Churn Rate:{' '}
-              <span className="font-bold text-[#D63384]">{activeData.churnRate.toFixed(1)}%</span>
+              <span className="font-bold text-[#DC2626]">
+                {(hp?.historicalChurnRate ?? activeData.churnRate).toFixed(1)}%
+              </span>
             </>
           )}
         </div>
       </div>
+
+      {hp && !hp.historicalRateReliable && hp.historicalRateNotice && (
+        <div className="bg-amber-50 border border-amber-300 rounded-2xl p-4 flex items-start gap-2.5 text-xs text-amber-950">
+          <AlertTriangle className="w-4 h-4 text-amber-700 shrink-0 mt-0.5" />
+          <div>
+            <strong>Historical Rate Reliability Notice:</strong> {hp.historicalRateNotice}
+          </div>
+        </div>
+      )}
+
+      {hp && hp.inconsistentRecordsCount > 0 && (
+        <div className="bg-amber-50 border border-amber-300 rounded-2xl p-4 flex items-start gap-2.5 text-xs text-amber-950">
+          <AlertTriangle className="w-4 h-4 text-amber-700 shrink-0 mt-0.5" />
+          <div>
+            <strong>Inconsistent Status Records ({hp.inconsistentRecordsCount}):</strong>{' '}
+            Conflicting churn labels or cancellation/registration dates were detected and excluded from clean historical rates so figures remain trustworthy.
+          </div>
+        </div>
+      )}
 
       {dataset.hasValidChurnLabels === false && dataset.churnReadinessMessage && (
         <div className="bg-amber-50 border border-amber-300 rounded-2xl p-4 flex items-start gap-2.5 text-xs text-amber-950">
@@ -275,6 +300,26 @@ export const DataAnalysisView: React.FC<DataAnalysisViewProps> = ({
                 {activeData.filterOptions.paymentMethods.map((pm) => (
                   <option key={pm} value={pm}>
                     {pm}
+                  </option>
+                ))}
+              </select>
+            </div>
+          )}
+
+          {(activeData.filterOptions.reportingPeriods?.length || 0) > 0 && (
+            <div>
+              <label className="block text-xs font-semibold text-[#4C4A6E] mb-1">
+                Reporting Period
+              </label>
+              <select
+                value={filters.reportingPeriod || 'ALL'}
+                onChange={(e) => applyFilters({ ...filters, reportingPeriod: e.target.value })}
+                className="w-full rounded-xl border border-purple-200 bg-[#F6F3FF]/40 px-3 py-2 text-xs font-medium text-[#15152F] focus:outline-none focus:border-[#7655E8]"
+              >
+                <option value="ALL">All Periods</option>
+                {activeData.filterOptions.reportingPeriods!.map((period) => (
+                  <option key={period} value={period}>
+                    {period}
                   </option>
                 ))}
               </select>
@@ -577,8 +622,8 @@ export const DataAnalysisView: React.FC<DataAnalysisViewProps> = ({
         !activeData.tenureStats ||
         !activeData.monthlyChargesComparison ||
         !activeData.paymentMethodStats) && (
-        <p className="text-xs text-slate-500">
-          Note: Charts for unmapped columns (
+        <p className="text-xs text-slate-400">
+          Hidden unmapped charts:{' '}
           {[
             !activeData.contractStats ? tmpl.segmentLabel : null,
             !activeData.tenureStats ? tmpl.tenureLabel : null,
@@ -587,7 +632,6 @@ export const DataAnalysisView: React.FC<DataAnalysisViewProps> = ({
           ]
             .filter(Boolean)
             .join(', ')}
-          ) are hidden because those fields are not present or mapped in this dataset.
         </p>
       )}
     </div>

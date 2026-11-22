@@ -64,6 +64,7 @@ export const DataReadinessPanel: React.FC<DataReadinessPanelProps> = ({
   const [isRecording, setIsRecording] = useState(false);
   const [recordFeedback, setRecordFeedback] = useState<string | null>(null);
   const [recordError, setRecordError] = useState<string | null>(null);
+  const [showScoreBreakdown, setShowScoreBreakdown] = useState(false);
 
   if (!readiness) {
     return null;
@@ -306,93 +307,102 @@ export const DataReadinessPanel: React.FC<DataReadinessPanelProps> = ({
         </div>
       </div>
 
-      {/* Weighted Score Breakdown & Statistical Validation Rationale */}
-      <div className="grid grid-cols-1 lg:grid-cols-12 gap-5">
-        <div className="lg:col-span-7 border border-purple-100 rounded-xl p-4 space-y-3">
-          <div className="flex items-center justify-between gap-2">
-            <h3 className="text-xs font-bold text-[#11142B]">Weighted Readiness Factors</h3>
-            <span className="text-[11px] font-mono text-slate-500 tabular-nums">
-              {readiness.datasetProfile.churnedCount} churned · {readiness.datasetProfile.retainedCount} retained · {readiness.datasetProfile.usableFeatureCount} features
-            </span>
+      {/* Weighted Score Breakdown (Progressive Disclosure) */}
+      <div className="border-t border-purple-100 pt-4 space-y-4">
+        <div className="flex flex-wrap items-center justify-between gap-2">
+          <div className="text-xs text-slate-600 font-mono">
+            {readiness.datasetProfile.churnedCount} churned · {readiness.datasetProfile.retainedCount} retained · {readiness.datasetProfile.usableFeatureCount} features
           </div>
+          <button
+            type="button"
+            onClick={() => setShowScoreBreakdown((prev) => !prev)}
+            className="text-xs font-semibold text-[#7655E8] hover:text-[#E84FA8] cursor-pointer"
+          >
+            {showScoreBreakdown ? 'Hide Readiness Breakdown' : 'View Readiness Breakdown →'}
+          </button>
+        </div>
 
-          <div className="space-y-2.5">
-            {readiness.scoreBreakdown.map((factor) => {
-              const pct = factor.maxScore > 0 ? Math.round((factor.score / factor.maxScore) * 100) : 0;
-              return (
-                <div key={factor.label} className="space-y-1">
-                  <div className="flex items-center justify-between text-xs">
-                    <span className="font-semibold text-[#11142B]">{factor.label}</span>
-                    <span className="font-mono tabular-nums font-bold text-[#7655E8]">
-                      {factor.score} / {factor.maxScore}
-                    </span>
+        {showScoreBreakdown && (
+          <div className="grid grid-cols-1 lg:grid-cols-12 gap-5">
+            <div className="lg:col-span-7 border border-purple-100 rounded-xl p-4 space-y-3">
+              <h3 className="text-xs font-bold text-[#11142B]">Weighted Readiness Factors</h3>
+              <div className="space-y-2.5">
+                {readiness.scoreBreakdown.map((factor) => {
+                  const pct = factor.maxScore > 0 ? Math.round((factor.score / factor.maxScore) * 100) : 0;
+                  return (
+                    <div key={factor.label} className="space-y-1">
+                      <div className="flex items-center justify-between text-xs">
+                        <span className="font-semibold text-[#11142B]">{factor.label}</span>
+                        <span className="font-mono tabular-nums font-bold text-[#7655E8]">
+                          {factor.score} / {factor.maxScore}
+                        </span>
+                      </div>
+                      <div className="h-1.5 w-full rounded-full bg-purple-100 overflow-hidden">
+                        <div
+                          style={{ width: `${pct}%` }}
+                          className="h-full rounded-full bg-gradient-to-r from-[#7655E8] to-[#397BFF]"
+                        />
+                      </div>
+                      <div className="text-[11px] text-slate-500">{factor.note}</div>
+                    </div>
+                  );
+                })}
+              </div>
+            </div>
+
+            <div className="lg:col-span-5 border border-purple-100 rounded-xl p-4 flex flex-col justify-between space-y-4">
+              <div className="space-y-2.5">
+                <h3 className="text-xs font-bold text-[#11142B]">
+                  Validation Strategy &amp; Next Actions
+                </h3>
+                <div className="bg-[#F5F3FF] border border-purple-200/70 rounded-lg p-3 text-xs text-[#15152F] space-y-1">
+                  <div className="font-semibold text-[#5B3AD6]">
+                    Recommended Split: {readiness.predictionReady.recommendedValidationStrategy}
                   </div>
-                  <div className="h-1.5 w-full rounded-full bg-purple-100 overflow-hidden">
-                    <div
-                      style={{ width: `${pct}%` }}
-                      className="h-full rounded-full bg-gradient-to-r from-[#7655E8] to-[#397BFF]"
-                    />
-                  </div>
-                  <div className="text-[11px] text-slate-500">{factor.note}</div>
+                  <p className="text-[11px] text-slate-600 leading-relaxed">
+                    {readiness.predictionReady.validationStrategyReason}
+                  </p>
                 </div>
-              );
-            })}
-          </div>
-        </div>
 
-        <div className="lg:col-span-5 border border-purple-100 rounded-xl p-4 flex flex-col justify-between space-y-4">
-          <div className="space-y-2.5">
-            <h3 className="text-xs font-bold text-[#11142B]">
-              Validation Strategy &amp; Next Actions
-            </h3>
-            <div className="bg-[#F5F3FF] border border-purple-200/70 rounded-lg p-3 text-xs text-[#15152F] space-y-1">
-              <div className="font-semibold text-[#5B3AD6]">
-                Recommended Split: {readiness.predictionReady.recommendedValidationStrategy}
+                {readiness.nextActions.length > 0 && (
+                  <ul className="space-y-1.5 text-xs text-slate-700">
+                    {readiness.nextActions.map((act, idx) => (
+                      <li key={idx} className="flex items-start gap-2">
+                        <Sparkles className="w-3.5 h-3.5 text-[#7655E8] shrink-0 mt-0.5" />
+                        <span>{act}</span>
+                      </li>
+                    ))}
+                  </ul>
+                )}
               </div>
-              <p className="text-[11px] text-slate-600 leading-relaxed">
-                {readiness.predictionReady.validationStrategyReason}
-              </p>
-            </div>
 
-            {readiness.nextActions.length > 0 && (
-              <ul className="space-y-1.5 text-xs text-slate-700">
-                {readiness.nextActions.map((act, idx) => (
-                  <li key={idx} className="flex items-start gap-2">
-                    <Sparkles className="w-3.5 h-3.5 text-[#7655E8] shrink-0 mt-0.5" />
-                    <span>{act}</span>
-                  </li>
-                ))}
-              </ul>
-            )}
-          </div>
-
-          <div className="pt-3 border-t border-purple-100 flex items-start gap-2.5 text-[11px] text-slate-600">
-            {privacy.optInCrossCompanyBaseline ? (
-              <ShieldCheck className="w-4 h-4 text-[#16C995] shrink-0 mt-0.5" />
-            ) : (
-              <Lock className="w-4 h-4 text-[#7655E8] shrink-0 mt-0.5" />
-            )}
-            <div className="space-y-1">
-              <div className="font-semibold text-[#11142B]">
-                Cross-Company Baseline: {privacy.optInCrossCompanyBaseline ? 'Opted-In (Awaiting Validated Industry Weights)' : 'Private Workspace Only (Opt-Out Default)'}
+              <div className="pt-3 border-t border-purple-100 flex items-start gap-2.5 text-[11px] text-slate-600">
+                {privacy.optInCrossCompanyBaseline ? (
+                  <ShieldCheck className="w-4 h-4 text-[#16C995] shrink-0 mt-0.5" />
+                ) : (
+                  <Lock className="w-4 h-4 text-[#7655E8] shrink-0 mt-0.5" />
+                )}
+                <div className="space-y-1">
+                  <div className="font-semibold text-[#11142B]">
+                    Cross-Company Baseline:{' '}
+                    {privacy.optInCrossCompanyBaseline
+                      ? 'Opted-In'
+                      : 'Private Workspace Only'}
+                  </div>
+                  {onNavigate && (
+                    <button
+                      type="button"
+                      onClick={() => onNavigate('settings')}
+                      className="font-semibold text-[#7655E8] hover:text-[#E84FA8] cursor-pointer"
+                    >
+                      Review Privacy Settings →
+                    </button>
+                  )}
+                </div>
               </div>
-              <p className="leading-snug">
-                Cross-company pre-trained weights are{' '}
-                <span className="font-mono">{privacy.crossCompanyValidationStatus}</span>; no
-                external weights are substituted when company labels are insufficient.
-              </p>
-              {onNavigate && (
-                <button
-                  type="button"
-                  onClick={() => onNavigate('settings')}
-                  className="font-semibold text-[#7655E8] hover:text-[#E84FA8] cursor-pointer"
-                >
-                  Review Privacy Governance →
-                </button>
-              )}
             </div>
           </div>
-        </div>
+        )}
       </div>
 
       {/* Longitudinal Cold-Start Outcome Recorder */}
@@ -404,12 +414,10 @@ export const DataReadinessPanel: React.FC<DataReadinessPanelProps> = ({
           <div className="flex flex-col sm:flex-row sm:items-center sm:justify-between gap-2">
             <div>
               <h3 className="text-xs font-bold text-[#11142B]">
-                Record Observed {tmpl.entitySingular} Outcome (Cold-Start Outcome Tracking)
+                Record Observed {tmpl.entitySingular} Outcome
               </h3>
               <p className="text-[11px] text-slate-600 mt-0.5">
-                Record confirmed Churned or Retained outcomes over time. ChurnSight updates readiness
-                live and automatically builds your prediction model once both classes reach statistical
-                validity.
+                Log confirmed Churned or Retained outcomes to update readiness automatically.
               </p>
             </div>
             <span className="text-[11px] font-mono text-[#7655E8] font-semibold shrink-0">

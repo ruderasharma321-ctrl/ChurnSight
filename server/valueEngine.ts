@@ -7,7 +7,7 @@ import type {
   CustomerValueRecommendation,
   CustomerValueRecord,
   CustomerValueSummary,
-  ModelEvaluationResult,
+  PredictedRiskLabel,
   RiskCategory,
   ValueCriterionAvailability,
   ValueDistributionBucket,
@@ -17,6 +17,11 @@ import type {
 } from '../src/types/churn.ts';
 import type { StoredDataset, TrainedModelArtifact } from './mlEngine.ts';
 import { isMissingValue } from './mlEngine.ts';
+import {
+  classifyPredictedRiskLabel,
+  detectStatusColumnHints,
+  resolveCustomerStatusRecord,
+} from './customerStatusEngine.ts';
 
 export const DEFAULT_CUSTOMER_VALUE_CONFIG: CustomerValueConfig = {
   weights: {
@@ -371,6 +376,9 @@ export function computeCustomerValueIntelligence(params: {
       datasetId: 'none',
       generatedAt: new Date().toISOString(),
       totalCustomers: 0,
+      activeCustomersCount: 0,
+      churnedCustomersCount: 0,
+      inconsistentCustomersCount: 0,
       valueAssessmentAvailable: false,
       unavailableReason:
         'Upload a customer dataset in Data Management to analyse customer value, revenue concentration, and churn exposure.',
@@ -689,6 +697,9 @@ export function computeCustomerValueIntelligence(params: {
       datasetId: state.datasetId,
       generatedAt: new Date().toISOString(),
       totalCustomers: rows.length,
+      activeCustomersCount: 0,
+      churnedCustomersCount: 0,
+      inconsistentCustomersCount: 0,
       valueAssessmentAvailable: false,
       unavailableReason:
         'No numeric value attributes (revenue, spend, frequency, tenure, payment history, or profit) were detected in this dataset. Map numeric customer attributes in Data Management to enable Customer Value Intelligence.',
@@ -848,6 +859,11 @@ export function computeCustomerValueIntelligence(params: {
     return vals.length ? vals[Math.floor(vals.length / 2)] : null;
   })();
 
+  const statusHints = detectStatusColumnHints(cols, mapping);
+  let activeCustomersCount = 0;
+  let churnedCustomersCount = 0;
+  let inconsistentCustomersCount = 0;
+
   const customers: CustomerValueRecord[] = preliminary.map((item) => {
     const valueSegment: ValueSegmentTier =
       item.valueScore >= highCutoffScore
@@ -856,17 +872,39 @@ export function computeCustomerValueIntelligence(params: {
           ? 'Medium Value'
           : 'Low Value';
 
+    const resolved = resolveCustomerStatusRecord(
+      item.row,
+      item.rowIndex,
+      statusHints,
+      state.churnDefinition
+    );
+
+    if (resolved.isActualChurned) churnedCustomersCount++;
+    else if (resolved.isInconsistent) inconsistentCustomersCount++;
+    else activeCustomersCount++;
+
     const predMatch =
       predByRowIndex.get(item.rowIndex) ||
       predByCustomerId.get(item.customerId.toLowerCase()) ||
       null;
 
-    const riskAvailable = Boolean(predMatch);
-    const churnProbability = predMatch ? predMatch.prob : null;
-    const riskCategory = predMatch ? predMatch.riskCategory : null;
+    // Historical churned or status-inconsistent accounts NEVER carry forward predicted churn risk
+    const riskApplicable = !resolved.isActualChurned && !resolved.isInconsistent;
+    const riskAvailable = riskApplicable && Boolean(predMatch);
+    const churnProbability = riskAvailable && predMatch ? predMatch.prob : null;
+    const riskCategory = riskAvailable && predMatch ? predMatch.riskCategory : null;
+    const predictedRiskLabel: PredictedRiskLabel | undefined = !riskApplicable
+      ? 'Not Applicable'
+      : riskCategory
+        ? classifyPredictedRiskLabel(riskCategory)
+        : undefined;
 
     let quadrant: ValueMatrixQuadrant = 'risk_unavailable';
-    let quadrantLabel = 'Risk classification unavailable';
+    let quadrantLabel = resolved.isActualChurned
+      ? 'Already Churned (Historical)'
+      : resolved.isInconsistent
+        ? 'Status Conflict — Review'
+        : 'Risk classification unavailable';
     let retentionPriority: CustomerValueRecord['retentionPriority'] = 'Unavailable';
 
     if (riskAvailable && churnProbability !== null) {
@@ -891,64 +929,78 @@ export function computeCustomerValueIntelligence(params: {
     }
 
     const expectedRevenueExposure =
-      churnProbability !== null && item.annualizedRevenue !== null
+      riskAvailable && churnProbability !== null && item.annualizedRevenue !== null
         ? Number((item.annualizedRevenue * churnProbability).toFixed(2))
         : null;
 
     // Grounded per-customer risk factors from actual fields present
     const riskFactors: string[] = [];
-    if (churnProbability !== null && churnProbability >= config.highRiskCutoff) {
-      riskFactors.push(`Model risk ${(churnProbability * 100).toFixed(1)}%`);
-    }
-    if (detected.complaintsCol) {
-      const c = parseNumeric(item.row[detected.complaintsCol]);
-      if (c !== null && c >= 2) {
-        riskFactors.push(`${c} complaint(s) logged`);
-      }
-    }
-    if (detected.unresolvedTicketsCol) {
-      const ut = parseNumeric(item.row[detected.unresolvedTicketsCol]);
-      if (ut !== null && ut > 0) {
-        riskFactors.push(`${ut} unresolved ticket(s)`);
-      }
-    } else if (detected.ticketsCol) {
-      const tk = parseNumeric(item.row[detected.ticketsCol]);
-      if (tk !== null && tk >= 3) {
-        riskFactors.push(`${tk} support tickets`);
-      }
-    }
-    if (detected.resolutionDaysCol) {
-      const rd = parseNumeric(item.row[detected.resolutionDaysCol]);
-      if (rd !== null && rd >= 5) {
-        riskFactors.push(`${rd}d avg ticket resolution`);
-      }
-    }
-    if (detected.satisfactionCol && satMedian !== null) {
-      const sat = parseNumeric(item.row[detected.satisfactionCol]);
-      if (sat !== null && sat < satMedian) {
-        riskFactors.push(`Below-median satisfaction (${sat})`);
-      }
-    }
-    if (detected.latePaymentsCol) {
-      const lp = parseNumeric(item.row[detected.latePaymentsCol]);
-      if (lp !== null && lp > 0) {
-        riskFactors.push(`${lp} late payment(s)`);
-      }
-    }
-    if (tenureMetric[item.idx] !== null && tenureMetric[item.idx]! <= 6) {
-      riskFactors.push(`Early tenure (${tenureMetric[item.idx]} mo)`);
-    }
-    if (riskFactors.length === 0) {
+    if (resolved.isActualChurned) {
+      riskFactors.push('Already churned (historical record — excluded from active churn risk)');
+    } else if (resolved.isInconsistent) {
       riskFactors.push(
-        riskAvailable ? 'No acute service or billing friction signals' : 'Prediction model required for churn factors'
+        resolved.conflictReason || 'Conflicting status/date fields — review before scoring'
       );
+    } else {
+      if (churnProbability !== null && churnProbability >= config.highRiskCutoff) {
+        riskFactors.push(`Model risk ${(churnProbability * 100).toFixed(1)}%`);
+      }
+      if (detected.complaintsCol) {
+        const c = parseNumeric(item.row[detected.complaintsCol]);
+        if (c !== null && c >= 2) {
+          riskFactors.push(`${c} complaint(s) logged`);
+        }
+      }
+      if (detected.unresolvedTicketsCol) {
+        const ut = parseNumeric(item.row[detected.unresolvedTicketsCol]);
+        if (ut !== null && ut > 0) {
+          riskFactors.push(`${ut} unresolved ticket(s)`);
+        }
+      } else if (detected.ticketsCol) {
+        const tk = parseNumeric(item.row[detected.ticketsCol]);
+        if (tk !== null && tk >= 3) {
+          riskFactors.push(`${tk} support tickets`);
+        }
+      }
+      if (detected.resolutionDaysCol) {
+        const rd = parseNumeric(item.row[detected.resolutionDaysCol]);
+        if (rd !== null && rd >= 5) {
+          riskFactors.push(`${rd}d avg ticket resolution`);
+        }
+      }
+      if (detected.satisfactionCol && satMedian !== null) {
+        const sat = parseNumeric(item.row[detected.satisfactionCol]);
+        if (sat !== null && sat < satMedian) {
+          riskFactors.push(`Below-median satisfaction (${sat})`);
+        }
+      }
+      if (detected.latePaymentsCol) {
+        const lp = parseNumeric(item.row[detected.latePaymentsCol]);
+        if (lp !== null && lp > 0) {
+          riskFactors.push(`${lp} late payment(s)`);
+        }
+      }
+      if (tenureMetric[item.idx] !== null && tenureMetric[item.idx]! <= 6) {
+        riskFactors.push(`Early tenure (${tenureMetric[item.idx]} mo)`);
+      }
+      if (riskFactors.length === 0) {
+        riskFactors.push(
+          riskAvailable
+            ? 'No acute service or billing friction signals'
+            : 'Prediction model required for churn factors'
+        );
+      }
     }
 
     return {
       rowIndex: item.rowIndex,
       customerId: item.customerId,
-      customerName: item.customerName,
+      customerName: resolved.customerName || item.customerName,
       segment: item.segment,
+      actualStatus: resolved.actualStatus,
+      statusConflictReason: resolved.conflictReason,
+      riskApplicable,
+      predictedRiskLabel,
       valueScore: item.valueScore,
       valueSegment,
       valueFactors: item.valueFactors,
@@ -1156,9 +1208,10 @@ export function computeCustomerValueIntelligence(params: {
     });
   }
 
-  // Service friction among high-value accounts (complaints / unresolved tickets)
+  // Service friction among ACTIVE high-value accounts (complaints / unresolved tickets)
   if (detected.complaintsCol || detected.unresolvedTicketsCol) {
     const highValueServiceFriction = highCustomers.filter((c) => {
+      if (c.actualStatus === 'Churned' || c.actualStatus === 'Inconsistent') return false;
       const idx = c.rowIndex - 1;
       const comp = detected.complaintsCol ? parseNumeric(rows[idx]?.[detected.complaintsCol]) : null;
       const unres = detected.unresolvedTicketsCol
@@ -1177,11 +1230,11 @@ export function computeCustomerValueIntelligence(params: {
       recommendations.push({
         id: 'val-rec-service-friction',
         priority: 'High',
-        title: `Resolve Support Friction on ${highValueServiceFriction.length} High-Value Accounts`,
-        targetSegment: 'High Value with Open Tickets / Complaints',
+        title: `Resolve Support Friction on ${highValueServiceFriction.length} Active High-Value Accounts`,
+        targetSegment: 'Active High Value with Open Tickets / Complaints',
         affectedCustomers: highValueServiceFriction.length,
         estimatedRevenueAtRisk: svcRev,
-        evidence: `${highValueServiceFriction.length} high-value customers show unresolved support tickets or repeated complaints in the uploaded records.`,
+        evidence: `${highValueServiceFriction.length} active high-value customers show unresolved support tickets or repeated complaints in the uploaded records.`,
         recommendedAction:
           'Route these accounts to priority support queues and audit average resolution delays before their next renewal checkpoint.',
       });
@@ -1192,6 +1245,9 @@ export function computeCustomerValueIntelligence(params: {
     datasetId: state.datasetId,
     generatedAt: new Date().toISOString(),
     totalCustomers: customers.length,
+    activeCustomersCount,
+    churnedCustomersCount,
+    inconsistentCustomersCount,
     valueAssessmentAvailable: true,
     unavailableReason: null,
     revenueAvailable: hasAnyRevenueField,

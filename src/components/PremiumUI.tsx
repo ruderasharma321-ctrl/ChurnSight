@@ -203,7 +203,12 @@ export const HeroArtwork: React.FC<HeroArtworkProps> = ({
   activeModel = null,
   tilt = { x: 0, y: 0 },
 }) => {
-  const hasValidLabels = Boolean(analytics && !analytics.isUnlabeledColdStart);
+  const hp = analytics?.historicalPerformance;
+  const hasValidLabels = Boolean(
+    analytics &&
+      !analytics.isUnlabeledColdStart &&
+      (hp ? hp.historicalRateReliable : true)
+  );
   const retainedRatio = hasValidLabels
     ? analytics!.stayedPercentage / 100
     : 0.74;
@@ -226,7 +231,14 @@ export const HeroArtwork: React.FC<HeroArtworkProps> = ({
   }, [analytics]);
 
   const highRiskCount = activeModel
-    ? activeModel.predictions.filter((p) => p.riskCategory === 'Higher Estimated Churn Risk').length
+    ? activeModel.predictions.filter(
+        (p) =>
+          p.riskApplicable !== false &&
+          p.actualStatus !== 'Churned' &&
+          p.actualStatus !== 'Inconsistent' &&
+          p.actualChurn !== 'Churned' &&
+          p.riskCategory === 'Higher Estimated Churn Risk'
+      ).length
     : null;
 
   const totalCustomersValue = analytics
@@ -239,19 +251,21 @@ export const HeroArtwork: React.FC<HeroArtworkProps> = ({
     : 'No dataset loaded';
 
   const churnRateValue = hasValidLabels
-    ? `${analytics!.churnedPercentage.toFixed(1)}%`
+    ? `${(hp?.historicalChurnRate ?? analytics!.churnedPercentage).toFixed(1)}%`
     : '—';
   const churnRateNote = hasValidLabels
-    ? `${analytics!.churnedCount.toLocaleString()} churned`
-    : analytics
-      ? 'Awaiting churn labels'
-      : 'No labeled history';
+    ? `${(hp?.actualChurnedCount ?? analytics!.churnedCount).toLocaleString()} already churned`
+    : analytics && !analytics.isUnlabeledColdStart && hp && !hp.historicalRateReliable
+      ? 'Historical rate unavailable'
+      : analytics
+        ? 'Awaiting churn labels'
+        : 'No labeled history';
 
   const highRiskValue = highRiskCount !== null
     ? highRiskCount.toLocaleString()
     : '—';
   const highRiskNote = highRiskCount !== null
-    ? 'Flagged for retention'
+    ? 'Active accounts flagged'
     : analytics
       ? 'Prediction pending'
       : 'Model not active';
@@ -310,9 +324,9 @@ export const HeroArtwork: React.FC<HeroArtworkProps> = ({
 
         <div className="rounded-xl bg-[#0D112B]/90 border border-white/12 px-4 py-3 shadow-lg">
           <div className="text-[11px] font-medium text-slate-400 whitespace-nowrap">
-            Customer Churn Rate
+            Historical Churn Rate
           </div>
-          <div className="mt-1 text-xl font-bold font-mono tabular-nums text-[#38BDF8] leading-tight">
+          <div className="mt-1 text-xl font-bold font-mono tabular-nums text-[#F87171] leading-tight">
             {churnRateValue}
           </div>
           <div className="mt-0.5 text-[11px] text-slate-400 truncate">
@@ -322,9 +336,9 @@ export const HeroArtwork: React.FC<HeroArtworkProps> = ({
 
         <div className="rounded-xl bg-[#0D112B]/90 border border-white/12 px-4 py-3 shadow-lg">
           <div className="text-[11px] font-medium text-slate-400 whitespace-nowrap">
-            High-Risk Customers
+            Active High-Risk
           </div>
-          <div className="mt-1 text-xl font-bold font-mono tabular-nums text-[#C084FC] leading-tight">
+          <div className="mt-1 text-xl font-bold font-mono tabular-nums text-[#FB923C] leading-tight">
             {highRiskValue}
           </div>
           <div className="mt-0.5 text-[11px] text-slate-400 truncate">

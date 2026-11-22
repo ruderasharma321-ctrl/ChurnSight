@@ -142,7 +142,13 @@ export const DashboardView: React.FC<DashboardViewProps> = ({
 
   const riskOverview = useMemo(() => {
     if (!activeModel || activeModel.predictions.length === 0) return null;
-    const preds = activeModel.predictions;
+    const preds = activeModel.predictions.filter(
+      (p) =>
+        p.riskApplicable !== false &&
+        p.actualStatus !== 'Churned' &&
+        p.actualStatus !== 'Inconsistent' &&
+        p.actualChurn !== 'Churned'
+    );
     const total = preds.length;
     const highCount = preds.filter(
       (p) => p.riskCategory === 'Higher Estimated Churn Risk'
@@ -151,7 +157,8 @@ export const DashboardView: React.FC<DashboardViewProps> = ({
       (p) => p.riskCategory === 'Moderate Estimated Churn Risk'
     ).length;
     const atRiskCount = highCount + medCount;
-    const avgProb = (preds.reduce((acc, p) => acc + p.churnProbability, 0) / total) * 100;
+    const avgProb =
+      total > 0 ? (preds.reduce((acc, p) => acc + p.churnProbability, 0) / total) * 100 : 0;
     return {
       total,
       highCount,
@@ -326,33 +333,33 @@ export const DashboardView: React.FC<DashboardViewProps> = ({
 
         {/* Quick 3-Step Onboarding Guide */}
         <div className="grid grid-cols-1 md:grid-cols-3 gap-5">
-          <div className="bg-white/95 border border-purple-100 rounded-2xl shadow-xs p-6 space-y-2.5">
+          <div className="bg-white/95 border border-purple-100 rounded-2xl shadow-xs p-5 space-y-1.5">
             <div className="text-xs font-semibold text-[#7655E8]">Step 01</div>
             <h2 className="font-display text-base font-bold text-[#11142B]">
-              Import Your Customer Data
+              Import Customer Data
             </h2>
-            <p className="text-sm text-slate-600 leading-relaxed">
-              Download an industry CSV or Excel template, upload current or historical records, and validate data quality in Data Management.
+            <p className="text-xs text-slate-600 leading-relaxed">
+              Upload your Excel workbook or CSV records in Data Management.
             </p>
           </div>
 
-          <div className="bg-white/95 border border-purple-100 rounded-2xl shadow-xs p-6 space-y-2.5">
+          <div className="bg-white/95 border border-purple-100 rounded-2xl shadow-xs p-5 space-y-1.5">
             <div className="text-xs font-semibold text-[#397BFF]">Step 02</div>
             <h2 className="font-display text-base font-bold text-[#11142B]">
-              Understand Customer Value &amp; Risk
+              Analyse Value &amp; Risk
             </h2>
-            <p className="text-sm text-slate-600 leading-relaxed">
-              Automatically segment customers into High, Medium, and Low value tiers and uncover who may leave next.
+            <p className="text-xs text-slate-600 leading-relaxed">
+              Segment High, Medium, and Low value tiers and identify at-risk active accounts.
             </p>
           </div>
 
-          <div className="bg-white/95 border border-purple-100 rounded-2xl shadow-xs p-6 space-y-2.5">
+          <div className="bg-white/95 border border-purple-100 rounded-2xl shadow-xs p-5 space-y-1.5">
             <div className="text-xs font-semibold text-[#E84FA8]">Step 03</div>
             <h2 className="font-display text-base font-bold text-[#11142B]">
-              Take Action &amp; Export Reports
+              Retain &amp; Export
             </h2>
-            <p className="text-sm text-slate-600 leading-relaxed">
-              Prioritise retention outreach for high-value at-risk accounts and export clean PDF and CSV reports.
+            <p className="text-xs text-slate-600 leading-relaxed">
+              Prioritise high-value outreach and export executive PDF and CSV reports.
             </p>
           </div>
         </div>
@@ -471,8 +478,8 @@ export const DashboardView: React.FC<DashboardViewProps> = ({
             <h2 className="font-display text-xl sm:text-2xl font-bold text-[#11142B] tracking-tight">
               Executive Portfolio Summary
             </h2>
-            <p className="text-xs sm:text-sm text-slate-600 mt-0.5">
-              Immediate answers on portfolio health, customer risk, value concentration, and revenue exposure.
+            <p className="text-xs text-slate-500 mt-0.5">
+              Portfolio health, active risk, value concentration, and revenue exposure
             </p>
           </div>
           <div className="flex items-center gap-2">
@@ -503,26 +510,46 @@ export const DashboardView: React.FC<DashboardViewProps> = ({
 
         <div className="grid grid-cols-1 sm:grid-cols-2 xl:grid-cols-4 gap-5">
           {/* Q1: How is my customer portfolio performing? */}
-          <TiltKpiCard
-            index={0}
-            title="Portfolio Performance"
-            value={analytics.isUnlabeledColdStart ? analytics.totalCustomers : 100 - analytics.churnRate}
-            decimals={analytics.isUnlabeledColdStart ? 0 : 1}
-            suffix={analytics.isUnlabeledColdStart ? '' : '%'}
-            subtitle={
-              analytics.isUnlabeledColdStart
-                ? `Monitoring ${analytics.totalCustomers.toLocaleString()} ${tmpl.entityPlural.toLowerCase()} (awaiting outcomes)`
-                : `${analytics.totalCustomers.toLocaleString()} total · ${analytics.churnRate.toFixed(1)}% historical churn`
-            }
-            gradientClass="bg-gradient-to-br from-[#7655E8] via-[#6846DE] to-[#4E30BF]"
-            shadowClass="shadow-xl shadow-[#7655E8]/25"
-            icon={<Users className="w-5 h-5 text-white" />}
-          />
+          {(() => {
+            const hp = analytics.historicalPerformance;
+            const rateReliable =
+              !analytics.isUnlabeledColdStart && (hp ? hp.historicalRateReliable : true);
+            const rateVal = hp?.historicalChurnRate ?? analytics.churnRate;
+            const churnedTotal = hp?.actualChurnedCount ?? analytics.churnedCount;
+            return (
+              <TiltKpiCard
+                index={0}
+                title="Portfolio Performance"
+                value={
+                  analytics.isUnlabeledColdStart
+                    ? analytics.totalCustomers
+                    : rateReliable
+                      ? 100 - rateVal
+                      : 0
+                }
+                displayText={
+                  !analytics.isUnlabeledColdStart && !rateReliable ? 'Unavailable' : undefined
+                }
+                decimals={analytics.isUnlabeledColdStart ? 0 : 1}
+                suffix={analytics.isUnlabeledColdStart ? '' : '%'}
+                subtitle={
+                  analytics.isUnlabeledColdStart
+                    ? `Monitoring ${analytics.totalCustomers.toLocaleString()} ${tmpl.entityPlural.toLowerCase()} (awaiting outcomes)`
+                    : rateReliable
+                      ? `${churnedTotal.toLocaleString()} already churned · ${rateVal.toFixed(1)}% historical churn`
+                      : `${churnedTotal.toLocaleString()} already churned · historical rate unavailable`
+                }
+                gradientClass="bg-gradient-to-br from-[#059669] via-[#10B981] to-[#047857]"
+                shadowClass="shadow-xl shadow-[#059669]/25"
+                icon={<Users className="w-5 h-5 text-white" />}
+              />
+            );
+          })()}
 
-          {/* Q2: How many customers might leave? */}
+          {/* Q2: How many active customers might leave? */}
           <TiltKpiCard
             index={1}
-            title="Customers at Risk"
+            title="Active Customers at Risk"
             value={
               riskOverview
                 ? riskOverview.atRiskCount
@@ -535,13 +562,13 @@ export const DashboardView: React.FC<DashboardViewProps> = ({
             }
             subtitle={
               riskOverview
-                ? `${riskOverview.highCount.toLocaleString()} high risk · ${riskOverview.medCount.toLocaleString()} moderate risk`
+                ? `${riskOverview.highCount.toLocaleString()} active high risk · ${riskOverview.medCount.toLocaleString()} active moderate risk`
                 : analytics.isUnlabeledColdStart
                   ? 'Inactivity watchlist (not confirmed churn)'
                   : 'Activate churn predictions in Churn Analysis'
             }
-            gradientClass="bg-gradient-to-br from-[#FF786B] via-[#F2638A] to-[#E84FA8]"
-            shadowClass="shadow-xl shadow-[#E84FA8]/25"
+            gradientClass="bg-gradient-to-br from-[#EA580C] via-[#F97316] to-[#C2410C]"
+            shadowClass="shadow-xl shadow-[#EA580C]/25"
             icon={<ShieldAlert className="w-5 h-5 text-white" />}
           />
 
@@ -605,7 +632,7 @@ export const DashboardView: React.FC<DashboardViewProps> = ({
                 Important Business Insights
               </h2>
               <p className="text-xs text-slate-500 mt-0.5">
-                Key signals discovered across your {tmpl.shortLabel.toLowerCase()} customer base
+                Key attrition signals across your {tmpl.shortLabel.toLowerCase()} portfolio
               </p>
             </div>
             <button
@@ -641,10 +668,10 @@ export const DashboardView: React.FC<DashboardViewProps> = ({
           <div className="space-y-3">
             <div>
               <h2 className="font-display text-lg font-bold text-[#11142B]">
-                What Should I Do Next?
+                Recommended Actions
               </h2>
               <p className="text-xs text-slate-500 mt-0.5">
-                Prioritised retention actions based on your live portfolio data
+                Priority retention steps from live portfolio data
               </p>
             </div>
 

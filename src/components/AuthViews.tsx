@@ -95,21 +95,27 @@ export const AuthViews: React.FC<AuthViewsProps> = ({
   const [isSendingReset, setIsSendingReset] = useState(false);
 
   const [hasRegisteredWorkspaces, setHasRegisteredWorkspaces] = useState<boolean | null>(null);
-  const [storageMode, setStorageMode] = useState<'disk' | 'kv' | 'ephemeral_tmp' | null>(null);
+  const [storageMode, setStorageMode] = useState<
+    'postgres' | 'kv' | 'disk' | 'unconfigured' | null
+  >(null);
 
   useEffect(() => {
     let active = true;
     apiFetch('/api/auth/status')
-      .then((res) => (res.ok ? res.json() : null))
-      .then((data) => {
+      .then(async (res) => {
+        const data = await res.json().catch(() => null);
+        return { ok: res.ok, status: res.status, data };
+      })
+      .then(({ data }) => {
         if (!active || !data) return;
         if (typeof data.hasRegisteredWorkspaces === 'boolean') {
           setHasRegisteredWorkspaces(data.hasRegisteredWorkspaces);
         }
         if (
-          data.storageMode === 'disk' ||
+          data.storageMode === 'postgres' ||
           data.storageMode === 'kv' ||
-          data.storageMode === 'ephemeral_tmp'
+          data.storageMode === 'disk' ||
+          data.storageMode === 'unconfigured'
         ) {
           setStorageMode(data.storageMode);
         }
@@ -180,6 +186,9 @@ export const AuthViews: React.FC<AuthViewsProps> = ({
         return;
       }
       if (!res.ok) {
+        if (data.code === 'DATABASE_NOT_CONFIGURED') {
+          setStorageMode('unconfigured');
+        }
         const msg = data.error || 'Unable to sign in. Please check your credentials.';
         setLoginError(msg);
         if (data.code === 'ACCOUNT_NOT_FOUND' || /account not found/i.test(msg)) {
@@ -269,6 +278,9 @@ export const AuthViews: React.FC<AuthViewsProps> = ({
         return;
       }
       if (!res.ok) {
+        if (data.code === 'DATABASE_NOT_CONFIGURED') {
+          setStorageMode('unconfigured');
+        }
         const msg = data.error || 'Company registration failed.';
         setRegError(msg);
         if (
@@ -383,12 +395,11 @@ export const AuthViews: React.FC<AuthViewsProps> = ({
               <span>Multi-Industry Customer Intelligence SaaS</span>
             </div>
             <h1 className="text-3xl sm:text-4xl font-bold tracking-tight leading-[1.15] text-balance">
-              Turn Customer Data Into Smarter Decisions.
+              Turn Customer Data Into Smarter Retention Decisions.
             </h1>
             <p className="text-sm sm:text-base text-indigo-100/80 leading-relaxed">
-              Configurable tenant-isolated workspaces across Telecom, Banking, Retail, SaaS,
-              Healthcare, Insurance, Education, and Fitness—complete with custom churn definitions,
-              CSV &amp; Excel ingestion, and supervised ML scoring.
+              Multi-industry workspaces with custom churn definitions, bulk Excel/CSV import, and
+              explainable churn scoring.
             </p>
           </div>
         </div>
@@ -490,22 +501,21 @@ export const AuthViews: React.FC<AuthViewsProps> = ({
               <div>
                 <h2 className="text-2xl font-bold text-[#11142B] tracking-tight">Welcome back</h2>
                 <p className="text-sm text-slate-500 mt-1">
-                  Sign in with your company account credentials to access your ChurnSight workspace.
+                  Sign in to access your company workspace.
                 </p>
               </div>
 
-              {storageMode === 'ephemeral_tmp' ? (
-                <div className="bg-amber-50 border border-amber-200 rounded-2xl p-4 flex items-start gap-2.5 text-xs text-amber-950 leading-relaxed">
-                  <Info className="w-4 h-4 text-amber-700 shrink-0 mt-0.5" />
+              {storageMode === 'unconfigured' ? (
+                <div className="bg-[#FF786B]/12 border border-[#FF786B]/40 rounded-2xl p-4 flex items-start gap-2.5 text-xs text-[#9A2E25] leading-relaxed">
+                  <AlertCircle className="w-4 h-4 text-[#E04F44] shrink-0 mt-0.5" />
                   <div className="space-y-1">
                     <p>
-                      <strong>Serverless temporary storage active:</strong> This Vercel deployment
-                      currently has no persistent database attached, so accounts stored in{' '}
-                      <code className="font-mono">/tmp</code> reset across cold starts. Connect{' '}
-                      <code className="font-mono">KV_REST_API_URL</code> &amp;{' '}
-                      <code className="font-mono">KV_REST_API_TOKEN</code> (Upstash/Vercel KV) or
-                      set <code className="font-mono">VITE_API_BASE_URL</code> to persist accounts
-                      permanently.
+                      <strong>Persistent database not configured:</strong> Add{' '}
+                      <code className="font-mono font-semibold">DATABASE_URL</code> (PostgreSQL —
+                      recommended) or{' '}
+                      <code className="font-mono font-semibold">KV_REST_API_URL</code> &amp;{' '}
+                      <code className="font-mono font-semibold">KV_REST_API_TOKEN</code> (Upstash
+                      Redis) in your Vercel Environment Variables and redeploy.
                     </p>
                   </div>
                 </div>
@@ -515,15 +525,15 @@ export const AuthViews: React.FC<AuthViewsProps> = ({
                     <Info className="w-4 h-4 text-amber-700 shrink-0 mt-0.5" />
                     <div className="space-y-1.5">
                       <p>
-                        <strong>No company workspaces exist on this server yet.</strong> Register
-                        your company once to create your workspace and Firm Admin login.
+                        <strong>No company workspaces yet.</strong> Register your organization to
+                        create your Firm Admin account.
                       </p>
                       <button
                         type="button"
                         onClick={() => switchMode('register')}
                         className="font-bold text-[#7655E8] hover:text-[#E84FA8] underline underline-offset-2 cursor-pointer"
                       >
-                        Register a Company Workspace →
+                        Register Company Workspace →
                       </button>
                     </div>
                   </div>
@@ -667,9 +677,22 @@ export const AuthViews: React.FC<AuthViewsProps> = ({
                   Register Company Workspace
                 </h2>
                 <p className="text-sm text-slate-500 mt-1">
-                  Provision a private company environment and its initial Firm Administrator account.
+                  Create a private workspace and initial Firm Admin account.
                 </p>
               </div>
+
+              {storageMode === 'unconfigured' && (
+                <div className="bg-[#FF786B]/12 border border-[#FF786B]/40 rounded-2xl p-4 flex items-start gap-2.5 text-xs text-[#9A2E25] leading-relaxed">
+                  <AlertCircle className="w-4 h-4 text-[#E04F44] shrink-0 mt-0.5" />
+                  <p>
+                    <strong>Database setup required:</strong> Configure{' '}
+                    <code className="font-mono font-semibold">DATABASE_URL</code> (PostgreSQL) or{' '}
+                    <code className="font-mono font-semibold">KV_REST_API_URL</code> &amp;{' '}
+                    <code className="font-mono font-semibold">KV_REST_API_TOKEN</code> in Vercel
+                    Environment Variables before registering.
+                  </p>
+                </div>
+              )}
 
               {regError && (
                 <div className="bg-[#FF786B]/12 border border-[#FF786B]/40 rounded-2xl p-4 flex items-start gap-2.5 text-xs text-[#9A2E25]">

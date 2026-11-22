@@ -95,7 +95,14 @@ export const CustomerIntelligenceView: React.FC<CustomerIntelligenceViewProps> =
   const highRiskAccounts = useMemo(() => {
     if (!activeModel) return [];
     return [...activeModel.predictions]
-      .filter((p) => p.riskCategory === 'Higher Estimated Churn Risk')
+      .filter(
+        (p) =>
+          p.riskApplicable !== false &&
+          p.actualStatus !== 'Churned' &&
+          p.actualStatus !== 'Inconsistent' &&
+          p.actualChurn !== 'Churned' &&
+          p.riskCategory === 'Higher Estimated Churn Risk'
+      )
       .sort((a, b) => b.churnProbability - a.churnProbability)
       .slice(0, 8);
   }, [activeModel]);
@@ -136,8 +143,7 @@ export const CustomerIntelligenceView: React.FC<CustomerIntelligenceViewProps> =
               Churn Patterns &amp; Retention Insights
             </h2>
             <p className="text-sm text-slate-600 mt-0.5">
-              Verified attrition signals, behavioral comparisons, and retention opportunities for{' '}
-              {company.name}
+              Attrition signals and retention priorities for {company.name}
             </p>
           </div>
 
@@ -252,8 +258,8 @@ export const CustomerIntelligenceView: React.FC<CustomerIntelligenceViewProps> =
             </h2>
             <p className="text-xs text-slate-500 mt-0.5">
               {activeModel
-                ? `Top high-risk ${tmpl.entityPlural.toLowerCase()} flagged by your active prediction model`
-                : 'Priority watchlist populates automatically once predictions are ready'}
+                ? `Active high-risk ${tmpl.entityPlural.toLowerCase()} (already-churned accounts excluded)`
+                : 'Populates automatically once predictions are ready'}
             </p>
           </div>
           {activeModel && (
@@ -273,9 +279,10 @@ export const CustomerIntelligenceView: React.FC<CustomerIntelligenceViewProps> =
               <thead>
                 <tr className="border-b border-purple-100 text-slate-500 font-semibold">
                   <th className="py-2.5 pr-4">{tmpl.entitySingular} ID</th>
-                  <th className="py-2.5 px-3">Assessment</th>
+                  <th className="py-2.5 px-3">Actual Status</th>
+                  <th className="py-2.5 px-3">Predicted Risk</th>
                   <th className="py-2.5 px-3">Key Attributes</th>
-                  <th className="py-2.5 pl-3 text-right">Churn Risk</th>
+                  <th className="py-2.5 pl-3 text-right">Predicted Probability</th>
                 </tr>
               </thead>
               <tbody className="divide-y divide-purple-50">
@@ -287,15 +294,25 @@ export const CustomerIntelligenceView: React.FC<CustomerIntelligenceViewProps> =
                   return (
                     <tr key={`${acct.rowIndex}-${acct.customerId}`} className="hover:bg-[#F5F3FF]/50">
                       <td className="py-2.5 pr-4 font-mono font-bold text-[#11142B]">
-                        {acct.customerId}
+                        <div>{acct.customerId}</div>
+                        {acct.customerName && (
+                          <div className="text-[11px] font-sans font-normal text-slate-500">
+                            {acct.customerName}
+                          </div>
+                        )}
                       </td>
-                      <td className="py-2.5 px-3 font-semibold text-[#D63384]">
-                        {acct.predictedChurn}
+                      <td className="py-2.5 px-3">
+                        <span className="inline-block px-2 py-0.5 rounded-md text-[11px] font-semibold bg-[#059669]/10 text-[#059669] border border-[#059669]/25">
+                          {acct.actualStatus || 'Active'}
+                        </span>
+                      </td>
+                      <td className="py-2.5 px-3 font-semibold text-[#EA580C]">
+                        High Risk ({acct.predictedChurn})
                       </td>
                       <td className="py-2.5 px-3 text-slate-600 truncate max-w-md">
                         {previewAttrs || '—'}
                       </td>
-                      <td className="py-2.5 pl-3 text-right font-mono font-bold tabular-nums text-[#11142B]">
+                      <td className="py-2.5 pl-3 text-right font-mono font-bold tabular-nums text-[#EA580C]">
                         {(acct.churnProbability * 100).toFixed(1)}%
                       </td>
                     </tr>

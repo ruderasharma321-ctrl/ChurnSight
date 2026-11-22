@@ -88,8 +88,7 @@ export const ReportsView: React.FC<ReportsViewProps> = ({
             Reports &amp; Executive Deliverables
           </h1>
           <p className="text-sm text-slate-600 mt-0.5">
-            Download board-ready retention summaries, customer risk priority lists, and dataset
-            audits.
+            Export executive PDFs, customer risk priority lists, and schema audits.
           </p>
         </div>
 
@@ -137,9 +136,11 @@ export const ReportsView: React.FC<ReportsViewProps> = ({
               Executive Churn Summary
             </h2>
             <p className="text-xs text-slate-600 leading-relaxed">
-              Summarizes total {tmpl.entityPlural.toLowerCase()} ({analytics.totalCustomers.toLocaleString()}
-              ), overall churn rate ({analytics.churnRate.toFixed(1)}%), confirmed churn formula,
-              and segment breakdowns for {dataset.fileName}.
+              {analytics.totalCustomers.toLocaleString()} {tmpl.entityPlural.toLowerCase()} ·{' '}
+              {analytics.historicalPerformance?.historicalRateReliable === false
+                ? 'historical rate unavailable'
+                : `${(analytics.historicalPerformance?.historicalChurnRate ?? analytics.churnRate).toFixed(1)}% historical churn`}{' '}
+              · {dataset.fileName}
             </p>
           </div>
           <div className="flex flex-wrap items-center gap-2.5 pt-2 border-t border-purple-100">
@@ -272,8 +273,7 @@ export const ReportsView: React.FC<ReportsViewProps> = ({
               Customer Value Intelligence &amp; Exposure Report
             </h2>
             <p className="text-xs text-slate-600 leading-relaxed">
-              Exports customer value scores, High/Medium/Low value tiers, Value &times; Churn Risk Matrix quadrants,
-              expected annual revenue exposure, and traceable evidence columns from your workspace dataset.
+              Customer value scores, High/Medium/Low tiers, Value × Risk quadrants, and annualized revenue exposure.
             </p>
           </div>
           <div className="flex flex-wrap items-center gap-2.5 pt-2 border-t border-purple-100">

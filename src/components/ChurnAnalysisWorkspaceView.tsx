@@ -15,8 +15,10 @@ import {
   PredictionPipelineStatus,
   TrainModelRequest,
 } from '../types/churn';
+import { apiFetch } from '../utils/apiClient';
 import { getIndustryTemplate } from '../utils/industryConfig';
 import { ChurnPredictionView } from './ChurnPredictionView';
+import { ChurnSeparationOverview } from './ChurnSeparationOverview';
 import { CustomerIntelligenceView } from './CustomerIntelligenceView';
 import { DataAnalysisView } from './DataAnalysisView';
 import { ModelEvaluationView } from './ModelEvaluationView';
@@ -67,17 +69,51 @@ export const ChurnAnalysisWorkspaceView: React.FC<ChurnAnalysisWorkspaceViewProp
   onNavigate,
 }) => {
   const [internalSection, setInternalSection] = useState<ChurnAnalysisSubTab>(initialSection);
+  const [periodAnalytics, setPeriodAnalytics] = useState<AnalyticsSummary | null>(analytics);
+  const [selectedPeriod, setSelectedPeriod] = useState<string>('ALL');
+  const [isFilteringPeriod, setIsFilteringPeriod] = useState(false);
   const tmpl = getIndustryTemplate(company.industry, company.customIndustryName);
 
   useEffect(() => {
     setInternalSection(initialSection);
   }, [initialSection]);
 
+  useEffect(() => {
+    setPeriodAnalytics(analytics);
+    setSelectedPeriod(analytics?.historicalPerformance?.selectedPeriod || 'ALL');
+  }, [analytics, dataset?.datasetId]);
+
+  const handlePeriodChange = async (nextPeriod: string) => {
+    setSelectedPeriod(nextPeriod);
+    if (nextPeriod === 'ALL') {
+      setPeriodAnalytics(analytics);
+      return;
+    }
+    setIsFilteringPeriod(true);
+    try {
+      const res = await apiFetch('/api/analytics/filter', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ reportingPeriod: nextPeriod }),
+      });
+      if (res.ok) {
+        const data = await res.json();
+        if (data.analytics) {
+          setPeriodAnalytics(data.analytics);
+        }
+      }
+    } finally {
+      setIsFilteringPeriod(false);
+    }
+  };
+
   const section = controlledSection ?? internalSection;
   const setSection = (next: ChurnAnalysisSubTab) => {
     setInternalSection(next);
     onSectionChange?.(next);
   };
+
+  const displayAnalytics = periodAnalytics || analytics;
 
   return (
     <div className="space-y-6">
@@ -165,6 +201,16 @@ export const ChurnAnalysisWorkspaceView: React.FC<ChurnAnalysisWorkspaceViewProp
           </button>
         </div>
       </div>
+
+      {(section === 'predictions' || section === 'patterns') && dataset && displayAnalytics && (
+        <ChurnSeparationOverview
+          analytics={displayAnalytics}
+          entityPlural={tmpl.entityPlural}
+          selectedPeriod={selectedPeriod}
+          isFilteringPeriod={isFilteringPeriod}
+          onPeriodChange={handlePeriodChange}
+        />
+      )}
 
       {section === 'predictions' && (
         <ChurnPredictionView

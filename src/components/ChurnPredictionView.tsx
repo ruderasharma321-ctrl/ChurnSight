@@ -15,6 +15,7 @@ import { motion } from 'motion/react';
 import {
   BatchScoreResult,
   CompanyWorkspaceInfo,
+  CustomerActualStatus,
   CustomerPrediction,
   DatasetState,
   FeatureImportance,
@@ -186,6 +187,7 @@ export const ChurnPredictionView: React.FC<ChurnPredictionViewProps> = ({
   // Prediction Results & Individual Inspection
   const [selectedCustomerIdx, setSelectedCustomerIdx] = useState<number>(0);
   const [riskFilter, setRiskFilter] = useState<'ALL' | RiskCategory>('ALL');
+  const [actualStatusFilter, setActualStatusFilter] = useState<'ALL' | 'Active' | 'Churned' | 'Inconsistent'>('ALL');
   const [splitFilter, setSplitFilter] = useState<'ALL' | 'Unseen Test' | 'Training'>('ALL');
   const [searchId, setSearchId] = useState('');
 
@@ -207,22 +209,42 @@ export const ChurnPredictionView: React.FC<ChurnPredictionViewProps> = ({
 
   useEffect(() => {
     if (activeModel && activeModel.predictions.length > 0) {
-      setSelectedCustomerIdx(0);
-      setWhatIfAttrs({ ...activeModel.predictions[0].attributes });
+      const firstActiveIdx = activeModel.predictions.findIndex(
+        (p) => (p.actualStatus || (p.actualChurn === 'Churned' ? 'Churned' : 'Active')) === 'Active'
+      );
+      const initialIdx = firstActiveIdx >= 0 ? firstActiveIdx : 0;
+      setSelectedCustomerIdx(initialIdx);
+      setWhatIfAttrs({ ...activeModel.predictions[initialIdx].attributes });
       setWhatIfResult(null);
       setWhatIfError(null);
       setRiskFilter('ALL');
+      setActualStatusFilter('ALL');
       setSplitFilter('ALL');
       setSearchId('');
     }
   }, [activeModel]);
+
+  const getEffectiveActualStatus = (p: CustomerPrediction): CustomerActualStatus => {
+    if (p.actualStatus) return p.actualStatus;
+    return p.actualChurn === 'Churned' ? 'Churned' : 'Active';
+  };
+
+  const isPredictionRiskApplicable = (p: CustomerPrediction): boolean => {
+    const status = getEffectiveActualStatus(p);
+    return p.riskApplicable !== false && status !== 'Churned' && status !== 'Inconsistent';
+  };
 
   const filteredPredictions = useMemo(() => {
     if (!activeModel) return [];
     const rawQuery = searchId.trim().toLowerCase();
     const normalizedQuery = rawQuery.replace(/\s+/g, ' ');
     return activeModel.predictions.filter((p) => {
-      if (riskFilter !== 'ALL' && p.riskCategory !== riskFilter) return false;
+      const status = getEffectiveActualStatus(p);
+      const applicable = isPredictionRiskApplicable(p);
+      if (actualStatusFilter !== 'ALL' && status !== actualStatusFilter) return false;
+      if (riskFilter !== 'ALL') {
+        if (!applicable || p.riskCategory !== riskFilter) return false;
+      }
       if (splitFilter !== 'ALL' && p.split !== splitFilter) return false;
       if (normalizedQuery) {
         const matchesId = p.customerId.toLowerCase().includes(rawQuery);
@@ -238,7 +260,7 @@ export const ChurnPredictionView: React.FC<ChurnPredictionViewProps> = ({
       }
       return true;
     });
-  }, [activeModel, riskFilter, splitFilter, searchId]);
+  }, [activeModel, riskFilter, actualStatusFilter, splitFilter, searchId]);
 
   if (!dataset) {
     return (
@@ -358,26 +380,67 @@ export const ChurnPredictionView: React.FC<ChurnPredictionViewProps> = ({
 
   const latestBatch = batchScores[0] || null;
 
-  const renderRiskDotLabel = (risk: RiskCategory) => {
+  const renderActualStatusBadge = (status: CustomerActualStatus) => {
+    if (status === 'Churned') {
+      return (
+        <span className="inline-flex items-center gap-1.5 px-2.5 py-0.5 rounded-full text-[11px] font-bold bg-red-50 text-[#DC2626] border border-red-200 whitespace-nowrap">
+          <span className="w-1.5 h-1.5 rounded-full bg-[#DC2626] shrink-0" />
+          <span>Churned</span>
+        </span>
+      );
+    }
+    if (status === 'Inconsistent') {
+      return (
+        <span className="inline-flex items-center gap-1.5 px-2.5 py-0.5 rounded-full text-[11px] font-bold bg-amber-50 text-amber-800 border border-amber-300 whitespace-nowrap">
+          <span className="w-1.5 h-1.5 rounded-full bg-amber-500 shrink-0" />
+          <span>Inconsistent</span>
+        </span>
+      );
+    }
+    if (status === 'Unknown') {
+      return (
+        <span className="inline-flex items-center gap-1.5 px-2.5 py-0.5 rounded-full text-[11px] font-semibold bg-slate-100 text-slate-600 border border-slate-200 whitespace-nowrap">
+          <span className="w-1.5 h-1.5 rounded-full bg-slate-400 shrink-0" />
+          <span>Unknown</span>
+        </span>
+      );
+    }
+    return (
+      <span className="inline-flex items-center gap-1.5 px-2.5 py-0.5 rounded-full text-[11px] font-bold bg-emerald-50 text-[#059669] border border-emerald-200 whitespace-nowrap">
+        <span className="w-1.5 h-1.5 rounded-full bg-[#059669] shrink-0" />
+        <span>Active</span>
+      </span>
+    );
+  };
+
+  const renderRiskDotLabel = (risk: RiskCategory, riskApplicable = true) => {
+    if (!riskApplicable) {
+      return (
+        <span className="inline-flex items-center gap-1.5 text-xs font-medium text-slate-500 whitespace-nowrap">
+          <span className="w-2 h-2 rounded-full bg-slate-300 shrink-0" />
+          <span>Not Applicable</span>
+        </span>
+      );
+    }
     if (risk === 'Higher Estimated Churn Risk') {
       return (
-        <span className="inline-flex items-center gap-2 text-xs font-semibold text-[#9D2EC5]">
-          <span className="w-2 h-2 rounded-full bg-[#B84DE0] shrink-0" />
+        <span className="inline-flex items-center gap-2 text-xs font-semibold text-[#EA580C] whitespace-nowrap">
+          <span className="w-2 h-2 rounded-full bg-[#EA580C] shrink-0" />
           <span>High Risk</span>
         </span>
       );
     }
     if (risk === 'Moderate Estimated Churn Risk') {
       return (
-        <span className="inline-flex items-center gap-2 text-xs font-semibold text-[#5B3BD4]">
+        <span className="inline-flex items-center gap-2 text-xs font-semibold text-[#7655E8] whitespace-nowrap">
           <span className="w-2 h-2 rounded-full bg-[#7655E8] shrink-0" />
-          <span>Moderate Risk</span>
+          <span>Medium Risk</span>
         </span>
       );
     }
     return (
-      <span className="inline-flex items-center gap-2 text-xs font-semibold text-[#0C7D99]">
-        <span className="w-2 h-2 rounded-full bg-[#35C5E8] shrink-0" />
+      <span className="inline-flex items-center gap-2 text-xs font-semibold text-[#059669] whitespace-nowrap">
+        <span className="w-2 h-2 rounded-full bg-[#059669] shrink-0" />
         <span>Low Risk</span>
       </span>
     );
@@ -552,8 +615,7 @@ export const ChurnPredictionView: React.FC<ChurnPredictionViewProps> = ({
               Churn Predictions
             </h1>
             <p className="text-sm text-slate-300 leading-relaxed max-w-xl">
-              Review individual {tmpl.entitySingular.toLowerCase()} risk scores, test retention
-              scenarios, and score new cohorts without manual technical configuration.
+              Inspect account churn risk, simulate retention scenarios, and score new customer batches.
             </p>
             <div className="flex flex-wrap items-center gap-4 pt-1">
               {predictionsReady && (
@@ -641,6 +703,29 @@ export const ChurnPredictionView: React.FC<ChurnPredictionViewProps> = ({
         onAutoBuild={handleAutoBuild}
         onNavigate={onNavigate}
       />
+
+      {activeModel?.isOutdated && (
+        <div className="rounded-xl border border-amber-300 bg-amber-50 px-4 py-3 flex items-center justify-between gap-3 text-xs text-amber-950">
+          <div className="flex items-center gap-2.5">
+            <AlertTriangle className="w-4 h-4 text-amber-700 shrink-0" />
+            <span>
+              <strong>Outdated model:</strong>{' '}
+              {activeModel.outdatedReason ||
+                'Source dataset for this model was deleted. Refresh predictions on the active dataset.'}
+            </span>
+          </div>
+          {canGeneratePredictions && (
+            <button
+              type="button"
+              disabled={isBuilding}
+              onClick={handleAutoBuild}
+              className="px-3 py-1 rounded-lg bg-amber-900 text-white font-semibold shrink-0 cursor-pointer whitespace-nowrap disabled:opacity-50"
+            >
+              Refresh Model
+            </button>
+          )}
+        </div>
+      )}
 
       {actionError && (
         <div className="rounded-xl border border-rose-200 bg-rose-50 px-4 py-3 text-xs text-rose-800">
@@ -814,11 +899,19 @@ export const ChurnPredictionView: React.FC<ChurnPredictionViewProps> = ({
                       onChange={(e) => setSelectedCustomerIdx(Number(e.target.value))}
                       className="w-full rounded-lg border border-slate-200 bg-[#F5F3FF]/45 px-3 py-2 text-xs text-[#11142B] font-mono focus:outline-none focus:border-[#7655E8]"
                     >
-                      {activeModel.predictions.map((p, idx) => (
-                        <option key={p.rowIndex} value={idx}>
-                          #{p.rowIndex} · {p.customerId} ({(p.churnProbability * 100).toFixed(1)}%)
-                        </option>
-                      ))}
+                      {activeModel.predictions.map((p, idx) => {
+                        const applicable = isPredictionRiskApplicable(p);
+                        const status = getEffectiveActualStatus(p);
+                        return (
+                          <option key={p.rowIndex} value={idx}>
+                            #{p.rowIndex} · {p.customerId} · {status} (
+                            {applicable
+                              ? `${(p.churnProbability * 100).toFixed(1)}%`
+                              : 'Not Applicable'}
+                            )
+                          </option>
+                        );
+                      })}
                     </select>
                   </div>
 
@@ -830,6 +923,12 @@ export const ChurnPredictionView: React.FC<ChurnPredictionViewProps> = ({
                       <span className="font-mono font-bold text-[#11142B]">
                         {selectedPrediction.customerId}
                       </span>
+                    </div>
+                    <div className="px-3.5 py-2.5 flex items-center justify-between">
+                      <span className="text-[10px] font-semibold uppercase tracking-[0.14em] text-slate-500">
+                        ACTUAL CUSTOMER STATUS
+                      </span>
+                      {renderActualStatusBadge(getEffectiveActualStatus(selectedPrediction))}
                     </div>
                     <div className="px-3.5 py-2.5 flex items-center justify-between">
                       <span className="text-[10px] font-semibold uppercase tracking-[0.14em] text-slate-500">
@@ -845,14 +944,6 @@ export const ChurnPredictionView: React.FC<ChurnPredictionViewProps> = ({
                         {selectedPrediction.split === 'Unseen Test'
                           ? 'Held-out Quality Check'
                           : 'Historical Reference'}
-                      </span>
-                    </div>
-                    <div className="px-3.5 py-2.5 flex items-center justify-between">
-                      <span className="text-[10px] font-semibold uppercase tracking-[0.14em] text-slate-500">
-                        HISTORICAL OUTCOME
-                      </span>
-                      <span className="font-semibold text-[#11142B]">
-                        {selectedPrediction.actualChurn}
                       </span>
                     </div>
                   </div>
@@ -877,28 +968,50 @@ export const ChurnPredictionView: React.FC<ChurnPredictionViewProps> = ({
                 <div className="lg:col-span-4 p-6 flex flex-col justify-between bg-gradient-to-b from-[#F5F3FF]/30 via-white to-[#F5F3FF]/30">
                   <div className="flex items-center justify-between text-[11px] border-b border-slate-200/80 pb-2.5">
                     <span className="font-semibold uppercase tracking-[0.18em] text-slate-500">
-                      PROBABILITY ASSESSMENT
+                      PREDICTED CHURN RISK
                     </span>
-                    {renderRiskDotLabel(selectedPrediction.riskCategory)}
+                    {renderRiskDotLabel(
+                      selectedPrediction.riskCategory,
+                      isPredictionRiskApplicable(selectedPrediction)
+                    )}
                   </div>
 
                   <div className="my-auto py-4">
-                    <EnterpriseRiskDial
-                      probability={selectedPrediction.churnProbability}
-                      riskCategory={selectedPrediction.riskCategory}
-                      predictedLabel={selectedPrediction.predictedChurn}
-                      customerId={selectedPrediction.customerId}
-                    />
+                    {isPredictionRiskApplicable(selectedPrediction) ? (
+                      <EnterpriseRiskDial
+                        probability={selectedPrediction.churnProbability}
+                        riskCategory={selectedPrediction.riskCategory}
+                        predictedLabel={selectedPrediction.predictedChurn}
+                        customerId={selectedPrediction.customerId}
+                      />
+                    ) : (
+                      <div className="rounded-xl border border-red-200 bg-red-50/70 p-6 text-center space-y-2.5">
+                        <div className="text-xs font-bold uppercase tracking-[0.14em] text-[#DC2626]">
+                          {getEffectiveActualStatus(selectedPrediction) === 'Churned'
+                            ? 'Already Churned (Historical)'
+                            : 'Status Conflict — Review Required'}
+                        </div>
+                        <div className="font-display text-2xl font-bold text-[#11142B]">
+                          Not Applicable
+                        </div>
+                        <p className="text-xs text-slate-600 leading-relaxed">
+                          {getEffectiveActualStatus(selectedPrediction) === 'Churned'
+                            ? 'Account has already churned; forward risk scoring is not applicable.'
+                            : selectedPrediction.statusConflictReason ||
+                              'Conflicting status or date fields detected. Resolve conflicts in Data Management.'}
+                        </p>
+                      </div>
+                    )}
                   </div>
 
-                  <div className="rounded-lg border border-slate-200/80 bg-white/90 px-3.5 py-2.5 flex items-start gap-2 text-[11px] text-slate-500 leading-relaxed">
-                    <Info className="w-3.5 h-3.5 text-[#397BFF] shrink-0 mt-0.5" />
+                  <div className="rounded-lg border border-slate-200/80 bg-white/90 px-3.5 py-2.5 flex items-center gap-2 text-[11px] text-slate-500">
+                    <Info className="w-3.5 h-3.5 text-[#397BFF] shrink-0" />
                     <span>
-                      Estimated by your company&apos;s{' '}
+                      Scored by{' '}
                       <strong className="text-[#11142B]">
                         {activeModel.modelName} ({activeModel.version})
-                      </strong>
-                      . Scores represent risk signals to prioritize proactive retention outreach.
+                      </strong>{' '}
+                      · Active accounts only.
                     </span>
                   </div>
                 </div>
@@ -1042,22 +1155,12 @@ export const ChurnPredictionView: React.FC<ChurnPredictionViewProps> = ({
                           Current Customer Prediction Template ({activeModel.modelName}{' '}
                           {activeModel.version})
                         </div>
-                        <p className="text-xs text-slate-600 leading-relaxed max-w-2xl">
-                          Contains{' '}
+                        <p className="text-xs text-slate-600 max-w-2xl">
+                          Pre-formatted with{' '}
                           <span className="font-mono font-semibold text-[#11142B]">
-                            {[
-                              dataset.mapping.idColumn || 'customer_id',
-                              ...dataset.mapping.featureColumns,
-                            ].join(', ')}
+                            {dataset.mapping.featureColumns.length + 1} input fields
                           </span>{' '}
-                          and intentionally excludes outcome/leakage columns (
-                          <span className="font-mono">
-                            {dataset.mapping.targetColumn || 'churn_status'}
-                            {dataset.mapping.churnDateColumn
-                              ? `, ${dataset.mapping.churnDateColumn}`
-                              : ''}
-                          </span>
-                          ).
+                          (outcome columns excluded automatically).
                         </p>
                       </div>
 
@@ -1114,9 +1217,8 @@ export const ChurnPredictionView: React.FC<ChurnPredictionViewProps> = ({
                           Upload Unlabeled {tmpl.entitySingular} File ({activeModel.version})
                         </div>
                         <p className="text-xs text-slate-600">
-                          Upload a CSV or Excel (.xlsx/.xls) file of active{' '}
-                          {tmpl.entityPlural.toLowerCase()} to estimate forward-looking churn
-                          probabilities for retention prioritization.
+                          Upload a `.xlsx`, `.xls`, or `.csv` file to score active{' '}
+                          {tmpl.entityPlural.toLowerCase()}.
                         </p>
                       </div>
 
@@ -1304,14 +1406,31 @@ export const ChurnPredictionView: React.FC<ChurnPredictionViewProps> = ({
                 </select>
 
                 <select
+                  value={actualStatusFilter}
+                  onChange={(e) =>
+                    setActualStatusFilter(
+                      e.target.value as 'ALL' | 'Active' | 'Churned' | 'Inconsistent'
+                    )
+                  }
+                  aria-label="Filter by Actual Customer Status"
+                  className="rounded-lg border border-slate-200 bg-[#F5F3FF]/45 px-2.5 py-1.5 text-xs text-[#11142B] focus:outline-none focus:border-[#7655E8]"
+                >
+                  <option value="ALL">All Statuses</option>
+                  <option value="Active">Active Customers</option>
+                  <option value="Churned">Already Churned</option>
+                  <option value="Inconsistent">Inconsistent Status</option>
+                </select>
+
+                <select
                   value={riskFilter}
                   onChange={(e) => setRiskFilter(e.target.value as 'ALL' | RiskCategory)}
+                  aria-label="Filter by Predicted Risk Tier"
                   className="rounded-lg border border-slate-200 bg-[#F5F3FF]/45 px-2.5 py-1.5 text-xs text-[#11142B] focus:outline-none focus:border-[#7655E8]"
                 >
                   <option value="ALL">All Risk Tiers</option>
-                  <option value="Higher Estimated Churn Risk">High Risk Only</option>
-                  <option value="Moderate Estimated Churn Risk">Moderate Risk Only</option>
-                  <option value="Low Estimated Churn Risk">Low Risk Only</option>
+                  <option value="Higher Estimated Churn Risk">Active: High Risk</option>
+                  <option value="Moderate Estimated Churn Risk">Active: Medium Risk</option>
+                  <option value="Low Estimated Churn Risk">Active: Low Risk</option>
                 </select>
 
                 <button
@@ -1354,16 +1473,15 @@ export const ChurnPredictionView: React.FC<ChurnPredictionViewProps> = ({
                       {tmpl.entitySingular} ID / Customer Name
                     </th>
                     <th className="py-3 px-3">Sample Group</th>
-                    <th className="py-3 px-3">Historical Status</th>
-                    <th className="py-3 px-3">Predicted Signal</th>
-                    <th className="py-3 px-3 text-right">Churn Probability</th>
-                    <th className="py-3 pl-3 pr-6">Risk Classification</th>
+                    <th className="py-3 px-3">Actual Customer Status</th>
+                    <th className="py-3 px-3 text-right">Predicted Churn Probability</th>
+                    <th className="py-3 pl-3 pr-6">Predicted Risk Classification</th>
                   </tr>
                 </thead>
                 <tbody className="divide-y divide-slate-100 text-xs">
                   {filteredPredictions.length === 0 ? (
                     <tr>
-                      <td colSpan={7} className="py-10 text-center text-slate-500">
+                      <td colSpan={6} className="py-10 text-center text-slate-500">
                         <div className="space-y-2">
                           <div>No customers found</div>
                           <button
@@ -1371,6 +1489,7 @@ export const ChurnPredictionView: React.FC<ChurnPredictionViewProps> = ({
                             onClick={() => {
                               setSearchId('');
                               setRiskFilter('ALL');
+                              setActualStatusFilter('ALL');
                               setSplitFilter('ALL');
                             }}
                             className="text-xs font-semibold text-[#7655E8] hover:text-[#397BFF] cursor-pointer"
@@ -1387,6 +1506,8 @@ export const ChurnPredictionView: React.FC<ChurnPredictionViewProps> = ({
                       );
                       const isSelected = originalIdx === selectedCustomerIdx;
                       const customerName = resolveCustomerName(p);
+                      const actualStatus = getEffectiveActualStatus(p);
+                      const riskApplicable = isPredictionRiskApplicable(p);
                       return (
                         <tr
                           key={p.rowIndex}
@@ -1427,20 +1548,21 @@ export const ChurnPredictionView: React.FC<ChurnPredictionViewProps> = ({
                           >
                             {p.split === 'Unseen Test' ? 'Validation Sample' : 'Reference Sample'}
                           </td>
-                          <td className="py-2.5 px-3 text-slate-600">{p.actualChurn}</td>
-                          <td
-                            className={`py-2.5 px-3 font-semibold ${
-                              p.predictedChurn === 'Likely to Churn'
-                                ? 'text-[#9D2EC5]'
-                                : 'text-[#0C7D99]'
-                            }`}
-                          >
-                            {p.predictedChurn}
+                          <td className="py-2.5 px-3">
+                            {renderActualStatusBadge(actualStatus)}
                           </td>
                           <td className="py-2.5 px-3 text-right font-mono tabular-nums font-bold text-[#11142B]">
-                            {(p.churnProbability * 100).toFixed(1)}%
+                            {riskApplicable ? (
+                              `${(p.churnProbability * 100).toFixed(1)}%`
+                            ) : (
+                              <span className="font-sans font-medium text-slate-400">
+                                Not Applicable
+                              </span>
+                            )}
                           </td>
-                          <td className="py-2.5 pl-3 pr-6">{renderRiskDotLabel(p.riskCategory)}</td>
+                          <td className="py-2.5 pl-3 pr-6">
+                            {renderRiskDotLabel(p.riskCategory, riskApplicable)}
+                          </td>
                         </tr>
                       );
                     })

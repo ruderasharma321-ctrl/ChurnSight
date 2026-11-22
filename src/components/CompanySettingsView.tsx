@@ -351,11 +351,10 @@ export const CompanySettingsView: React.FC<CompanySettingsViewProps> = ({
     <div className="space-y-6 max-w-5xl">
       <div>
         <h1 className="text-2xl font-bold text-[#11142B] tracking-tight">
-          Company Workspace &amp; Governance Settings
+          Workspace &amp; Churn Settings
         </h1>
         <p className="text-sm text-slate-600 mt-0.5">
-          Configure {company.name}&apos;s industry profile, churn definition formula, subscription
-          quotas, and workspace audit trail
+          Industry profile, churn formula, privacy controls, and quotas for {company.name}
         </p>
       </div>
 
@@ -598,11 +597,10 @@ export const CompanySettingsView: React.FC<CompanySettingsViewProps> = ({
       >
         <div>
           <h2 className="text-base font-bold text-[#11142B]">
-            Workspace Churn Definition &amp; Formula
+            Churn Definition &amp; Formula
           </h2>
           <p className="text-xs text-slate-500 mt-0.5">
-            Defines how ChurnSight interprets and documents churn calculations across dashboards,
-            visualisations, and PDF exports.
+            Controls churn rate calculations across dashboards, analytics, and reports.
           </p>
         </div>
 
@@ -769,17 +767,11 @@ export const CompanySettingsView: React.FC<CompanySettingsViewProps> = ({
           </span>
         </div>
 
-        <div className="bg-[#F5F3FF] border border-purple-200/80 rounded-xl p-3.5 text-xs text-[#15152F] space-y-1.5">
+        <div className="bg-[#F5F3FF] border border-purple-200/80 rounded-xl p-3.5 text-xs text-[#15152F] space-y-1">
           <div className="font-bold text-[#11142B]">{privacySettings.isolationGuarantee}</div>
-          <p className="text-slate-600 leading-relaxed">
-            Raw customer identifiers, spreadsheets, and workspace ML weights are partitioned strictly
-            under company ID <span className="font-mono font-semibold">{company.id}</span>.
-            Cross-company pre-trained industry baseline models are currently in{' '}
-            <span className="font-mono font-semibold text-[#7655E8]">
-              {privacySettings.crossCompanyValidationStatus}
-            </span>{' '}
-            status—no external cross-company model weights are active until verified &amp; explicitly
-            enabled.
+          <p className="text-slate-600">
+            Tenant workspace <span className="font-mono font-semibold">{company.id}</span> keeps all
+            customer records and model weights strictly isolated.
           </p>
         </div>
 
@@ -798,12 +790,10 @@ export const CompanySettingsView: React.FC<CompanySettingsViewProps> = ({
             />
             <div className="text-xs space-y-0.5">
               <div className="font-bold text-[#11142B]">
-                Opt-in to Validated Industry Cross-Company Cold-Start Baselines (Future Release)
+                Opt-in to Industry Cold-Start Baselines (Future Release)
               </div>
               <p className="text-slate-600">
-                Allow this workspace to evaluate future anonymized, industry-validated pre-trained
-                baseline scoring during cold-start periods before sufficient company churn history is
-                accumulated.
+                Evaluate anonymized industry baselines during cold-start periods.
               </p>
             </div>
           </label>
@@ -822,11 +812,10 @@ export const CompanySettingsView: React.FC<CompanySettingsViewProps> = ({
             />
             <div className="text-xs space-y-0.5">
               <div className="font-bold text-[#11142B]">
-                Consent to De-Identified Pattern Contribution (Strictly Opt-In)
+                De-Identified Pattern Contribution (Opt-In)
               </div>
               <p className="text-slate-600">
-                Off by default. Raw customer records, IDs, or spreadsheets are never shared across
-                tenants under any setting.
+                Off by default. Raw customer records are never shared across workspaces.
               </p>
             </div>
           </label>
@@ -907,13 +896,11 @@ export const CompanySettingsView: React.FC<CompanySettingsViewProps> = ({
           </div>
         )}
 
-        <div className="bg-[#397BFF]/8 border border-[#397BFF]/25 rounded-xl p-3.5 flex items-start gap-2.5 text-xs text-[#11142B]">
-          <Info className="w-4 h-4 text-[#397BFF] shrink-0 mt-0.5" />
+        <div className="bg-[#397BFF]/8 border border-[#397BFF]/25 rounded-xl p-3.5 flex items-center gap-2.5 text-xs text-[#11142B]">
+          <Info className="w-4 h-4 text-[#397BFF] shrink-0" />
           <span>
-            <strong>Billing Integration Notice:</strong> Quotas (users, dataset row limits, model
-            access, batch scoring, PDF exports, and audit logs) are enforced in real time below.
-            Automated Stripe Checkout billing is not yet wired to a live payment gateway, so tier
-            selection switches workspace entitlements immediately in preview mode.
+            <strong>Preview Mode:</strong> Plan entitlements apply immediately without billing
+            charges.
           </span>
         </div>
 

@@ -10,9 +10,11 @@ import {
   HelpCircle,
   Info,
   LifeBuoy,
+  RotateCcw,
   Search,
   SlidersHorizontal,
   Table2,
+  Trash2,
   Upload,
   X,
 } from 'lucide-react';
@@ -25,6 +27,7 @@ import {
   ColumnMapping,
   CompanyWorkspaceInfo,
   DatasetState,
+  DuplicateIdHandlingMode,
   IndustryKey,
   ModelEvaluationResult,
   NavTab,
@@ -33,6 +36,7 @@ import {
   SatisfactionScale,
   StagedDatasetImport,
   TemplateColumnTier,
+  UploadedDatasetSummary,
   UploadPathway,
 } from '../types/churn';
 import { apiFetch, downloadProtectedCsv } from '../utils/apiClient';
@@ -55,6 +59,7 @@ import { TableRowsSkeleton } from './PremiumUI';
 interface CustomerDataViewProps {
   company: CompanyWorkspaceInfo;
   dataset: DatasetState | null;
+  uploadedDatasets?: UploadedDatasetSummary[];
   analytics?: AnalyticsSummary | null;
   activeModel?: ModelEvaluationResult | null;
   stagedImport: StagedDatasetImport | null;
@@ -76,9 +81,12 @@ interface CustomerDataViewProps {
     mapping: ColumnMapping;
     churnDefinition: ChurnDefinition;
     importMode?: 'valid_only' | 'all';
+    duplicateStrategy?: DuplicateIdHandlingMode;
     satisfactionScale?: SatisfactionScale;
   }) => Promise<void>;
   onCancelStaged: () => void;
+  onDeleteDataset?: (datasetId: string) => Promise<void>;
+  onActivateDataset?: (datasetId: string) => Promise<void>;
   onUpdateMapping: (mapping: Partial<ColumnMapping>) => Promise<void>;
   onSaveChurnDefinition?: (def: ChurnDefinition) => Promise<void>;
   onRecordOutcome?: (
@@ -241,6 +249,7 @@ function readFileAsBase64(file: File): Promise<string> {
 export const CustomerDataView: React.FC<CustomerDataViewProps> = ({
   company,
   dataset,
+  uploadedDatasets = [],
   analytics = null,
   activeModel = null,
   stagedImport,
@@ -253,6 +262,8 @@ export const CustomerDataView: React.FC<CustomerDataViewProps> = ({
   onStageUpload,
   onCommitStaged,
   onCancelStaged,
+  onDeleteDataset,
+  onActivateDataset,
   onUpdateMapping,
   onSaveChurnDefinition,
   onRecordOutcome,
@@ -262,9 +273,15 @@ export const CustomerDataView: React.FC<CustomerDataViewProps> = ({
 }) => {
   const tmpl = getIndustryTemplate(company.industry, company.customIndustryName);
   const fileInputRef = useRef<HTMLInputElement | null>(null);
+  const uploadSectionRef = useRef<HTMLDivElement | null>(null);
   const [dragOver, setDragOver] = useState(false);
   const [uploadError, setUploadError] = useState<string | null>(null);
   const [isCommitting, setIsCommitting] = useState(false);
+  const [duplicateStrategy, setDuplicateStrategy] = useState<DuplicateIdHandlingMode>('replace');
+  const [deleteTarget, setDeleteTarget] = useState<UploadedDatasetSummary | null>(null);
+  const [isDeletingDataset, setIsDeletingDataset] = useState(false);
+  const [activatingDatasetId, setActivatingDatasetId] = useState<string | null>(null);
+  const [datasetActionNotice, setDatasetActionNotice] = useState<string | null>(null);
 
   // Pre-upload Churn Definition, Upload Mode, Satisfaction Scale & Pathway states
   const [preUploadChurnDef, setPreUploadChurnDef] = useState<ChurnDefinition>(
@@ -353,7 +370,9 @@ export const CustomerDataView: React.FC<CustomerDataViewProps> = ({
         ...stagedImport.suggestedChurnDefinition,
         confirmedByUser: Boolean(company.churnDefinition?.confirmedByUser),
       });
+      setDuplicateStrategy(stagedImport.duplicateConflict ? 'update' : 'replace');
       setUploadError(null);
+      setDatasetActionNotice(null);
     } else {
       setStagedMapping(null);
       setStagedChurnDef(null);
@@ -486,6 +505,7 @@ export const CustomerDataView: React.FC<CustomerDataViewProps> = ({
       return;
     }
     setUploadError(null);
+    setDatasetActionNotice(null);
     setIsCommitting(true);
     try {
       await onCommitStaged({
@@ -499,15 +519,62 @@ export const CustomerDataView: React.FC<CustomerDataViewProps> = ({
           confirmedAt: stagedChurnDef.confirmedAt || new Date().toISOString(),
         },
         importMode,
+        duplicateStrategy: stagedImport.duplicateConflict ? duplicateStrategy : 'replace',
         satisfactionScale,
       });
       setPage(1);
       setSearchQuery('');
+      setDatasetActionNotice(`Imported "${stagedImport.fileName}" successfully.`);
     } catch (err: unknown) {
       setUploadError(err instanceof Error ? err.message : 'Failed to commit dataset.');
     } finally {
       setIsCommitting(false);
     }
+  };
+
+  const handleConfirmDeleteDataset = async () => {
+    if (!deleteTarget || !onDeleteDataset) return;
+    setUploadError(null);
+    setDatasetActionNotice(null);
+    setIsDeletingDataset(true);
+    const deletedName = deleteTarget.fileName;
+    try {
+      await onDeleteDataset(deleteTarget.datasetId);
+      setDeleteTarget(null);
+      setPage(1);
+      setSearchQuery('');
+      setDatasetActionNotice(
+        `Deleted "${deletedName}". Associated exclusive records and dependent predictions were removed.`
+      );
+    } catch (err: unknown) {
+      setUploadError(err instanceof Error ? err.message : 'Failed to delete dataset.');
+    } finally {
+      setIsDeletingDataset(false);
+    }
+  };
+
+  const handleTriggerActivateDataset = async (dsEntry: UploadedDatasetSummary) => {
+    if (!onActivateDataset) return;
+    setUploadError(null);
+    setDatasetActionNotice(null);
+    setActivatingDatasetId(dsEntry.datasetId);
+    try {
+      await onActivateDataset(dsEntry.datasetId);
+      setPage(1);
+      setSearchQuery('');
+      setDatasetActionNotice(`Loaded "${dsEntry.fileName}" as the active workspace dataset.`);
+    } catch (err: unknown) {
+      setUploadError(err instanceof Error ? err.message : 'Failed to load selected dataset.');
+    } finally {
+      setActivatingDatasetId(null);
+    }
+  };
+
+  const handleScrollToUpload = () => {
+    if (stagedImport) {
+      onCancelStaged();
+    }
+    uploadSectionRef.current?.scrollIntoView({ behavior: 'smooth', block: 'center' });
   };
 
   const toggleStagedFeatureColumn = (colName: string) => {
@@ -639,29 +706,33 @@ export const CustomerDataView: React.FC<CustomerDataViewProps> = ({
     <div className="w-full min-w-0 space-y-6">
       {/* A. Full-Width Page Heading & B. Template Downloads Toolbar */}
       <section className="bg-white border border-purple-100/90 rounded-2xl shadow-sm shadow-purple-950/[0.04] p-5 sm:p-6 space-y-5">
-        {/* A. Page Heading & Description (Full-Width, Never Squeezed) */}
-        <div className="w-full min-w-0 space-y-2">
-          <div className="text-xs font-medium text-slate-500 flex flex-wrap items-center gap-2">
-            <span className="font-semibold text-[#7655E8]">{company.name}</span>
-            <span aria-hidden="true">·</span>
-            <span>{tmpl.label}</span>
-            <span aria-hidden="true">·</span>
-            <span>Multi-Tenant Workspace Import</span>
+        {/* A. Page Heading */}
+        <div className="w-full min-w-0 flex flex-col lg:flex-row lg:items-center lg:justify-between gap-3">
+          <div className="space-y-1">
+            <h1 className="font-display text-2xl sm:text-3xl font-extrabold text-[#15152F] tracking-tight">
+              Data Management
+            </h1>
+            <p className="text-sm text-slate-600">
+              Import Excel or CSV datasets, validate quality, and manage uploaded files for {company.name}.
+            </p>
           </div>
-          <h1 className="font-display text-2xl sm:text-3xl font-extrabold text-[#15152F] tracking-tight">
-            Customer Data Import Centre
-          </h1>
-          <p className="text-sm text-slate-600 leading-relaxed max-w-4xl">
-            Upload your customer information in bulk to understand customer behaviour, identify
-            churn risks and discover opportunities to improve customer retention.
-          </p>
+          {canUploadAndAnalyse && (
+            <button
+              type="button"
+              onClick={handleScrollToUpload}
+              className="inline-flex items-center gap-2 px-4 py-2.5 bg-gradient-to-r from-[#7655E8] to-[#E84FA8] hover:opacity-95 text-white text-xs font-bold rounded-xl shadow-sm transition-all whitespace-nowrap shrink-0 self-start lg:self-auto cursor-pointer"
+            >
+              <Upload className="w-3.5 h-3.5" />
+              <span>Upload New Dataset</span>
+            </button>
+          )}
         </div>
 
         {/* B. Template Downloads & Sample Data Toolbar */}
-        <div className="pt-4 border-t border-purple-100 space-y-3">
+        <div className="pt-4 border-t border-purple-100 space-y-2.5">
           <div className="flex flex-wrap items-center justify-between gap-2">
             <div className="text-xs font-bold uppercase tracking-[0.12em] text-[#4C4A6E]">
-              Template Downloads &amp; Sample Data
+              Templates &amp; Quick Start
             </div>
             <button
               type="button"
@@ -669,7 +740,7 @@ export const CustomerDataView: React.FC<CustomerDataViewProps> = ({
               className="inline-flex items-center gap-1.5 text-xs font-semibold text-[#7655E8] hover:text-[#E84FA8] transition-colors whitespace-nowrap shrink-0 cursor-pointer"
             >
               <HelpCircle className="w-3.5 h-3.5" />
-              <span>View Data Requirements</span>
+              <span>Data Requirements</span>
             </button>
           </div>
 
@@ -689,7 +760,7 @@ export const CustomerDataView: React.FC<CustomerDataViewProps> = ({
               className="inline-flex items-center gap-1.5 px-3.5 py-2 bg-[#F6F3FF] hover:bg-purple-100 text-[#5B3AD6] border border-purple-200/80 text-xs font-semibold rounded-xl transition-colors whitespace-nowrap shrink-0 cursor-pointer"
             >
               <Table2 className="w-3.5 h-3.5" />
-              <span>View Sample Dataset</span>
+              <span>Preview Sample</span>
             </button>
 
             <button
@@ -722,7 +793,7 @@ export const CustomerDataView: React.FC<CustomerDataViewProps> = ({
               className="inline-flex items-center gap-1.5 px-3.5 py-2 bg-white hover:bg-[#F6F3FF] text-[#15152F] border border-purple-200 text-xs font-semibold rounded-xl transition-colors whitespace-nowrap shrink-0 cursor-pointer"
             >
               <Download className="w-3.5 h-3.5 text-[#7655E8]" />
-              <span>Download Sample CSV</span>
+              <span>Sample CSV</span>
             </button>
 
             {canUploadAndAnalyse && (
@@ -730,7 +801,7 @@ export const CustomerDataView: React.FC<CustomerDataViewProps> = ({
                 type="button"
                 onClick={onLoadSample}
                 disabled={isLoading}
-                className="inline-flex items-center gap-1.5 px-3.5 py-2 bg-gradient-to-r from-[#7655E8] to-[#E84FA8] hover:opacity-95 text-white text-xs font-semibold rounded-xl shadow-xs transition-all disabled:opacity-50 cursor-pointer whitespace-nowrap shrink-0"
+                className="inline-flex items-center gap-1.5 px-3.5 py-2 bg-[#F5F3FF] hover:bg-purple-100 text-[#7655E8] border border-purple-200 text-xs font-bold rounded-xl transition-all disabled:opacity-50 cursor-pointer whitespace-nowrap shrink-0"
               >
                 <Database className="w-3.5 h-3.5" />
                 <span>{isLoading ? 'Loading...' : tmpl.demoDatasetLabel}</span>
@@ -738,43 +809,158 @@ export const CustomerDataView: React.FC<CustomerDataViewProps> = ({
             )}
           </div>
 
-          <p className="text-xs text-slate-500 leading-relaxed">
-            Recommended: Downloads a single consolidated Excel workbook containing{' '}
-            <span className="font-mono font-semibold text-[#15152F]">Customer_Data</span> (1 row per
-            customer with all supported fields) and{' '}
-            <span className="font-mono font-semibold text-[#15152F]">Ticket_Data</span> (linked via{' '}
-            <span className="font-mono font-semibold text-[#15152F]">Customer_ID</span>). Existing{' '}
-            <span className="font-mono">.csv</span> files remain fully supported for upload below.
+          <p className="text-xs text-slate-500">
+            Single Excel workbook with <span className="font-mono font-semibold text-[#15152F]">Customer_Data</span> and{' '}
+            <span className="font-mono font-semibold text-[#15152F]">Ticket_Data</span> sheets (<span className="font-mono">.csv</span> also supported).
           </p>
         </div>
+      </section>
+
+      {datasetActionNotice && (
+        <div className="bg-[#16C995]/12 border border-[#16C995]/35 rounded-2xl px-4 py-3 flex items-center justify-between gap-3 text-xs text-[#065F46]">
+          <div className="flex items-center gap-2">
+            <CheckCircle2 className="w-4 h-4 text-[#16C995] shrink-0" />
+            <span className="font-medium">{datasetActionNotice}</span>
+          </div>
+          <button
+            type="button"
+            onClick={() => setDatasetActionNotice(null)}
+            className="text-xs font-semibold underline cursor-pointer shrink-0"
+          >
+            Dismiss
+          </button>
+        </div>
+      )}
+
+      {/* UPLOADED DATASETS MANAGEMENT */}
+      <section className="bg-white border border-purple-100/90 rounded-2xl shadow-sm shadow-purple-950/[0.04] p-5 sm:p-6 space-y-4 min-w-0">
+        <div className="flex flex-col sm:flex-row sm:items-center sm:justify-between gap-3">
+          <div>
+            <h2 className="text-base font-bold text-[#15152F]">Uploaded Datasets</h2>
+            <p className="text-xs text-slate-500 mt-0.5">
+              {uploadedDatasets.length === 0
+                ? 'No datasets uploaded in this workspace yet.'
+                : `${uploadedDatasets.length} dataset${uploadedDatasets.length === 1 ? '' : 's'} stored in workspace`}
+            </p>
+          </div>
+          {canUploadAndAnalyse && uploadedDatasets.length > 0 && (
+            <button
+              type="button"
+              onClick={handleScrollToUpload}
+              className="inline-flex items-center gap-1.5 px-3.5 py-2 rounded-xl border border-purple-200 bg-[#F5F3FF] hover:bg-purple-100 text-xs font-semibold text-[#5B3AD6] cursor-pointer whitespace-nowrap self-start sm:self-auto"
+            >
+              <Upload className="w-3.5 h-3.5" />
+              <span>Upload Replacement</span>
+            </button>
+          )}
+        </div>
+
+        {uploadedDatasets.length === 0 ? (
+          <div className="rounded-xl border border-dashed border-purple-200 bg-[#F5F3FF]/40 px-4 py-6 text-center text-xs text-slate-500">
+            Upload an Excel or CSV file below or load the demonstration dataset to begin.
+          </div>
+        ) : (
+          <div className="overflow-x-auto border border-purple-100 rounded-xl">
+            <table className="w-full text-left border-collapse text-xs">
+              <thead className="bg-[#F5F3FF] text-[#4C4A6E] border-b border-purple-100">
+                <tr>
+                  <th className="py-2.5 px-4 font-semibold whitespace-nowrap">Filename</th>
+                  <th className="py-2.5 px-4 font-semibold whitespace-nowrap">Upload Date</th>
+                  <th className="py-2.5 px-4 font-semibold text-right whitespace-nowrap">Customers</th>
+                  <th className="py-2.5 px-4 font-semibold text-right whitespace-nowrap">Tickets</th>
+                  <th className="py-2.5 px-4 font-semibold whitespace-nowrap">Status</th>
+                  <th className="py-2.5 px-4 font-semibold text-right whitespace-nowrap">Actions</th>
+                </tr>
+              </thead>
+              <tbody className="divide-y divide-purple-50">
+                {uploadedDatasets.map((dsItem) => {
+                  const statusColor =
+                    dsItem.importStatus === 'Active'
+                      ? 'text-[#0E9F6E] font-bold'
+                      : dsItem.importStatus === 'Partial (Errors Excluded)'
+                        ? 'text-amber-700 font-semibold'
+                        : 'text-[#397BFF] font-semibold';
+                  return (
+                    <tr key={dsItem.datasetId} className="hover:bg-[#F5F3FF]/45 transition-colors">
+                      <td className="py-2.5 px-4">
+                        <div className="font-semibold text-[#15152F]">{dsItem.fileName}</div>
+                        <div className="text-[11px] font-mono text-slate-500">
+                          {dsItem.sourceFormat.toUpperCase()}
+                          {dsItem.uploadMode === 'tickets' ? ' · Ticket History' : ''}
+                          {dsItem.isSample ? ' · Sample' : ''}
+                        </div>
+                      </td>
+                      <td className="py-2.5 px-4 font-mono tabular-nums text-slate-600 whitespace-nowrap">
+                        {new Date(dsItem.uploadedAt).toLocaleString()}
+                      </td>
+                      <td className="py-2.5 px-4 text-right font-mono tabular-nums font-semibold text-[#15152F] whitespace-nowrap">
+                        {dsItem.uploadMode === 'tickets'
+                          ? '—'
+                          : dsItem.customerCount.toLocaleString()}
+                      </td>
+                      <td className="py-2.5 px-4 text-right font-mono tabular-nums text-slate-700 whitespace-nowrap">
+                        {dsItem.ticketCount > 0 ? dsItem.ticketCount.toLocaleString() : '—'}
+                      </td>
+                      <td className={`py-2.5 px-4 whitespace-nowrap ${statusColor}`}>
+                        {dsItem.importStatus}
+                      </td>
+                      <td className="py-2.5 px-4 text-right whitespace-nowrap">
+                        <div className="inline-flex items-center justify-end gap-2">
+                          {canUploadAndAnalyse &&
+                            dsItem.importStatus !== 'Active' &&
+                            dsItem.uploadMode !== 'tickets' &&
+                            onActivateDataset && (
+                              <button
+                                type="button"
+                                disabled={activatingDatasetId === dsItem.datasetId || isLoading}
+                                onClick={() => handleTriggerActivateDataset(dsItem)}
+                                className="inline-flex items-center gap-1 px-2.5 py-1.5 rounded-lg border border-purple-200 bg-white hover:bg-[#F5F3FF] text-[#5B3AD6] font-semibold cursor-pointer disabled:opacity-50"
+                              >
+                                <RotateCcw className="w-3 h-3" />
+                                <span>
+                                  {activatingDatasetId === dsItem.datasetId ? 'Loading...' : 'Load'}
+                                </span>
+                              </button>
+                            )}
+                          {canUploadAndAnalyse && onDeleteDataset && (
+                            <button
+                              type="button"
+                              disabled={isDeletingDataset || isLoading}
+                              onClick={() => setDeleteTarget(dsItem)}
+                              className="inline-flex items-center gap-1 px-2.5 py-1.5 rounded-lg border border-[#FF786B]/50 bg-[#FF786B]/10 hover:bg-[#FF786B]/20 text-[#9A2E25] font-semibold cursor-pointer disabled:opacity-50"
+                            >
+                              <Trash2 className="w-3 h-3" />
+                              <span>Delete</span>
+                            </button>
+                          )}
+                        </div>
+                      </td>
+                    </tr>
+                  );
+                })}
+              </tbody>
+            </table>
+          </div>
+        )}
       </section>
 
       {/* C. Satisfaction Score Scale Configuration & D. Upload Mode Selection */}
       <div className="grid grid-cols-1 lg:grid-cols-2 gap-5 items-stretch">
         {/* C. Satisfaction Score Scale Configuration */}
-        <section className="bg-white border border-purple-100/90 rounded-2xl shadow-sm shadow-purple-950/[0.04] p-5 flex flex-col justify-between space-y-4 min-w-0">
+        <section className="bg-white border border-purple-100/90 rounded-2xl shadow-sm shadow-purple-950/[0.04] p-5 flex flex-col justify-between space-y-3 min-w-0">
           <div className="space-y-1">
-            <div className="text-[11px] font-bold uppercase tracking-[0.14em] text-[#7655E8]">
-              Satisfaction Configuration
-            </div>
             <h2 className="text-sm sm:text-base font-bold text-[#15152F]">
               Satisfaction Score Scale
             </h2>
-            <p className="text-xs text-slate-600 leading-relaxed">
-              Specify the scoring scale used in your spreadsheets so ChurnSight validates values
-              accurately ({selectedScaleSpec.rangeHint}).
+            <p className="text-xs text-slate-500">
+              Validation range for CSAT/NPS columns ({selectedScaleSpec.rangeHint}).
             </p>
           </div>
 
-          <div className="space-y-2.5">
-            <label
-              htmlFor="satisfaction-scale-select"
-              className="block text-xs font-semibold text-[#4C4A6E]"
-            >
-              Active Validation Scale
-            </label>
+          <div className="space-y-2">
             <select
               id="satisfaction-scale-select"
+              aria-label="Satisfaction validation scale"
               value={satisfactionScale}
               disabled={isSavingScale || !canUploadAndAnalyse}
               onChange={(e) => handleSaveSatisfactionScale(e.target.value as SatisfactionScale)}
@@ -795,17 +981,13 @@ export const CustomerDataView: React.FC<CustomerDataViewProps> = ({
         </section>
 
         {/* D. Upload Mode Selection */}
-        <section className="bg-white border border-purple-100/90 rounded-2xl shadow-sm shadow-purple-950/[0.04] p-5 flex flex-col justify-between space-y-4 min-w-0">
+        <section className="bg-white border border-purple-100/90 rounded-2xl shadow-sm shadow-purple-950/[0.04] p-5 flex flex-col justify-between space-y-3 min-w-0">
           <div className="space-y-1">
-            <div className="text-[11px] font-bold uppercase tracking-[0.14em] text-[#397BFF]">
-              Upload Mode Selection
-            </div>
             <h2 className="text-sm sm:text-base font-bold text-[#15152F]">
-              Choose Data Upload Workflow
+              Upload Mode
             </h2>
-            <p className="text-xs text-slate-600 leading-relaxed">
-              Import primary customer accounts and lifecycle records, or upload standalone support
-              ticket history to enrich existing customers.
+            <p className="text-xs text-slate-500">
+              Import primary customer accounts or enrich with standalone support tickets.
             </p>
           </div>
 
@@ -827,7 +1009,7 @@ export const CustomerDataView: React.FC<CustomerDataViewProps> = ({
                 Customer Data Upload
               </div>
               <div className="text-[11px] text-slate-500 mt-0.5">
-                Consolidated .xlsx (Customer_Data + Ticket_Data) or .csv
+                .xlsx workbook or .csv
               </div>
             </button>
 
@@ -845,10 +1027,10 @@ export const CustomerDataView: React.FC<CustomerDataViewProps> = ({
                   uploadMode === 'tickets' ? 'text-[#397BFF]' : 'text-[#15152F]'
                 }`}
               >
-                Ticket / Support History Upload
+                Ticket History Upload
               </div>
               <div className="text-[11px] text-slate-500 mt-0.5">
-                Optional standalone ticket .csv/.xlsx by Customer_ID
+                Linked via Customer_ID
               </div>
             </button>
           </div>
@@ -1089,19 +1271,15 @@ export const CustomerDataView: React.FC<CustomerDataViewProps> = ({
         )}
       </section>
 
-      {/* STEP 2: THREE DATA UPLOAD PATHWAYS & INDUSTRY-SPECIFIC TEMPLATES */}
-      <section className="bg-white border border-purple-100/90 rounded-2xl shadow-sm shadow-purple-950/[0.04] p-5 space-y-5 min-w-0">
+      {/* STEP 2: DATA UPLOAD PATHWAYS */}
+      <section className="bg-white border border-purple-100/90 rounded-2xl shadow-sm shadow-purple-950/[0.04] p-5 space-y-4 min-w-0">
         <div className="flex flex-col lg:flex-row lg:items-center lg:justify-between gap-3">
           <div className="space-y-0.5 min-w-0 flex-1">
-            <div className="text-[11px] font-bold uppercase tracking-[0.14em] text-[#397BFF]">
-              Step 2 · Choose Customer Data Pathway
-            </div>
             <h2 className="text-sm sm:text-base font-bold text-[#15152F]">
-              Industry-Aware Data Templates &amp; Flexible Ingestion
+              Step 2 · Upload Pathway
             </h2>
-            <p className="text-xs text-slate-600">
-              Select the pathway matching your business stage. Download tailored CSV or Excel templates
-              or upload your own customer spreadsheet directly.
+            <p className="text-xs text-slate-500">
+              Choose the stage matching your spreadsheet before uploading.
             </p>
           </div>
 
@@ -1131,137 +1309,99 @@ export const CustomerDataView: React.FC<CustomerDataViewProps> = ({
         </div>
 
         {/* Four Explicit Upload Pathways */}
-        <div className="grid grid-cols-1 sm:grid-cols-2 xl:grid-cols-4 gap-4">
-          {/* Option 1: New Business — No Historical Churn Data */}
+        <div className="grid grid-cols-1 sm:grid-cols-2 xl:grid-cols-4 gap-3">
           <button
             type="button"
             onClick={() => {
               setSelectedPathway('new_business');
               setUploadMode('customer');
             }}
-            className={`text-left rounded-xl border p-4 transition-all cursor-pointer flex flex-col justify-between space-y-3 ${
+            className={`text-left rounded-xl border p-4 transition-all cursor-pointer flex flex-col justify-between space-y-2 ${
               selectedPathway === 'new_business'
                 ? 'border-[#397BFF] bg-[#397BFF]/[0.06] ring-1 ring-[#397BFF]/30'
                 : 'border-purple-100 bg-white hover:border-purple-200'
             }`}
           >
-            <div className="space-y-1.5">
-              <div className="text-[11px] font-mono font-bold text-[#397BFF]">
-                OPTION 1 · NEW BUSINESS
-              </div>
-              <div className="text-sm font-bold text-[#11142B]">
-                No Historical Churn Data Yet
-              </div>
-              <p className="text-xs text-slate-600 leading-relaxed">
-                Upload active, trial, or paused customers without fabricated churn labels. Enables
-                behaviour monitoring, status tracking, and baseline collection.
+            <div className="space-y-1">
+              <div className="text-[11px] font-mono font-bold text-[#397BFF]">NEW BUSINESS</div>
+              <div className="text-sm font-bold text-[#11142B]">No Historical Outcomes</div>
+              <p className="text-xs text-slate-600">
+                Track active/trial accounts and build behaviour baselines.
               </p>
-            </div>
-            <div className="text-[11px] font-mono text-slate-500 pt-2 border-t border-purple-100/80">
-              Behaviour Monitoring &amp; Baselines
             </div>
           </button>
 
-          {/* Option 2: Established Business — Historical Data Available */}
           <button
             type="button"
             onClick={() => {
               setSelectedPathway('established_historical');
               setUploadMode('customer');
             }}
-            className={`text-left rounded-xl border p-4 transition-all cursor-pointer flex flex-col justify-between space-y-3 ${
+            className={`text-left rounded-xl border p-4 transition-all cursor-pointer flex flex-col justify-between space-y-2 ${
               selectedPathway === 'established_historical'
                 ? 'border-[#7655E8] bg-[#7655E8]/[0.06] ring-1 ring-[#7655E8]/30'
                 : 'border-purple-100 bg-white hover:border-purple-200'
             }`}
           >
-            <div className="space-y-1.5">
-              <div className="text-[11px] font-mono font-bold text-[#7655E8]">
-                OPTION 2 · ESTABLISHED BUSINESS
-              </div>
-              <div className="text-sm font-bold text-[#11142B]">
-                Historical Churn Outcomes Available
-              </div>
-              <p className="text-xs text-slate-600 leading-relaxed">
-                Upload point-in-time snapshots (<span className="font-mono">observation_date</span>)
-                for customers who stayed and left to train and validate your churn model.
+            <div className="space-y-1">
+              <div className="text-[11px] font-mono font-bold text-[#7655E8]">HISTORICAL DATA</div>
+              <div className="text-sm font-bold text-[#11142B]">Past Churn Outcomes</div>
+              <p className="text-xs text-slate-600">
+                Analyse historical churn and train prediction models.
               </p>
-            </div>
-            <div className="text-[11px] font-mono text-slate-500 pt-2 border-t border-purple-100/80">
-              Analytics + Automated ML Training
             </div>
           </button>
 
-          {/* Option 3: Current Customers — Predict Churn Risk */}
           <button
             type="button"
             onClick={() => {
               setSelectedPathway('current_prediction');
               setUploadMode('customer');
             }}
-            className={`text-left rounded-xl border p-4 transition-all cursor-pointer flex flex-col justify-between space-y-3 ${
+            className={`text-left rounded-xl border p-4 transition-all cursor-pointer flex flex-col justify-between space-y-2 ${
               selectedPathway === 'current_prediction'
                 ? 'border-[#0E9F6E] bg-[#0E9F6E]/[0.06] ring-1 ring-[#0E9F6E]/30'
                 : 'border-purple-100 bg-white hover:border-purple-200'
             }`}
           >
-            <div className="space-y-1.5">
-              <div className="text-[11px] font-mono font-bold text-[#0E9F6E]">
-                OPTION 3 · CURRENT SCORING
-              </div>
-              <div className="text-sm font-bold text-[#11142B]">
-                Score Current Active Customers
-              </div>
-              <p className="text-xs text-slate-600 leading-relaxed">
-                Upload current customers without churn labels, verify feature compatibility against
-                your active model, and score churn probability &amp; revenue exposure.
+            <div className="space-y-1">
+              <div className="text-[11px] font-mono font-bold text-[#0E9F6E]">RISK SCORING</div>
+              <div className="text-sm font-bold text-[#11142B]">Score Active Customers</div>
+              <p className="text-xs text-slate-600">
+                Score current accounts against your active ML model.
               </p>
-            </div>
-            <div className="text-[11px] font-mono text-slate-500 pt-2 border-t border-purple-100/80">
-              Model Compatibility + Batch Risk Scoring
             </div>
           </button>
 
-          {/* Option 4: I Already Have Customer Data */}
           <button
             type="button"
             onClick={() => {
               setSelectedPathway('existing_custom');
               setUploadMode('customer');
             }}
-            className={`text-left rounded-xl border p-4 transition-all cursor-pointer flex flex-col justify-between space-y-3 ${
+            className={`text-left rounded-xl border p-4 transition-all cursor-pointer flex flex-col justify-between space-y-2 ${
               selectedPathway === 'existing_custom'
                 ? 'border-[#11142B] bg-[#F5F3FF] ring-1 ring-[#11142B]/20'
                 : 'border-purple-100 bg-white hover:border-purple-200'
             }`}
           >
-            <div className="space-y-1.5">
-              <div className="text-[11px] font-mono font-bold text-[#11142B]">
-                OPTION 4 · CUSTOM SPREADSHEET
-              </div>
-              <div className="text-sm font-bold text-[#11142B]">
-                I Already Have Customer Data
-              </div>
-              <p className="text-xs text-slate-600 leading-relaxed">
-                Upload any CRM, billing, or support export. ChurnSight inspects columns, maps
-                fields automatically, and flags row errors before import.
+            <div className="space-y-1">
+              <div className="text-[11px] font-mono font-bold text-[#11142B]">CUSTOM EXPORT</div>
+              <div className="text-sm font-bold text-[#11142B]">Any CRM / Billing File</div>
+              <p className="text-xs text-slate-600">
+                Auto-map columns and validate row quality before import.
               </p>
-            </div>
-            <div className="text-[11px] font-mono text-slate-500 pt-2 border-t border-purple-100/80">
-              Flexible Column Mapping + Validation
             </div>
           </button>
         </div>
 
         {/* Cold-Start Honest Notice for New Business Pathway */}
         {selectedPathway === 'new_business' && (
-          <div className="bg-amber-50 border border-amber-300 rounded-xl p-4 flex items-start gap-3 text-xs text-amber-950">
-            <AlertTriangle className="w-4 h-4 text-amber-700 shrink-0 mt-0.5" />
-            <p className="leading-relaxed font-medium">
-              Your business does not yet have sufficient historical churn outcomes for a validated
-              company-specific churn prediction model. You can still use customer analytics and
-              behaviour monitoring while ChurnSight helps you build your historical data.
-            </p>
+          <div className="bg-amber-50 border border-amber-300 rounded-xl px-4 py-3 flex items-center gap-3 text-xs text-amber-950">
+            <AlertTriangle className="w-4 h-4 text-amber-700 shrink-0" />
+            <span className="font-medium">
+              Monitoring mode active: predictive training unlocks once historical churn outcomes are recorded.
+            </span>
           </div>
         )}
 
@@ -1428,73 +1568,65 @@ export const CustomerDataView: React.FC<CustomerDataViewProps> = ({
       </section>
 
       {/* Upload Dropzone or Permission Notice */}
-      {canUploadAndAnalyse ? (
-        <div
-          onDragOver={(e) => {
-            e.preventDefault();
-            setDragOver(true);
-          }}
-          onDragLeave={() => setDragOver(false)}
-          onDrop={handleDrop}
-          className={`bg-white border-2 border-dashed rounded-2xl p-7 text-center transition-all shadow-sm shadow-purple-950/[0.03] ${
-            dragOver
-              ? 'border-[#7655E8] bg-[#7655E8]/5'
-              : 'border-purple-200 hover:border-[#7655E8]/60'
-          }`}
-        >
-          <input
-            ref={fileInputRef}
-            type="file"
-            accept=".csv,.xlsx,.xls,text/csv,application/vnd.openxmlformats-officedocument.spreadsheetml.sheet,application/vnd.ms-excel"
-            className="hidden"
-            onChange={(e) => {
-              const file = e.target.files?.[0];
-              if (file) handleFile(file);
-              e.target.value = '';
+      <div ref={uploadSectionRef}>
+        {canUploadAndAnalyse ? (
+          <div
+            onDragOver={(e) => {
+              e.preventDefault();
+              setDragOver(true);
             }}
-          />
-          <div className="max-w-xl mx-auto space-y-2.5">
-            <div className="w-11 h-11 rounded-2xl bg-gradient-to-br from-[#7655E8] to-[#E84FA8] text-white flex items-center justify-center mx-auto shadow-md shadow-[#7655E8]/25">
-              <Upload className="w-5 h-5" />
+            onDragLeave={() => setDragOver(false)}
+            onDrop={handleDrop}
+            className={`bg-white border-2 border-dashed rounded-2xl p-6 text-center transition-all shadow-sm shadow-purple-950/[0.03] ${
+              dragOver
+                ? 'border-[#7655E8] bg-[#7655E8]/5'
+                : 'border-purple-200 hover:border-[#7655E8]/60'
+            }`}
+          >
+            <input
+              ref={fileInputRef}
+              type="file"
+              accept=".csv,.xlsx,.xls,text/csv,application/vnd.openxmlformats-officedocument.spreadsheetml.sheet,application/vnd.ms-excel"
+              className="hidden"
+              onChange={(e) => {
+                const file = e.target.files?.[0];
+                if (file) handleFile(file);
+                e.target.value = '';
+              }}
+            />
+            <div className="max-w-xl mx-auto space-y-2">
+              <div className="w-10 h-10 rounded-2xl bg-gradient-to-br from-[#7655E8] to-[#E84FA8] text-white flex items-center justify-center mx-auto shadow-md shadow-[#7655E8]/25">
+                <Upload className="w-5 h-5" />
+              </div>
+              <div className="text-[11px] font-mono font-semibold text-[#7655E8]">
+                {uploadMode === 'tickets'
+                  ? 'Mode: Support Ticket History Enrichment'
+                  : `${PATHWAY_LABELS[selectedPathway]} · Scale: ${satisfactionScale.toUpperCase()}`}
+              </div>
+              <div className="text-sm font-semibold text-[#15152F]">
+                Drop an Excel (.xlsx / .xls) or CSV file here, or{' '}
+                <button
+                  type="button"
+                  onClick={() => fileInputRef.current?.click()}
+                  className="text-[#7655E8] hover:text-[#E84FA8] underline font-bold cursor-pointer transition-colors"
+                >
+                  browse your computer
+                </button>
+              </div>
+              <p className="text-xs text-slate-500">
+                Auto-detects Customer_Data &amp; Ticket_Data sheets, validates fields, and previews before import.
+              </p>
             </div>
-            <div className="text-[11px] font-mono font-semibold text-[#7655E8]">
-              {uploadMode === 'tickets'
-                ? 'Active Mode: Support Ticket History Enrichment (Links Ticket_Data to Customer_ID)'
-                : `Active Pathway: ${PATHWAY_LABELS[selectedPathway]} · Scale: ${satisfactionScale.toUpperCase()}`}
-            </div>
-            <div className="text-sm font-semibold text-[#15152F]">
-              Drag and drop an Excel (.xlsx / .xls) workbook or CSV file here, or{' '}
-              <button
-                type="button"
-                onClick={() => fileInputRef.current?.click()}
-                className="text-[#7655E8] hover:text-[#E84FA8] underline font-bold cursor-pointer transition-colors"
-              >
-                browse your computer
-              </button>
-            </div>
-            <p className="text-xs text-slate-500">
-              {uploadMode === 'tickets'
-                ? 'Uploads standalone Ticket_Data (.csv or .xlsx), deduplicates Ticket_IDs, validates Customer_ID links, and aggregates ticket metrics without double-counting.'
-                : selectedPathway === 'new_business'
-                  ? 'Automatically detects Customer_Data & Ticket_Data worksheets in Excel (.xlsx) or reads existing CSV uploads for active monitoring.'
-                  : selectedPathway === 'current_prediction'
-                    ? 'Validates feature schema compatibility against your active model (supports Excel .xlsx & CSV) for batch churn scoring.'
-                    : selectedPathway === 'established_historical'
-                      ? 'Automatically reads & validates Customer_Data and Ticket_Data worksheets separately in .xlsx workbooks (existing .csv files also supported).'
-                      : 'Auto-inspects any .xlsx or .csv spreadsheet schema, validates customers & embedded tickets separately, and previews records before commit.'}
-            </p>
           </div>
-        </div>
-      ) : (
-        <div className="bg-amber-50 border border-amber-200 rounded-2xl p-4 flex items-start gap-3 text-xs text-amber-900">
-          <Info className="w-4 h-4 text-amber-700 shrink-0 mt-0.5" />
-          <div>
-            <strong>Read-Only Dataset Access:</strong> Your Analyst account does not currently have
-            permission to upload files or modify column mappings. You may inspect existing company
-            records below or ask your Firm Administrator to enable upload permissions.
+        ) : (
+          <div className="bg-amber-50 border border-amber-200 rounded-2xl p-4 flex items-start gap-3 text-xs text-amber-900">
+            <Info className="w-4 h-4 text-amber-700 shrink-0 mt-0.5" />
+            <div>
+              <strong>Read-Only Access:</strong> Ask your Firm Administrator to enable upload permissions.
+            </div>
           </div>
-        </div>
-      )}
+        )}
+      </div>
 
       {/* Template 3: Current Customer Prediction Input Template */}
       {!stagedImport && (
@@ -2590,6 +2722,107 @@ export const CustomerDataView: React.FC<CustomerDataViewProps> = ({
             </div>
           ) : null}
 
+          {/* Duplicate Customer_ID Conflict Handling */}
+          {stagedImport.uploadMode !== 'tickets' &&
+            stagedImport.duplicateConflict &&
+            stagedImport.duplicateConflict.conflictCount > 0 && (
+              <div className="bg-amber-50 border border-amber-300 rounded-2xl p-4 sm:p-5 space-y-3 text-xs text-amber-950">
+                <div className="flex items-start gap-2.5">
+                  <AlertTriangle className="w-4 h-4 text-amber-700 shrink-0 mt-0.5" />
+                  <div className="space-y-1">
+                    <div className="font-bold text-sm text-[#15152F]">
+                      Duplicate Customer_IDs Detected ({stagedImport.duplicateConflict.conflictCount.toLocaleString()} matching records)
+                    </div>
+                    <p className="text-slate-700">
+                      This upload overlaps with existing records in{' '}
+                      <span className="font-semibold">
+                        {stagedImport.duplicateConflict.existingDatasetFileName}
+                      </span>
+                      {stagedImport.duplicateConflict.sampleDuplicateIds.length > 0 && (
+                        <>
+                          {' '}
+                          (e.g.{' '}
+                          <span className="font-mono font-semibold">
+                            {stagedImport.duplicateConflict.sampleDuplicateIds.slice(0, 5).join(', ')}
+                          </span>
+                          )
+                        </>
+                      )}
+                      . Choose how to handle matching IDs:
+                    </p>
+                  </div>
+                </div>
+
+                <div className="grid grid-cols-1 md:grid-cols-3 gap-2.5">
+                  <label
+                    className={`rounded-xl border p-3 cursor-pointer transition-all flex items-start gap-2.5 ${
+                      duplicateStrategy === 'skip'
+                        ? 'border-[#7655E8] bg-white ring-1 ring-[#7655E8]/30'
+                        : 'border-amber-200 bg-white/70 hover:bg-white'
+                    }`}
+                  >
+                    <input
+                      type="radio"
+                      name="duplicateStrategy"
+                      checked={duplicateStrategy === 'skip'}
+                      onChange={() => setDuplicateStrategy('skip')}
+                      className="mt-0.5 accent-[#7655E8]"
+                    />
+                    <div>
+                      <div className="font-bold text-[#15152F]">Skip Existing</div>
+                      <div className="text-[11px] text-slate-600 mt-0.5">
+                        Keep existing customers unchanged and append only new IDs.
+                      </div>
+                    </div>
+                  </label>
+
+                  <label
+                    className={`rounded-xl border p-3 cursor-pointer transition-all flex items-start gap-2.5 ${
+                      duplicateStrategy === 'update'
+                        ? 'border-[#7655E8] bg-white ring-1 ring-[#7655E8]/30'
+                        : 'border-amber-200 bg-white/70 hover:bg-white'
+                    }`}
+                  >
+                    <input
+                      type="radio"
+                      name="duplicateStrategy"
+                      checked={duplicateStrategy === 'update'}
+                      onChange={() => setDuplicateStrategy('update')}
+                      className="mt-0.5 accent-[#7655E8]"
+                    />
+                    <div>
+                      <div className="font-bold text-[#15152F]">Update Existing</div>
+                      <div className="text-[11px] text-slate-600 mt-0.5">
+                        Update matching customers with new data and add new rows.
+                      </div>
+                    </div>
+                  </label>
+
+                  <label
+                    className={`rounded-xl border p-3 cursor-pointer transition-all flex items-start gap-2.5 ${
+                      duplicateStrategy === 'replace'
+                        ? 'border-[#7655E8] bg-white ring-1 ring-[#7655E8]/30'
+                        : 'border-amber-200 bg-white/70 hover:bg-white'
+                    }`}
+                  >
+                    <input
+                      type="radio"
+                      name="duplicateStrategy"
+                      checked={duplicateStrategy === 'replace'}
+                      onChange={() => setDuplicateStrategy('replace')}
+                      className="mt-0.5 accent-[#7655E8]"
+                    />
+                    <div>
+                      <div className="font-bold text-[#15152F]">Replace Active Dataset</div>
+                      <div className="text-[11px] text-slate-600 mt-0.5">
+                        Switch active workspace table exclusively to this upload.
+                      </div>
+                    </div>
+                  </label>
+                </div>
+              </div>
+            )}
+
           {/* Import Commit Mode Selector & Confirmation Actions */}
           <div className="flex flex-col sm:flex-row sm:items-center sm:justify-between gap-4 pt-3 border-t border-purple-100">
             {stagedImport.uploadMode !== 'tickets' &&
@@ -3449,6 +3682,80 @@ export const CustomerDataView: React.FC<CustomerDataViewProps> = ({
                   </span>
                 </div>
               ))}
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* Delete Dataset Confirmation Dialog */}
+      {deleteTarget && (
+        <div
+          className="fixed inset-0 z-50 bg-[#15152F]/60 backdrop-blur-xs flex items-center justify-center p-4"
+          role="dialog"
+          aria-modal="true"
+          aria-labelledby="delete-dataset-title"
+        >
+          <div className="bg-white border border-purple-100 rounded-2xl shadow-2xl max-w-md w-full p-6 space-y-4">
+            <div className="flex items-start justify-between gap-3">
+              <div className="flex items-center gap-3">
+                <div className="w-10 h-10 rounded-xl bg-[#FF786B]/15 text-[#E04F44] flex items-center justify-center shrink-0">
+                  <Trash2 className="w-5 h-5" />
+                </div>
+                <div>
+                  <h3 id="delete-dataset-title" className="text-base font-bold text-[#15152F]">
+                    Delete Uploaded Dataset
+                  </h3>
+                  <p className="text-xs text-slate-500 font-mono truncate max-w-[260px]">
+                    {deleteTarget.fileName}
+                  </p>
+                </div>
+              </div>
+              <button
+                type="button"
+                disabled={isDeletingDataset}
+                onClick={() => setDeleteTarget(null)}
+                className="p-1.5 rounded-lg text-slate-400 hover:text-[#15152F] hover:bg-[#F6F3FF] cursor-pointer"
+                aria-label="Close dialog"
+              >
+                <X className="w-4 h-4" />
+              </button>
+            </div>
+
+            <div className="rounded-xl bg-[#FF786B]/10 border border-[#FF786B]/35 p-3.5 text-xs text-[#9A2E25] space-y-1.5 leading-relaxed">
+              <p>
+                You are about to permanently remove{' '}
+                <strong className="font-semibold">{deleteTarget.fileName}</strong> (
+                {deleteTarget.customerCount.toLocaleString()} customers
+                {deleteTarget.ticketCount > 0
+                  ? `, ${deleteTarget.ticketCount.toLocaleString()} tickets`
+                  : ''}
+                ).
+              </p>
+              <p>
+                Associated exclusive records, analytics, and predictions derived from this dataset
+                will be removed or invalidated. Models trained exclusively on this file will be
+                marked outdated.
+              </p>
+            </div>
+
+            <div className="flex items-center justify-end gap-2.5 pt-1">
+              <button
+                type="button"
+                disabled={isDeletingDataset}
+                onClick={() => setDeleteTarget(null)}
+                className="px-4 py-2 rounded-xl border border-purple-200 text-xs font-semibold text-slate-700 hover:bg-[#F5F3FF] cursor-pointer disabled:opacity-50"
+              >
+                Cancel
+              </button>
+              <button
+                type="button"
+                disabled={isDeletingDataset}
+                onClick={handleConfirmDeleteDataset}
+                className="inline-flex items-center gap-1.5 px-4 py-2 rounded-xl bg-[#E04F44] hover:bg-[#C93B31] text-white text-xs font-bold shadow-sm cursor-pointer disabled:opacity-50"
+              >
+                <Trash2 className="w-3.5 h-3.5" />
+                <span>{isDeletingDataset ? 'Deleting...' : 'Confirm Delete Dataset'}</span>
+              </button>
             </div>
           </div>
         </div>

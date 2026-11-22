@@ -23,8 +23,8 @@ import {
   NumericComparisonStat,
 } from '../types/churn';
 
-const COLOR_STAYED = '#397BFF'; // electric blue
-const COLOR_CHURNED = '#E84FA8'; // bright pink
+const COLOR_STAYED = '#059669'; // green for Active / Retained
+const COLOR_CHURNED = '#DC2626'; // red for Churned (Left)
 const COLOR_ACCENT_PURPLE = '#7655E8'; // vibrant purple
 const COLOR_GRID = '#EDE9FE'; // soft lavender grid
 const COLOR_AXIS = '#4C4A6E'; // muted navy-slate
@@ -49,14 +49,14 @@ export const ChurnSplitBar: React.FC<ChurnSplitBarProps> = ({
       <div className="h-9 w-full bg-[#F6F3FF] rounded-xl overflow-hidden flex border border-purple-100 p-0.5">
         <div
           style={{ width: `${stayedPct}%` }}
-          className="bg-gradient-to-r from-[#397BFF] to-[#7655E8] h-full rounded-l-lg transition-all duration-300 flex items-center justify-center text-xs font-semibold text-white tabular-nums"
+          className="bg-emerald-600 h-full rounded-l-lg transition-all duration-300 flex items-center justify-center text-xs font-semibold text-white tabular-nums"
           title={`Stayed: ${stayedCount} (${stayedPct.toFixed(1)}%)`}
         >
           {stayedPct >= 14 ? `${stayedPct.toFixed(1)}%` : ''}
         </div>
         <div
           style={{ width: `${churnedPct}%` }}
-          className="bg-gradient-to-r from-[#FF786B] to-[#E84FA8] h-full rounded-r-lg transition-all duration-300 flex items-center justify-center text-xs font-semibold text-white tabular-nums"
+          className="bg-red-600 h-full rounded-r-lg transition-all duration-300 flex items-center justify-center text-xs font-semibold text-white tabular-nums"
           title={`Churned: ${churnedCount} (${churnedPct.toFixed(1)}%)`}
         >
           {churnedPct >= 14 ? `${churnedPct.toFixed(1)}%` : ''}
@@ -64,22 +64,22 @@ export const ChurnSplitBar: React.FC<ChurnSplitBarProps> = ({
       </div>
 
       <div className="grid grid-cols-1 sm:grid-cols-2 gap-3.5 pt-1">
-        <div className="flex items-center justify-between border border-purple-100 rounded-xl px-4 py-3 bg-[#F6F3FF]/60">
+        <div className="flex items-center justify-between border border-emerald-200 rounded-xl px-4 py-3 bg-emerald-50/50">
           <div className="flex items-center gap-2.5">
-            <span className="w-3 h-3 rounded-sm bg-[#397BFF] shrink-0" />
-            <span className="text-sm font-medium text-[#15152F]">Stayed (Retained)</span>
+            <span className="w-3 h-3 rounded-sm bg-[#059669] shrink-0" />
+            <span className="text-sm font-medium text-[#15152F]">Active (Retained)</span>
           </div>
-          <div className="text-sm font-bold text-[#397BFF] font-mono tabular-nums">
+          <div className="text-sm font-bold text-[#059669] font-mono tabular-nums">
             {stayedCount.toLocaleString()} ({stayedPct.toFixed(1)}%)
           </div>
         </div>
 
-        <div className="flex items-center justify-between border border-purple-100 rounded-xl px-4 py-3 bg-[#F6F3FF]/60">
+        <div className="flex items-center justify-between border border-red-200 rounded-xl px-4 py-3 bg-red-50/50">
           <div className="flex items-center gap-2.5">
-            <span className="w-3 h-3 rounded-sm bg-[#E84FA8] shrink-0" />
+            <span className="w-3 h-3 rounded-sm bg-[#DC2626] shrink-0" />
             <span className="text-sm font-medium text-[#15152F]">Churned (Left)</span>
           </div>
-          <div className="text-sm font-bold text-[#D63384] font-mono tabular-nums">
+          <div className="text-sm font-bold text-[#DC2626] font-mono tabular-nums">
             {churnedCount.toLocaleString()} ({churnedPct.toFixed(1)}%)
           </div>
         </div>
@@ -114,11 +114,11 @@ export const GroupedCategoryChart: React.FC<GroupedCategoryChartProps> = ({
       <div className="flex items-center justify-between text-xs text-slate-500 pb-1">
         <div className="flex items-center gap-4">
           <span className="inline-flex items-center gap-1.5">
-            <span className="w-2.5 h-2.5 rounded-xs bg-[#397BFF]" />
-            <span>Stayed</span>
+            <span className="w-2.5 h-2.5 rounded-xs bg-[#059669]" />
+            <span>Active / Retained</span>
           </span>
           <span className="inline-flex items-center gap-1.5">
-            <span className="w-2.5 h-2.5 rounded-xs bg-[#E84FA8]" />
+            <span className="w-2.5 h-2.5 rounded-xs bg-[#DC2626]" />
             <span>Churned</span>
           </span>
         </div>
@@ -148,15 +148,15 @@ export const GroupedCategoryChart: React.FC<GroupedCategoryChartProps> = ({
                 </span>
                 <div className="flex items-center gap-3 text-xs font-mono tabular-nums shrink-0">
                   <span className="text-slate-600">
-                    {item.stayed} stayed · {item.churned} churned
+                    {item.stayed} active · {item.churned} churned
                   </span>
                   <span
                     className={`font-semibold ${
                       item.churnRate >= 40
-                        ? 'text-[#D63384]'
+                        ? 'text-[#DC2626]'
                         : item.churnRate >= 20
-                          ? 'text-[#7655E8]'
-                          : 'text-[#0E9F6E]'
+                          ? 'text-[#EA580C]'
+                          : 'text-[#059669]'
                     }`}
                   >
                     {item.churnRate.toFixed(1)}% churn
@@ -167,11 +167,11 @@ export const GroupedCategoryChart: React.FC<GroupedCategoryChartProps> = ({
               <div className="h-3 w-full bg-purple-100/70 rounded-full overflow-hidden flex">
                 <div
                   style={{ width: `${stayedWidth}%` }}
-                  className="bg-[#397BFF] h-full transition-all duration-200"
+                  className="bg-[#059669] h-full transition-all duration-200"
                 />
                 <div
                   style={{ width: `${churnedWidth}%` }}
-                  className="bg-[#E84FA8] h-full transition-all duration-200"
+                  className="bg-[#DC2626] h-full transition-all duration-200"
                 />
               </div>
             </div>
@@ -222,14 +222,14 @@ const CategoryStatsTooltip: React.FC<CustomCategoryTooltipProps> = ({
       </div>
       <div className="flex items-center justify-between gap-4 text-slate-700">
         <span className="inline-flex items-center gap-1.5">
-          <span className="w-2 h-2 rounded-xs bg-[#397BFF]" />
-          Stayed:
+          <span className="w-2 h-2 rounded-xs bg-[#059669]" />
+          Active (Retained):
         </span>
         <span className="font-mono tabular-nums font-medium">{stat.stayed.toLocaleString()}</span>
       </div>
       <div className="flex items-center justify-between gap-4 text-slate-700">
         <span className="inline-flex items-center gap-1.5">
-          <span className="w-2 h-2 rounded-xs bg-[#E84FA8]" />
+          <span className="w-2 h-2 rounded-xs bg-[#DC2626]" />
           Churned:
         </span>
         <span className="font-mono tabular-nums font-medium">{stat.churned.toLocaleString()}</span>
@@ -238,7 +238,7 @@ const CategoryStatsTooltip: React.FC<CustomCategoryTooltipProps> = ({
         <span>Total in Category:</span>
         <span className="font-mono tabular-nums font-medium">{stat.total.toLocaleString()}</span>
       </div>
-      <div className="flex items-center justify-between gap-4 font-semibold text-[#D63384]">
+      <div className="flex items-center justify-between gap-4 font-semibold text-[#DC2626]">
         <span>Category Churn Rate:</span>
         <span className="font-mono tabular-nums">{stat.churnRate.toFixed(1)}%</span>
       </div>
@@ -316,25 +316,25 @@ export const ChurnDoughnutChart: React.FC<ChurnDoughnutChartProps> = ({
       </div>
 
       <div className="grid grid-cols-2 gap-3">
-        <div className="border border-purple-100 rounded-xl px-3.5 py-2.5 bg-[#F6F3FF]/60">
+        <div className="border border-emerald-200 rounded-xl px-3.5 py-2.5 bg-emerald-50/50">
           <div className="flex items-center gap-2 text-xs text-slate-600">
-            <span className="w-2.5 h-2.5 rounded-xs bg-[#397BFF] shrink-0" />
-            <span>Stayed (Retained)</span>
+            <span className="w-2.5 h-2.5 rounded-xs bg-[#059669] shrink-0" />
+            <span>Active (Retained)</span>
           </div>
           <div className="mt-1 text-base font-bold text-[#15152F] font-mono tabular-nums">
             {stayedCount.toLocaleString()}{' '}
-            <span className="text-xs font-semibold text-[#397BFF]">({stayedPct.toFixed(1)}%)</span>
+            <span className="text-xs font-semibold text-[#059669]">({stayedPct.toFixed(1)}%)</span>
           </div>
         </div>
 
-        <div className="border border-purple-100 rounded-xl px-3.5 py-2.5 bg-[#F6F3FF]/60">
+        <div className="border border-red-200 rounded-xl px-3.5 py-2.5 bg-red-50/50">
           <div className="flex items-center gap-2 text-xs text-slate-600">
-            <span className="w-2.5 h-2.5 rounded-xs bg-[#E84FA8] shrink-0" />
+            <span className="w-2.5 h-2.5 rounded-xs bg-[#DC2626] shrink-0" />
             <span>Churned (Left)</span>
           </div>
           <div className="mt-1 text-base font-bold text-[#15152F] font-mono tabular-nums">
             {churnedCount.toLocaleString()}{' '}
-            <span className="text-xs font-semibold text-[#D63384]">({churnedPct.toFixed(1)}%)</span>
+            <span className="text-xs font-semibold text-[#DC2626]">({churnedPct.toFixed(1)}%)</span>
           </div>
         </div>
       </div>
@@ -596,10 +596,10 @@ export const TenureTrendLineChart: React.FC<TenureTrendLineChartProps> = ({ data
             type="monotone"
             dataKey="retentionRate"
             name="Retention Rate (%)"
-            stroke="#397BFF"
+            stroke="#059669"
             strokeWidth={3}
-            dot={{ r: 4.5, fill: '#35C5E8', strokeWidth: 2, stroke: '#FFFFFF' }}
-            activeDot={{ r: 6.5, fill: '#397BFF' }}
+            dot={{ r: 4.5, fill: '#059669', strokeWidth: 2, stroke: '#FFFFFF' }}
+            activeDot={{ r: 6.5, fill: '#059669' }}
             isAnimationActive={true}
             animationDuration={850}
               animationEasing="ease-out"
@@ -610,8 +610,8 @@ export const TenureTrendLineChart: React.FC<TenureTrendLineChartProps> = ({ data
             name="Churn Rate (%)"
             stroke={COLOR_CHURNED}
             strokeWidth={3}
-            dot={{ r: 4.5, fill: '#E84FA8', strokeWidth: 2, stroke: '#FFFFFF' }}
-            activeDot={{ r: 6.5, fill: COLOR_ACCENT_PURPLE }}
+            dot={{ r: 4.5, fill: '#DC2626', strokeWidth: 2, stroke: '#FFFFFF' }}
+            activeDot={{ r: 6.5, fill: '#DC2626' }}
             isAnimationActive={true}
             animationDuration={850}
               animationEasing="ease-out"
@@ -730,10 +730,10 @@ export const NumericComparisonChart: React.FC<NumericComparisonChartProps> = ({ 
                 <td className="py-2.5 px-4 text-right font-mono tabular-nums text-slate-700">
                   {row.overallAvg.toLocaleString(undefined, { maximumFractionDigits: 2 })}
                 </td>
-                <td className="py-2.5 px-4 text-right font-mono tabular-nums text-[#397BFF] font-semibold">
+                <td className="py-2.5 px-4 text-right font-mono tabular-nums text-[#059669] font-semibold">
                   {row.stayedAvg.toLocaleString(undefined, { maximumFractionDigits: 2 })}
                 </td>
-                <td className="py-2.5 pl-4 text-right font-mono tabular-nums text-[#D63384] font-semibold">
+                <td className="py-2.5 pl-4 text-right font-mono tabular-nums text-[#DC2626] font-semibold">
                   {row.churnedAvg.toLocaleString(undefined, { maximumFractionDigits: 2 })}{' '}
                   <span className="text-xs text-slate-400 font-normal">
                     ({diff >= 0 ? '+' : ''}

@@ -311,9 +311,7 @@ export const MyProfileView: React.FC<MyProfileViewProps> = ({
           </div>
           <div>
             <h2 className="text-base font-bold text-[#11142B]">Change Password</h2>
-            <p className="text-xs text-slate-500">
-              Update your account password securely (hashed with scrypt on the backend)
-            </p>
+            <p className="text-xs text-slate-500">Update your account password securely</p>
           </div>
         </div>
 

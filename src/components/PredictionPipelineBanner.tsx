@@ -158,18 +158,12 @@ export const PredictionPipelineBanner: React.FC<PredictionPipelineBannerProps> =
               {automationStatus.headline}
             </h3>
 
-            <p className="text-sm text-slate-600 leading-relaxed max-w-3xl">
+            <p className="text-sm text-slate-600 max-w-3xl">
               {automationStatus.summary}
             </p>
 
-            {automationStatus.selectedAlgorithmReason && isReady && !compact && (
-              <p className="text-xs text-slate-500 leading-relaxed max-w-3xl pt-0.5">
-                {automationStatus.selectedAlgorithmReason}
-              </p>
-            )}
-
             {automationStatus.failureReason && !isReady && (
-              <div className="pt-1 text-xs text-slate-800 space-y-1">
+              <div className="pt-1 text-xs text-slate-800 space-y-0.5">
                 <div>
                   <strong>Reason:</strong> {automationStatus.failureReason}
                 </div>
@@ -182,7 +176,7 @@ export const PredictionPipelineBanner: React.FC<PredictionPipelineBannerProps> =
             )}
 
             {isReady && automationStatus.needsRefresh && automationStatus.refreshNotice && (
-              <div className="mt-2 rounded-xl border border-amber-200 bg-amber-50 px-3.5 py-2.5 text-xs text-amber-950">
+              <div className="mt-2 rounded-xl border border-amber-200 bg-amber-50 px-3.5 py-2 text-xs text-amber-950">
                 <strong>Model update advised:</strong> {automationStatus.refreshNotice}
               </div>
             )}
@@ -238,7 +232,7 @@ export const PredictionPipelineBanner: React.FC<PredictionPipelineBannerProps> =
       </div>
 
       {!compact && automationStatus.steps.length > 0 && (
-        <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-5 gap-2.5 pt-2 border-t border-slate-200/70">
+        <div className="flex flex-wrap items-center gap-2 pt-2 border-t border-slate-200/70">
           {automationStatus.steps.map((step) => {
             const done = step.status === 'completed';
             const warn = step.status === 'warning';
@@ -246,21 +240,19 @@ export const PredictionPipelineBanner: React.FC<PredictionPipelineBannerProps> =
             return (
               <div
                 key={step.key}
-                className="rounded-xl border border-slate-200/80 bg-[#F5F3FF]/35 px-3 py-2.5 space-y-1"
+                title={step.detail}
+                className="inline-flex items-center gap-1.5 rounded-lg border border-slate-200/80 bg-[#F5F3FF]/35 px-2.5 py-1.5 text-xs font-medium text-[#11142B]"
               >
-                <div className="flex items-center gap-1.5 text-xs font-semibold text-[#11142B]">
-                  {done ? (
-                    <CheckCircle2 className="w-3.5 h-3.5 text-[#0E9F6E] shrink-0" />
-                  ) : failed ? (
-                    <XCircle className="w-3.5 h-3.5 text-rose-600 shrink-0" />
-                  ) : warn ? (
-                    <AlertTriangle className="w-3.5 h-3.5 text-amber-600 shrink-0" />
-                  ) : (
-                    <Clock className="w-3.5 h-3.5 text-slate-400 shrink-0" />
-                  )}
-                  <span className="truncate">{step.label}</span>
-                </div>
-                <p className="text-[11px] text-slate-600 leading-snug">{step.detail}</p>
+                {done ? (
+                  <CheckCircle2 className="w-3.5 h-3.5 text-[#0E9F6E] shrink-0" />
+                ) : failed ? (
+                  <XCircle className="w-3.5 h-3.5 text-rose-600 shrink-0" />
+                ) : warn ? (
+                  <AlertTriangle className="w-3.5 h-3.5 text-amber-600 shrink-0" />
+                ) : (
+                  <Clock className="w-3.5 h-3.5 text-slate-400 shrink-0" />
+                )}
+                <span>{step.label}</span>
               </div>
             );
           })}

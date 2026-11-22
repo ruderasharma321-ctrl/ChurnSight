@@ -166,18 +166,21 @@ export function deriveCustomerIntelligence(
 
   if (topSegment) {
     const { dimension, stat } = topSegment;
+    const rateReliable = analytics.historicalPerformance?.historicalRateReliable !== false;
     insights.push({
       id: 'highest-risk-group',
-      category: 'Highest Churn Segment',
+      category: 'Highest Historical Churn Segment',
       title: `${dimension}: "${stat.category}"`,
-      statLabel: 'Segment Churn Rate',
+      statLabel: 'Segment Historical Churn',
       statValue: `${stat.churnRate.toFixed(1)}%`,
-      explanation: `${stat.churned.toLocaleString()} of ${stat.total.toLocaleString()} ${entityLower} in "${stat.category}" churned—${
-        stat.churnRate >= analytics.churnRate
-          ? `${(stat.churnRate - analytics.churnRate).toFixed(1)} pts above`
-          : `${(analytics.churnRate - stat.churnRate).toFixed(1)} pts below`
-      } the ${analytics.churnRate.toFixed(1)}% dataset average.`,
-      recommendation: `Prioritise proactive retention campaigns and onboarding check-ins specifically for ${dimension} = "${stat.category}" accounts.`,
+      explanation: rateReliable
+        ? `${stat.churned.toLocaleString()} of ${stat.total.toLocaleString()} ${entityLower} in "${stat.category}" have already churned—${
+            stat.churnRate >= analytics.churnRate
+              ? `${(stat.churnRate - analytics.churnRate).toFixed(1)} pts above`
+              : `${(analytics.churnRate - stat.churnRate).toFixed(1)} pts below`
+          } the ${analytics.churnRate.toFixed(1)}% historical average.`
+        : `${stat.churned.toLocaleString()} of ${stat.total.toLocaleString()} ${entityLower} in "${stat.category}" have recorded churned status.`,
+      recommendation: `Prioritise proactive retention campaigns and onboarding check-ins for active ${dimension} = "${stat.category}" accounts.`,
       tone: 'danger',
       meterPercent: Math.min(100, Math.max(8, stat.churnRate)),
     });
@@ -310,7 +313,12 @@ export function deriveCustomerIntelligence(
       activeModel.featureImportances.find((f) => f.direction === 'increases_churn') ||
       activeModel.featureImportances[0];
     const highRiskCount = activeModel.predictions.filter(
-      (p) => p.riskCategory === 'Higher Estimated Churn Risk'
+      (p) =>
+        p.riskApplicable !== false &&
+        p.actualStatus !== 'Churned' &&
+        p.actualStatus !== 'Inconsistent' &&
+        p.actualChurn !== 'Churned' &&
+        p.riskCategory === 'Higher Estimated Churn Risk'
     ).length;
 
     insights.push({
@@ -321,8 +329,8 @@ export function deriveCustomerIntelligence(
       statValue: `${topDriver.importance.toFixed(1)}%`,
       explanation: `${activeModel.modelName} (${activeModel.version}, ${activeModel.accuracy.toFixed(
         1
-      )}% test accuracy) identifies "${topDriver.feature}" as a primary predictor and flags ${highRiskCount.toLocaleString()} higher-risk ${entityLower}.`,
-      recommendation: `Target the ${highRiskCount.toLocaleString()} higher-risk accounts identified by the trained model with tailored retention workflows.`,
+      )}% test accuracy) identifies "${topDriver.feature}" as a primary predictor and flags ${highRiskCount.toLocaleString()} active higher-risk ${entityLower}.`,
+      recommendation: `Target the ${highRiskCount.toLocaleString()} active higher-risk accounts identified by the trained model with tailored retention workflows.`,
       tone: 'emerald',
       meterPercent: Math.min(100, Math.max(12, topDriver.importance)),
     });

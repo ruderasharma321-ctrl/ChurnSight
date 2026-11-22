@@ -55,6 +55,11 @@ export function exportChurnSummaryCsv(
   dataset: DatasetState,
   analytics: AnalyticsSummary
 ): void {
+  const hp = analytics.historicalPerformance;
+  const rateText =
+    hp && !hp.historicalRateReliable
+      ? 'Unavailable'
+      : `${(hp?.historicalChurnRate ?? analytics.churnRate).toFixed(1)}%`;
   const lines: string[] = [
     ['Section', 'Metric', 'Value', 'Notes'].map(sanitizeCsvField).join(','),
     ['Workspace', 'Company', company.name, company.industry].map(sanitizeCsvField).join(','),
@@ -63,11 +68,11 @@ export function exportChurnSummaryCsv(
       .join(','),
     ['Dataset', 'Rows', dataset.rowCount, `${dataset.columnCount} columns`].map(sanitizeCsvField).join(','),
     ['KPI', 'Valid Labeled Records', analytics.totalCustomers, ''].map(sanitizeCsvField).join(','),
-    ['KPI', 'Churned Records', analytics.churnedCount, `Target = ${dataset.mapping.positiveClassValue}`]
+    ['KPI', 'Already Churned Customers', hp?.actualChurnedCount ?? analytics.churnedCount, `Target = ${dataset.mapping.positiveClassValue}`]
       .map(sanitizeCsvField)
       .join(','),
-    ['KPI', 'Retained Records', analytics.stayedCount, ''].map(sanitizeCsvField).join(','),
-    ['KPI', 'Churn Rate (%)', `${analytics.churnRate.toFixed(1)}%`, analytics.calculationExplanation || '']
+    ['KPI', 'Retained (Active) Customers', hp?.retainedCount ?? analytics.stayedCount, ''].map(sanitizeCsvField).join(','),
+    ['KPI', 'Historical Churn Rate (%)', rateText, hp?.historicalRateNotice || analytics.calculationExplanation || '']
       .map(sanitizeCsvField)
       .join(','),
   ];
@@ -120,14 +125,20 @@ export function exportChurnSummaryPdf(
 
   doc.setFontSize(9.5);
   doc.setFont('helvetica', 'normal');
+  const hp = analytics.historicalPerformance;
+  const rateText =
+    hp && !hp.historicalRateReliable
+      ? `Unavailable (${hp.historicalRateNotice || 'Insufficient historical period or outcome data'})`
+      : `${(hp?.historicalChurnRate ?? analytics.churnRate).toFixed(1)}%`;
   const summaryLines = [
     `Dataset: ${dataset.fileName}${dataset.isSample ? ' (Demonstration Data)' : ''} (${dataset.rowCount.toLocaleString()} records, ${dataset.columnCount} columns)`,
-    `Total ${tmpl.entityPlural}: ${analytics.totalCustomers.toLocaleString()} | Churned: ${analytics.churnedCount.toLocaleString()} | Retained: ${analytics.stayedCount.toLocaleString()}`,
-    `Overall Churn Rate: ${analytics.churnRate.toFixed(1)}%`,
+    `Total ${tmpl.entityPlural}: ${analytics.totalCustomers.toLocaleString()} | Already Churned: ${(hp?.actualChurnedCount ?? analytics.churnedCount).toLocaleString()} | Active: ${(hp?.retainedCount ?? analytics.stayedCount).toLocaleString()}`,
+    `Historical Churn Rate: ${rateText}`,
   ];
   for (const line of summaryLines) {
-    doc.text(line, 14, y);
-    y += 5.5;
+    const wrapped = doc.splitTextToSize(line, 182);
+    doc.text(wrapped, 14, y);
+    y += wrapped.length * 5.2;
   }
 
   if (analytics.calculationExplanation) {
@@ -322,23 +333,36 @@ export function exportCustomerRiskPdf(
 
   const rows = batch
     ? [...batch.records].sort((a, b) => b.churnProbability - a.churnProbability).slice(0, 30)
-    : [...model.predictions].sort((a, b) => b.churnProbability - a.churnProbability).slice(0, 30);
+    : [...model.predictions]
+        .filter(
+          (p) =>
+            p.riskApplicable !== false &&
+            p.actualStatus !== 'Churned' &&
+            p.actualStatus !== 'Inconsistent' &&
+            p.actualChurn !== 'Churned'
+        )
+        .sort((a, b) => b.churnProbability - a.churnProbability)
+        .slice(0, 30);
 
   doc.setFontSize(11);
   doc.setFont('helvetica', 'bold');
-  doc.text(`Highest Estimated Risk Accounts (Top ${rows.length})`, 14, y);
+  doc.text(`Highest Estimated Risk Active Accounts (Top ${rows.length})`, 14, y);
   y += 6;
   doc.setFontSize(8.5);
   doc.setFont('helvetica', 'normal');
-  doc.text('Probabilities below are statistical estimates produced by the trained ML model.', 14, y);
+  doc.text(
+    'Probabilities below apply strictly to Active customers; already-churned customers are excluded.',
+    14,
+    y
+  );
   y += 6;
 
   doc.setFont('helvetica', 'bold');
   doc.text('Row', 14, y);
-  doc.text('Customer ID', 30, y);
-  doc.text('Predicted Signal', 85, y);
-  doc.text('Probability', 135, y);
-  doc.text('Risk Tier', 162, y);
+  doc.text('Customer ID', 28, y);
+  doc.text('Actual Status', 82, y);
+  doc.text('Predicted Prob.', 118, y);
+  doc.text('Predicted Risk', 155, y);
   y += 4;
   doc.line(14, y, 196, y);
   y += 5;
@@ -349,11 +373,27 @@ export function exportCustomerRiskPdf(
       doc.addPage();
       y = 20;
     }
+    const actualStatusText =
+      'actualStatus' in r && typeof r.actualStatus === 'string' && r.actualStatus
+        ? r.actualStatus
+        : 'Active';
+    const isApplicable =
+      actualStatusText !== 'Churned' &&
+      actualStatusText !== 'Inconsistent' &&
+      (!('riskApplicable' in r) || r.riskApplicable !== false);
+    const riskTierLabel = !isApplicable
+      ? 'Not Applicable'
+      : r.riskCategory === 'Higher Estimated Churn Risk'
+        ? 'High Risk'
+        : r.riskCategory === 'Moderate Estimated Churn Risk'
+          ? 'Medium Risk'
+          : 'Low Risk';
+
     doc.text(String(r.rowIndex), 14, y);
-    doc.text(String(r.customerId).slice(0, 26), 30, y);
-    doc.text(r.predictedChurn, 85, y);
-    doc.text(`${(r.churnProbability * 100).toFixed(1)}%`, 135, y);
-    doc.text(r.riskCategory.replace(' Estimated Churn Risk', ' Risk'), 162, y);
+    doc.text(String(r.customerId).slice(0, 24), 28, y);
+    doc.text(actualStatusText, 82, y);
+    doc.text(isApplicable ? `${(r.churnProbability * 100).toFixed(1)}%` : 'Not Applicable', 118, y);
+    doc.text(riskTierLabel, 155, y);
     y += 5.2;
   }
 

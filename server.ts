@@ -15,6 +15,8 @@ import type {
   CustomerValueConfig,
   DataPrivacySettings,
   DatasetState,
+  DuplicateCustomerConflictSummary,
+  DuplicateIdHandlingMode,
   IndustryKey,
   LoginRequest,
   MLModelType,
@@ -46,6 +48,7 @@ import {
   getCompanyById,
   getSessionContext,
   hasAnyRegisteredUsers,
+  hydrateSessionByToken,
   listAllCompanies,
   listCompanyUsers,
   refreshSessionIfNeeded,
@@ -93,8 +96,19 @@ import {
   DEFAULT_CUSTOMER_VALUE_CONFIG,
   normalizeValueConfig,
 } from './server/valueEngine.ts';
+import {
+  classifyPredictedRiskLabel,
+  detectStatusColumnHints,
+  resolveCustomerStatusRecord,
+} from './server/customerStatusEngine.ts';
 import { generateSampleIndustryCsv } from './server/sampleDataset.ts';
-import { getPersistenceStatus, isRemoteStoreConfigured } from './server/remoteStore.ts';
+import { pgHealthCheck } from './server/database.ts';
+import {
+  getPersistenceStatus,
+  isKvConfigured,
+  isPostgresConfigured,
+  kvPing,
+} from './server/remoteStore.ts';
 import {
   createRateLimiter,
   ensureAuditLogsHydrated,
@@ -107,8 +121,11 @@ import {
   ensureWorkspaceHydrated,
   flushAllPendingWorkspaceWrites,
   getCompanyWorkspace,
+  listUploadedDatasetSummaries,
   persistCompanyWorkspace,
+  persistStagedImport,
   type CompanyWorkspaceState,
+  type UploadedDatasetEntry,
 } from './server/workspaceStore.ts';
 import {
   buildDefaultChurnDefinition,
@@ -142,6 +159,48 @@ function buildUsageSummary(
   };
 }
 
+function buildWorkspaceAnalytics(
+  company: CompanyWorkspaceInfo,
+  ws: CompanyWorkspaceState,
+  filters: AnalyticsFilters = {}
+): AnalyticsSummary | null {
+  if (!ws.activeDataset) return null;
+  const ds = ws.activeDataset;
+  let valueRiskTotals:
+    | {
+        highValueAtRiskCount: number | null;
+        highValueAtRiskRevenue: number | null;
+      }
+    | undefined;
+
+  if (ws.activeModelArtifact) {
+    try {
+      const valueSummary = computeCustomerValueIntelligence({
+        dataset: ds,
+        activeArtifact: ws.activeModelArtifact,
+        batchScores: ws.batchScores,
+        valueConfig: ws.valueConfig || DEFAULT_CUSTOMER_VALUE_CONFIG,
+      });
+      valueRiskTotals = {
+        highValueAtRiskCount: valueSummary.highValueAtRiskCount,
+        highValueAtRiskRevenue: valueSummary.highValueAtRiskRevenue,
+      };
+    } catch {
+      valueRiskTotals = undefined;
+    }
+  }
+
+  return computeAnalytics(
+    ds.state.columns,
+    ds.rows,
+    ds.state.mapping,
+    filters,
+    company.churnDefinition,
+    ws.activeModelArtifact,
+    valueRiskTotals
+  );
+}
+
 function serializeActiveModelEvaluation(ws: CompanyWorkspaceState) {
   if (!ws.activeModelArtifact) return null;
   const evaluation = ws.activeModelArtifact.evaluation;
@@ -150,22 +209,65 @@ function serializeActiveModelEvaluation(ws: CompanyWorkspaceState) {
 
   const idCol = ds.state.mapping.idColumn;
   const nameByCustomerId = new Map<string, string>();
+  const rowByCustomerId = new Map<string, { row: Record<string, string>; rowIndex: number }>();
   ds.rows.forEach((row, idx) => {
     const rawId =
       idCol && row[idCol] ? row[idCol].trim() : `CUST-${String(idx + 1).padStart(4, '0')}`;
     const name = extractCustomerNameFromRow(row);
-    if (rawId && name) {
-      nameByCustomerId.set(rawId.toLowerCase(), name);
+    if (rawId) {
+      rowByCustomerId.set(rawId.toLowerCase(), { row, rowIndex: idx + 1 });
+      if (name) {
+        nameByCustomerId.set(rawId.toLowerCase(), name);
+      }
     }
   });
+
+  const statusHints = detectStatusColumnHints(ds.state.columns, ds.state.mapping);
 
   return {
     ...evaluation,
     predictions: evaluation.predictions.map((p) => {
+      const idKey = (p.customerId || '').trim().toLowerCase();
+      const matchedRowEntry =
+        (p.rowIndex >= 1 && p.rowIndex <= ds.rows.length
+          ? { row: ds.rows[p.rowIndex - 1], rowIndex: p.rowIndex }
+          : null) ||
+        rowByCustomerId.get(idKey) ||
+        null;
+
+      const resolved = matchedRowEntry
+        ? resolveCustomerStatusRecord(
+            matchedRowEntry.row,
+            matchedRowEntry.rowIndex,
+            statusHints,
+            ds.state.churnDefinition
+          )
+        : null;
+
+      const actualStatus =
+        resolved && resolved.actualStatus !== 'Unknown'
+          ? resolved.actualStatus
+          : p.actualStatus || (p.actualChurn === 'Churned' ? 'Churned' : 'Active');
+      const statusConflictReason = resolved?.conflictReason ?? p.statusConflictReason ?? null;
+      const riskApplicable = actualStatus !== 'Churned' && actualStatus !== 'Inconsistent';
+      const predictedRiskLabel = riskApplicable
+        ? classifyPredictedRiskLabel(p.riskCategory)
+        : 'Not Applicable';
+
       const matchedName =
-        nameByCustomerId.get((p.customerId || '').trim().toLowerCase()) ||
-        extractCustomerNameFromRow(p.attributes);
-      return matchedName ? { ...p, customerName: matchedName } : p;
+        resolved?.customerName ||
+        nameByCustomerId.get(idKey) ||
+        extractCustomerNameFromRow(p.attributes) ||
+        p.customerName;
+
+      return {
+        ...p,
+        ...(matchedName ? { customerName: matchedName } : {}),
+        actualStatus,
+        statusConflictReason,
+        riskApplicable,
+        predictedRiskLabel,
+      };
     }),
   };
 }
@@ -188,6 +290,10 @@ function enforceDatasetPlanQuota(
   }
 }
 
+function isRemotePersistenceActive(): boolean {
+  return isPostgresConfigured() || isKvConfigured();
+}
+
 function commitRowsIntoWorkspace(
   company: CompanyWorkspaceInfo,
   ws: CompanyWorkspaceState,
@@ -202,6 +308,8 @@ function commitRowsIntoWorkspace(
     churnDefinition?: ChurnDefinition;
     rowValidation?: RowValidationReport;
     ticketAggregation?: TicketAggregationSummary | null;
+    ticketRows?: Record<string, string>[];
+    duplicateStrategy?: DuplicateIdHandlingMode;
     preserveModelArtifact?: boolean;
     isSample?: boolean;
   }
@@ -214,31 +322,188 @@ function commitRowsIntoWorkspace(
     sourceFormat,
     uploadPathway,
     satisfactionScale,
-    headers,
-    rows,
+    headers: incomingHeaders,
+    rows: incomingRows,
     rowValidation,
     ticketAggregation = null,
+    ticketRows,
+    duplicateStrategy = 'replace',
     preserveModelArtifact = false,
     isSample = false,
   } = params;
-  const columns = profileColumns(headers, rows);
-  const { duplicateCount, missingCellCount } = computeDatasetQualityStats(headers, rows);
 
-  const mapping =
-    params.mapping || autoDetectMapping(columns, rows, company.industry, uploadPathway);
+  const newDatasetId = `ds_${Date.now()}_${Math.random().toString(36).slice(2, 6)}`;
+  const nowIso = new Date().toISOString();
+
+  // Build snapshot state for the newly uploaded file itself
+  const incomingColumns = profileColumns(incomingHeaders, incomingRows);
+  const incomingStats = computeDatasetQualityStats(incomingHeaders, incomingRows);
+  const baseMapping =
+    params.mapping ||
+    autoDetectMapping(incomingColumns, incomingRows, company.industry, uploadPathway);
   const churnDef = params.churnDefinition || company.churnDefinition;
-  const targetUniqueValues = mapping.targetColumn
-    ? getUniqueColumnValues(rows, mapping.targetColumn)
+  const incomingTargetUnique = baseMapping.targetColumn
+    ? getUniqueColumnValues(incomingRows, baseMapping.targetColumn)
     : [];
-  const { issues, isValid } = validateDataset(columns, rows, mapping);
-  const labelReadiness = evaluateChurnReadiness(columns, rows, mapping, churnDef);
-  const readiness = assessDataReadiness({
-    columns,
-    rows,
-    mapping,
+  const incomingVal = validateDataset(incomingColumns, incomingRows, baseMapping);
+  const incomingLabelReadiness = evaluateChurnReadiness(
+    incomingColumns,
+    incomingRows,
+    baseMapping,
+    churnDef
+  );
+  const incomingReadiness = assessDataReadiness({
+    columns: incomingColumns,
+    rows: incomingRows,
+    mapping: baseMapping,
     churnDefinition: churnDef,
     industry: company.industry,
   });
+
+  const uploadedEntryState: DatasetState = {
+    datasetId: newDatasetId,
+    fileName,
+    sourceFormat,
+    uploadPathway,
+    satisfactionScale:
+      satisfactionScale || ws.satisfactionScale || company.satisfactionScale || '1-5',
+    isSample,
+    uploadedAt: nowIso,
+    rowCount: incomingRows.length,
+    columnCount: incomingColumns.length,
+    duplicateCount: incomingStats.duplicateCount,
+    missingCellCount: incomingStats.missingCellCount,
+    invalidDateCount: incomingColumns.reduce((acc, c) => acc + (c.invalidDateCount || 0), 0),
+    inconsistentCategoryCount: incomingColumns.reduce(
+      (acc, c) => acc + (c.inconsistentCategoryCount || 0),
+      0
+    ),
+    columns: incomingColumns,
+    mapping: baseMapping,
+    mappingRationales: buildMappingRationales(incomingColumns, baseMapping, company.industry),
+    targetUniqueValues: incomingTargetUnique,
+    issues: incomingVal.issues,
+    isValid: incomingVal.isValid,
+    hasValidChurnLabels: incomingLabelReadiness.hasValidChurnLabels,
+    churnReadinessMessage: incomingLabelReadiness.churnReadinessMessage,
+    readiness: incomingReadiness,
+    churnDefinition: churnDef,
+    rowValidation,
+    ticketAggregation,
+    previewRows: incomingRows.slice(0, 15),
+  };
+
+  // Mark previous entries inactive unless merged into active
+  ws.uploadedDatasets = ws.uploadedDatasets.map((entry) => ({
+    ...entry,
+    importStatus: entry.importStatus === 'Active' ? 'Imported' : entry.importStatus,
+  }));
+
+  const hasErrorsExcluded = (rowValidation?.errorCount || 0) > 0 && incomingRows.length < (rowValidation?.totalRows || incomingRows.length);
+  const entryStatus: UploadedDatasetEntry['importStatus'] = hasErrorsExcluded
+    ? 'Partial (Errors Excluded)'
+    : 'Active';
+
+  ws.uploadedDatasets.unshift({
+    datasetId: newDatasetId,
+    fileName,
+    sourceFormat,
+    uploadPathway,
+    uploadMode: 'customer',
+    uploadedAt: nowIso,
+    customerCount: incomingRows.length,
+    ticketCount: ticketAggregation?.ticketRowsCount ?? ticketRows?.length ?? 0,
+    importStatus: entryStatus,
+    isSample,
+    dataset: { state: uploadedEntryState, rows: incomingRows },
+    ticketRows,
+  });
+
+  // Merge or replace active workspace rows with out-of-band lineage tracking
+  let finalHeaders = incomingHeaders;
+  let finalRows = incomingRows;
+  let finalLineage: string[][] = incomingRows.map(() => [newDatasetId]);
+
+  if (
+    ws.activeDataset &&
+    (duplicateStrategy === 'skip' || duplicateStrategy === 'update')
+  ) {
+    const existingRows = ws.activeDataset.rows;
+    const existingHeaders = ws.activeDataset.state.columns.map((c) => c.name);
+    finalHeaders = Array.from(new Set([...existingHeaders, ...incomingHeaders]));
+    const existingIdCol = ws.activeDataset.state.mapping.idColumn || baseMapping.idColumn;
+    const incomingIdCol = baseMapping.idColumn || existingIdCol;
+
+    const mergedRows: Record<string, string>[] = existingRows.map((r) => {
+      const copy: Record<string, string> = {};
+      for (const h of finalHeaders) copy[h] = r[h] ?? '';
+      return copy;
+    });
+    const mergedLineage: string[][] = existingRows.map((_, idx) => [
+      ...(ws.rowDatasetLineage[idx] || [ws.activeDataset!.state.datasetId]),
+    ]);
+
+    const indexById = new Map<string, number>();
+    if (existingIdCol) {
+      mergedRows.forEach((r, idx) => {
+        const key = (r[existingIdCol] || '').trim().toLowerCase();
+        if (key) indexById.set(key, idx);
+      });
+    }
+
+    for (const rawRow of incomingRows) {
+      const normalizedIncoming: Record<string, string> = {};
+      for (const h of finalHeaders) normalizedIncoming[h] = rawRow[h] ?? '';
+      const idKey = incomingIdCol
+        ? (rawRow[incomingIdCol] || '').trim().toLowerCase()
+        : '';
+
+      if (idKey && indexById.has(idKey)) {
+        if (duplicateStrategy === 'update') {
+          const idx = indexById.get(idKey)!;
+          mergedRows[idx] = { ...mergedRows[idx], ...normalizedIncoming };
+          if (!mergedLineage[idx].includes(newDatasetId)) {
+            mergedLineage[idx].push(newDatasetId);
+          }
+        }
+        // If 'skip', leave existing row untouched
+      } else {
+        mergedRows.push(normalizedIncoming);
+        mergedLineage.push([newDatasetId]);
+      }
+    }
+
+    finalRows = mergedRows;
+    finalLineage = mergedLineage;
+  }
+
+  const columns =
+    finalRows === incomingRows ? incomingColumns : profileColumns(finalHeaders, finalRows);
+  const { duplicateCount, missingCellCount } =
+    finalRows === incomingRows ? incomingStats : computeDatasetQualityStats(finalHeaders, finalRows);
+  const mapping =
+    finalRows === incomingRows
+      ? baseMapping
+      : params.mapping || autoDetectMapping(columns, finalRows, company.industry, uploadPathway);
+  const targetUniqueValues = mapping.targetColumn
+    ? getUniqueColumnValues(finalRows, mapping.targetColumn)
+    : [];
+  const { issues, isValid } =
+    finalRows === incomingRows ? incomingVal : validateDataset(columns, finalRows, mapping);
+  const labelReadiness =
+    finalRows === incomingRows
+      ? incomingLabelReadiness
+      : evaluateChurnReadiness(columns, finalRows, mapping, churnDef);
+  const readiness =
+    finalRows === incomingRows
+      ? incomingReadiness
+      : assessDataReadiness({
+          columns,
+          rows: finalRows,
+          mapping,
+          churnDefinition: churnDef,
+          industry: company.industry,
+        });
   const mappingRationales = buildMappingRationales(columns, mapping, company.industry);
   const invalidDateCount = columns.reduce((acc, c) => acc + (c.invalidDateCount || 0), 0);
   const inconsistentCategoryCount = columns.reduce(
@@ -247,14 +512,15 @@ function commitRowsIntoWorkspace(
   );
 
   const state: DatasetState = {
-    datasetId: `ds_${Date.now()}`,
+    datasetId: newDatasetId,
     fileName,
     sourceFormat,
     uploadPathway,
-    satisfactionScale: satisfactionScale || ws.satisfactionScale || company.satisfactionScale || '1-5',
+    satisfactionScale:
+      satisfactionScale || ws.satisfactionScale || company.satisfactionScale || '1-5',
     isSample,
-    uploadedAt: new Date().toISOString(),
-    rowCount: rows.length,
+    uploadedAt: nowIso,
+    rowCount: finalRows.length,
     columnCount: columns.length,
     duplicateCount,
     missingCellCount,
@@ -272,16 +538,18 @@ function commitRowsIntoWorkspace(
     churnDefinition: churnDef,
     rowValidation,
     ticketAggregation,
-    previewRows: rows.slice(0, 15),
+    previewRows: finalRows.slice(0, 15),
   };
 
-  ws.activeDataset = { state, rows };
-  ws.activeAnalytics = computeAnalytics(columns, rows, mapping, {}, churnDef);
+  ws.activeDataset = { state, rows: finalRows };
+  ws.rowDatasetLineage = finalLineage;
   ws.ticketAggregation = ticketAggregation;
   if (!preserveModelArtifact) {
     ws.activeModelArtifact = null;
-    ws.modelHistory = [];
   }
+  ws.activeAnalytics =
+    buildWorkspaceAnalytics(company, ws) ||
+    computeAnalytics(columns, finalRows, mapping, {}, churnDef);
   ws.stagedImport = null;
 
   persistCompanyWorkspace(company.id, ws);
@@ -638,6 +906,7 @@ function runAutomatedPredictionSetup(
     };
 
     ws.automationStatus = status;
+    ws.activeAnalytics = buildWorkspaceAnalytics(company, ws) || ws.activeAnalytics;
     persistCompanyWorkspace(company.id, ws);
 
     if (options?.actor) {
@@ -886,8 +1155,35 @@ export function createApiApp() {
     next();
   });
 
-  app.get('/api/health', (_req, res) => {
-    res.json({ status: 'ok' });
+  app.get('/api/health', async (_req, res) => {
+    const persistence = getPersistenceStatus();
+    if (!persistence.persistent) {
+      res.status(503).json({
+        status: 'unconfigured',
+        storagePersistent: false,
+        storageMode: persistence.mode,
+        provider: persistence.provider,
+        message: persistence.message,
+      });
+      return;
+    }
+
+    let dbHealthy = true;
+    if (isPostgresConfigured()) {
+      dbHealthy = await pgHealthCheck();
+    } else if (isKvConfigured()) {
+      dbHealthy = await kvPing();
+    }
+
+    res.status(dbHealthy ? 200 : 503).json({
+      status: dbHealthy ? 'ok' : 'degraded',
+      storagePersistent: dbHealthy,
+      storageMode: persistence.mode,
+      provider: persistence.provider,
+      message: dbHealthy
+        ? persistence.message
+        : `Database connectivity check failed for ${persistence.provider || persistence.mode}.`,
+    });
   });
 
   const authLimiter = createRateLimiter({
@@ -919,18 +1215,22 @@ export function createApiApp() {
       return;
     }
     try {
-      await Promise.all([ensureAuthHydrated(), ensureAuditLogsHydrated()]);
+      const persistence = getPersistenceStatus();
       const token = extractSessionToken(req);
-      let ctx = getSessionContext(token);
-      if (token && !ctx && isRemoteStoreConfigured()) {
-        await ensureAuthHydrated(true);
-        ctx = getSessionContext(token);
-      }
-      if (ctx) {
-        await ensureWorkspaceHydrated(ctx.company.id);
+
+      if (persistence.persistent) {
+        await Promise.all([ensureAuthHydrated(), ensureAuditLogsHydrated()]);
+        let ctx = getSessionContext(token);
+        if (token && (!ctx || isRemotePersistenceActive())) {
+          const freshCtx = await hydrateSessionByToken(token);
+          if (freshCtx) ctx = freshCtx;
+        }
+        if (ctx) {
+          await ensureWorkspaceHydrated(ctx.company.id, isRemotePersistenceActive());
+        }
       }
 
-      if (isRemoteStoreConfigured() && req.method !== 'GET' && req.method !== 'HEAD') {
+      if (isRemotePersistenceActive() && req.method !== 'GET' && req.method !== 'HEAD') {
         const origJson = res.json.bind(res);
         res.json = ((body: unknown) => {
           Promise.all([
@@ -938,9 +1238,21 @@ export function createApiApp() {
             flushAllPendingWorkspaceWrites(),
             flushPendingAuditWrites(),
           ])
-            .catch(() => undefined)
-            .finally(() => {
+            .then(() => {
               origJson(body);
+            })
+            .catch((err) => {
+              console.error('Failed to flush persistent writes before response:', err);
+              if (!res.headersSent) {
+                res.status(503);
+              }
+              origJson({
+                error:
+                  err instanceof Error
+                    ? err.message
+                    : 'Database write failed. Please try again.',
+                code: 'DATABASE_WRITE_FAILED',
+              });
             });
           return res;
         }) as Response['json'];
@@ -954,18 +1266,23 @@ export function createApiApp() {
   // ---------------------------------------------------------------------------
   // Authentication & Registration Routes
   // ---------------------------------------------------------------------------
-  app.get('/api/auth/status', (_req, res) => {
+  app.get('/api/auth/status', async (_req, res) => {
     const persistence = getPersistenceStatus();
+    if (persistence.persistent && isRemotePersistenceActive()) {
+      await ensureAuthHydrated(true).catch(() => undefined);
+    }
     res.json({
-      hasRegisteredWorkspaces: hasAnyRegisteredUsers(),
+      hasRegisteredWorkspaces: persistence.persistent ? hasAnyRegisteredUsers() : false,
       storagePersistent: persistence.persistent,
       storageMode: persistence.mode,
+      provider: persistence.provider,
+      message: persistence.message,
     });
   });
 
   app.post('/api/auth/register-company', authLimiter, async (req, res) => {
     try {
-      if (isRemoteStoreConfigured()) {
+      if (isRemotePersistenceActive()) {
         await ensureAuthHydrated(true);
       }
       const body = (req.body || {}) as RegisterCompanyRequest;
@@ -1012,7 +1329,7 @@ export function createApiApp() {
 
   app.post('/api/auth/login', authLimiter, async (req, res) => {
     try {
-      if (isRemoteStoreConfigured()) {
+      if (isRemotePersistenceActive()) {
         await ensureAuthHydrated(true);
       }
       const body = (req.body || {}) as LoginRequest;
@@ -1053,7 +1370,7 @@ export function createApiApp() {
 
   app.post('/api/auth/logout', async (req, res) => {
     const token = extractSessionToken(req);
-    const ctx = getSessionContext(token);
+    const ctx = (await hydrateSessionByToken(token)) || getSessionContext(token);
     if (ctx) {
       recordAuditEvent({
         companyId: ctx.company.id,
@@ -1072,7 +1389,18 @@ export function createApiApp() {
   });
 
   app.get('/api/auth/me', async (req, res) => {
+    const persistence = getPersistenceStatus();
+    if (!persistence.persistent) {
+      res.status(503).json({
+        error: persistence.message,
+        code: 'DATABASE_NOT_CONFIGURED',
+      });
+      return;
+    }
     const token = extractSessionToken(req);
+    if (token && isRemotePersistenceActive()) {
+      await hydrateSessionByToken(token).catch(() => undefined);
+    }
     const refreshed = refreshSessionIfNeeded(token, false);
     if (!refreshed) {
       clearSessionCookie(req, res);
@@ -1093,6 +1421,9 @@ export function createApiApp() {
 
   app.post('/api/auth/refresh', async (req, res) => {
     const token = extractSessionToken(req);
+    if (token && isRemotePersistenceActive()) {
+      await hydrateSessionByToken(token).catch(() => undefined);
+    }
     const refreshed = refreshSessionIfNeeded(token, true);
     if (!refreshed || !token) {
       clearSessionCookie(req, res);
@@ -1119,6 +1450,10 @@ export function createApiApp() {
           'Automated password reset email delivery is not configured on this server (no SMTP or transactional email service is connected). Please contact your Company Firm Administrator to reset your account password from Manage Users.',
       });
     } catch (err: unknown) {
+      if (err instanceof AuthServiceError) {
+        res.status(err.statusCode).json({ error: err.message, code: err.code });
+        return;
+      }
       const message = err instanceof Error ? err.message : 'Invalid email address.';
       res.status(400).json({ error: message });
     }
@@ -1224,13 +1559,15 @@ export function createApiApp() {
             churnReadinessMessage: labelReadiness.churnReadinessMessage,
             readiness,
           };
-          ws.activeAnalytics = computeAnalytics(
-            ws.activeDataset.state.columns,
-            ws.activeDataset.rows,
-            ws.activeDataset.state.mapping,
-            {},
-            company.churnDefinition
-          );
+          ws.activeAnalytics =
+            buildWorkspaceAnalytics(company, ws) ||
+            computeAnalytics(
+              ws.activeDataset.state.columns,
+              ws.activeDataset.rows,
+              ws.activeDataset.state.mapping,
+              {},
+              company.churnDefinition
+            );
           persistCompanyWorkspace(company.id, ws);
           runAutomatedPredictionSetup(company, ws, {
             allowModelExecution:
@@ -1304,13 +1641,15 @@ export function createApiApp() {
             churnReadinessMessage: labelReadiness.churnReadinessMessage,
             readiness,
           };
-          ws.activeAnalytics = computeAnalytics(
-            ws.activeDataset.state.columns,
-            ws.activeDataset.rows,
-            ws.activeDataset.state.mapping,
-            {},
-            company.churnDefinition
-          );
+          ws.activeAnalytics =
+            buildWorkspaceAnalytics(company, ws) ||
+            computeAnalytics(
+              ws.activeDataset.state.columns,
+              ws.activeDataset.rows,
+              ws.activeDataset.state.mapping,
+              {},
+              company.churnDefinition
+            );
           persistCompanyWorkspace(company.id, ws);
           runAutomatedPredictionSetup(company, ws, {
             allowModelExecution:
@@ -1505,9 +1844,19 @@ export function createApiApp() {
       (req.auth!.user.role === 'FIRM_ADMIN' || req.auth!.user.role === 'PLATFORM_OWNER') &&
       (plan.allowAuditLogs || req.auth!.user.role === 'PLATFORM_OWNER');
 
+    if (
+      ws.activeDataset &&
+      (!ws.activeAnalytics ||
+        !ws.activeAnalytics.historicalPerformance ||
+        (ws.activeModelArtifact && !ws.activeAnalytics.activeRiskSummary))
+    ) {
+      ws.activeAnalytics = buildWorkspaceAnalytics(company, ws) || ws.activeAnalytics;
+    }
+
     res.json({
       company,
       dataset: ws.activeDataset ? ws.activeDataset.state : null,
+      uploadedDatasets: listUploadedDatasetSummaries(ws),
       analytics: ws.activeAnalytics,
       activeModel: serializeActiveModelEvaluation(ws),
       modelHistory: ws.modelHistory,
@@ -1545,6 +1894,7 @@ export function createApiApp() {
           headers,
           rows,
           churnDefinition: confirmedChurnDef,
+          duplicateStrategy: 'replace',
           isSample: true,
         });
 
@@ -1570,6 +1920,7 @@ export function createApiApp() {
 
         res.json({
           ...result,
+          uploadedDatasets: listUploadedDatasetSummaries(ws),
           usage: buildUsageSummary(company, ws),
           activeModel: serializeActiveModelEvaluation(ws),
           modelHistory: ws.modelHistory,
@@ -1929,12 +2280,13 @@ export function createApiApp() {
             },
           };
 
-          ws.stagedImport = {
+          const stagedPayload = {
             meta,
             rows,
             ticketRows: parsed.ticketSheetRows,
             rawByteSize,
           };
+          persistStagedImport(company.id, stagedPayload);
 
           res.json({ stagedImport: meta });
           return;
@@ -2043,6 +2395,36 @@ export function createApiApp() {
           duplicateTicketIds,
         });
 
+        // Detect overlapping Customer_IDs against currently active workspace dataset
+        let duplicateConflict: DuplicateCustomerConflictSummary | null = null;
+        if (ws.activeDataset && ws.activeDataset.rows.length > 0 && suggestedMapping.idColumn) {
+          const existingIdCol = ws.activeDataset.state.mapping.idColumn || suggestedMapping.idColumn;
+          const existingIds = new Set<string>();
+          for (const er of ws.activeDataset.rows) {
+            const val = (er[existingIdCol] || '').trim();
+            if (val) existingIds.add(val.toLowerCase());
+          }
+          const matchedDuplicates: string[] = [];
+          let conflictCount = 0;
+          for (const nr of rows) {
+            const val = (nr[suggestedMapping.idColumn] || '').trim();
+            if (val && existingIds.has(val.toLowerCase())) {
+              conflictCount++;
+              if (matchedDuplicates.length < 8 && !matchedDuplicates.includes(val)) {
+                matchedDuplicates.push(val);
+              }
+            }
+          }
+          if (conflictCount > 0) {
+            duplicateConflict = {
+              existingCount: ws.activeDataset.rows.length,
+              conflictCount,
+              sampleDuplicateIds: matchedDuplicates,
+              existingDatasetFileName: ws.activeDataset.state.fileName,
+            };
+          }
+        }
+
         const modelCompatibility =
           uploadPathway === 'current_prediction' || ws.activeModelArtifact
             ? checkModelCompatibility(headers, ws.activeModelArtifact)
@@ -2078,16 +2460,17 @@ export function createApiApp() {
           rowValidation,
           ticketAggregation,
           modelCompatibility,
+          duplicateConflict,
         };
 
-        ws.stagedImport = {
+        persistStagedImport(company.id, {
           meta,
           rows,
           validRowsOnly,
           ticketRows: parsed.ticketSheetRows,
           rejectedRowsCsv,
           rawByteSize,
-        };
+        });
 
         recordAuditEvent({
           companyId: company.id,
@@ -2156,7 +2539,7 @@ export function createApiApp() {
     }
   );
 
-  // 4b. Commit staged dataset with user-confirmed mapping, churn definition, valid-only import & ticket/current-customer handling
+  // 4b. Commit staged dataset with user-confirmed mapping, churn definition, valid-only import, duplicate handling & ticket linking
   app.post(
     '/api/dataset/commit',
     requireAuth,
@@ -2167,13 +2550,20 @@ export function createApiApp() {
         let company = getCompanyById(req.auth!.company.id) || req.auth!.company;
         const ws = getCompanyWorkspace(company.id);
 
-        const { stagedId, mapping, churnDefinition, importMode, satisfactionScale } = (req.body ||
-          {}) as {
+        const {
+          stagedId,
+          mapping,
+          churnDefinition,
+          importMode,
+          satisfactionScale,
+          duplicateStrategy,
+        } = (req.body || {}) as {
           stagedId?: string;
           mapping?: Partial<ColumnMapping>;
           churnDefinition?: ChurnDefinition;
           importMode?: 'valid_only' | 'all';
           satisfactionScale?: SatisfactionScale;
+          duplicateStrategy?: DuplicateIdHandlingMode;
         };
 
         if (!ws.stagedImport || ws.stagedImport.meta.stagedId !== stagedId) {
@@ -2247,16 +2637,36 @@ export function createApiApp() {
               previewRows: merged.rows.slice(0, 15),
             },
           };
-          ws.activeAnalytics = computeAnalytics(
-            columns,
-            merged.rows,
-            existingMapping,
-            {},
-            company.churnDefinition
-          );
+
+          // Also record standalone Ticket_Data entry in uploadedDatasets for complete dataset management visibility
+          const ticketDsId = `ds_tkt_${Date.now()}`;
+          ws.uploadedDatasets.unshift({
+            datasetId: ticketDsId,
+            fileName: staged.meta.fileName,
+            sourceFormat: staged.meta.sourceFormat,
+            uploadPathway: staged.meta.uploadPathway,
+            uploadMode: 'tickets',
+            uploadedAt: new Date().toISOString(),
+            customerCount: 0,
+            ticketCount: merged.summary.ticketRowsCount,
+            importStatus: 'Imported',
+            isSample: false,
+            dataset: { state: ws.activeDataset.state, rows: [] },
+            ticketRows: staged.ticketRows || staged.rows,
+          });
+
           ws.ticketAggregation = merged.summary;
           ws.activeModelArtifact = preservedArtifact;
           ws.modelHistory = preservedHistory;
+          ws.activeAnalytics =
+            buildWorkspaceAnalytics(company, ws) ||
+            computeAnalytics(
+              columns,
+              merged.rows,
+              existingMapping,
+              {},
+              company.churnDefinition
+            );
           ws.stagedImport = null;
           persistCompanyWorkspace(company.id, ws);
 
@@ -2273,6 +2683,7 @@ export function createApiApp() {
           res.json({
             company,
             dataset: ws.activeDataset.state,
+            uploadedDatasets: listUploadedDatasetSummaries(ws),
             analytics: ws.activeAnalytics,
             ticketAggregation: merged.summary,
             usage: buildUsageSummary(company, ws),
@@ -2379,6 +2790,11 @@ export function createApiApp() {
           ws.batchScores = [batchResult, ...(ws.batchScores || []).slice(0, 9)];
         }
 
+        const effectiveStrategy: DuplicateIdHandlingMode =
+          duplicateStrategy === 'skip' || duplicateStrategy === 'update'
+            ? duplicateStrategy
+            : 'replace';
+
         const result = commitRowsIntoWorkspace(company, ws, {
           fileName: staged.meta.fileName,
           sourceFormat: staged.meta.sourceFormat,
@@ -2390,6 +2806,8 @@ export function createApiApp() {
           churnDefinition: confirmedChurnDef,
           rowValidation: staged.meta.rowValidation,
           ticketAggregation: staged.meta.ticketAggregation || null,
+          ticketRows: staged.ticketRows,
+          duplicateStrategy: effectiveStrategy,
           preserveModelArtifact: isCurrentPrediction,
           isSample: false,
         });
@@ -2413,12 +2831,13 @@ export function createApiApp() {
           actorRole: req.auth!.user.role,
           action: 'DATASET_COMMITTED',
           resource: 'dataset',
-          details: `Committed ${staged.meta.fileName} (${rowsToCommit.length} rows, pathway=${staged.meta.uploadPathway || 'standard'}, target=${confirmedMapping.targetColumn || 'unmapped'})`,
+          details: `Committed ${staged.meta.fileName} (${rowsToCommit.length} rows, strategy=${effectiveStrategy}, pathway=${staged.meta.uploadPathway || 'standard'})`,
         });
 
         res.json({
           company,
           ...result,
+          uploadedDatasets: listUploadedDatasetSummaries(ws),
           batchResult,
           batchScores: ws.batchScores || [],
           usage: buildUsageSummary(company, ws),
@@ -2467,6 +2886,7 @@ export function createApiApp() {
           sourceFormat,
           headers,
           rows,
+          duplicateStrategy: 'replace',
         });
 
         const automationStatus = runAutomatedPredictionSetup(company, ws, {
@@ -2491,6 +2911,7 @@ export function createApiApp() {
 
         res.json({
           ...result,
+          uploadedDatasets: listUploadedDatasetSummaries(ws),
           usage: buildUsageSummary(company, ws),
           activeModel: serializeActiveModelEvaluation(ws),
           modelHistory: ws.modelHistory,
@@ -2498,6 +2919,285 @@ export function createApiApp() {
         });
       } catch (err: unknown) {
         const message = err instanceof Error ? err.message : 'Failed to parse file.';
+        res.status(400).json({ error: message });
+      }
+    }
+  );
+
+  // 4d. Uploaded Datasets Management (list, activate, delete with dependency invalidation)
+  app.get('/api/datasets', requireAuth, (req: AuthenticatedRequest, res) => {
+    const ws = getCompanyWorkspace(req.auth!.company.id);
+    res.json({
+      uploadedDatasets: listUploadedDatasetSummaries(ws),
+      activeDatasetId: ws.activeDataset?.state.datasetId || null,
+    });
+  });
+
+  app.post(
+    '/api/datasets/:datasetId/activate',
+    requireAuth,
+    requirePermission('canUploadAndAnalyse'),
+    (req: AuthenticatedRequest, res) => {
+      try {
+        const company = getCompanyById(req.auth!.company.id) || req.auth!.company;
+        const ws = getCompanyWorkspace(company.id);
+        const datasetId = String(req.params.datasetId || '');
+        const entry = ws.uploadedDatasets.find((d) => d.datasetId === datasetId);
+        if (!entry) {
+          res.status(404).json({ error: 'Dataset was not found in this company workspace.' });
+          return;
+        }
+        if (entry.uploadMode === 'tickets' || entry.dataset.rows.length === 0) {
+          res.status(400).json({ error: 'Standalone ticket files cannot be activated as the primary customer table.' });
+          return;
+        }
+
+        ws.uploadedDatasets = ws.uploadedDatasets.map((d) => ({
+          ...d,
+          importStatus:
+            d.datasetId === datasetId
+              ? 'Active'
+              : d.importStatus === 'Active'
+                ? 'Imported'
+                : d.importStatus,
+        }));
+        ws.activeDataset = {
+          state: { ...entry.dataset.state },
+          rows: [...entry.dataset.rows],
+        };
+        ws.rowDatasetLineage = entry.dataset.rows.map(() => [datasetId]);
+        ws.ticketAggregation = entry.dataset.state.ticketAggregation || null;
+        ws.activeModelArtifact = null;
+        ws.activeAnalytics =
+          buildWorkspaceAnalytics(company, ws) ||
+          computeAnalytics(
+            entry.dataset.state.columns,
+            entry.dataset.rows,
+            entry.dataset.state.mapping,
+            {},
+            company.churnDefinition
+          );
+        persistCompanyWorkspace(company.id, ws);
+
+        const automationStatus = runAutomatedPredictionSetup(company, ws, {
+          allowModelExecution:
+            req.auth!.user.role !== 'ANALYST' || req.auth!.user.permissions.canGeneratePredictions,
+          actor: {
+            id: req.auth!.user.id,
+            email: req.auth!.user.email,
+            role: req.auth!.user.role,
+          },
+        });
+
+        recordAuditEvent({
+          companyId: company.id,
+          actorId: req.auth!.user.id,
+          actorEmail: req.auth!.user.email,
+          actorRole: req.auth!.user.role,
+          action: 'DATASET_ACTIVATED',
+          resource: 'dataset',
+          details: `Activated dataset ${entry.fileName} (${entry.customerCount} rows)`,
+        });
+
+        res.json({
+          company,
+          dataset: ws.activeDataset.state,
+          uploadedDatasets: listUploadedDatasetSummaries(ws),
+          analytics: ws.activeAnalytics,
+          activeModel: serializeActiveModelEvaluation(ws),
+          modelHistory: ws.modelHistory,
+          batchScores: ws.batchScores,
+          automationStatus,
+          usage: buildUsageSummary(company, ws),
+        });
+      } catch (err: unknown) {
+        const message = err instanceof Error ? err.message : 'Failed to activate dataset.';
+        res.status(400).json({ error: message });
+      }
+    }
+  );
+
+  app.delete(
+    '/api/datasets/:datasetId',
+    requireAuth,
+    requirePermission('canUploadAndAnalyse'),
+    (req: AuthenticatedRequest, res) => {
+      try {
+        const company = getCompanyById(req.auth!.company.id) || req.auth!.company;
+        const ws = getCompanyWorkspace(company.id);
+        const datasetId = String(req.params.datasetId || '');
+        const target = ws.uploadedDatasets.find((d) => d.datasetId === datasetId);
+        if (!target) {
+          res.status(404).json({ error: 'Dataset was not found in this company workspace.' });
+          return;
+        }
+
+        const wasActiveDatasetId = ws.activeDataset?.state.datasetId === datasetId;
+        ws.uploadedDatasets = ws.uploadedDatasets.filter((d) => d.datasetId !== datasetId);
+
+        let activeRowsChanged = false;
+
+        if (ws.activeDataset) {
+          if (target.uploadMode === 'tickets') {
+            // Standalone ticket file removed: clear ticket aggregation if it was tied to ticket enrichment
+            ws.ticketAggregation = null;
+            ws.activeDataset.state.ticketAggregation = null;
+          } else {
+            const survivingRows: Record<string, string>[] = [];
+            const survivingLineage: string[][] = [];
+
+            ws.activeDataset.rows.forEach((row, idx) => {
+              const owners = (ws.rowDatasetLineage[idx] || [ws.activeDataset!.state.datasetId]).filter(
+                (id) => id !== datasetId
+              );
+              if (owners.length > 0) {
+                survivingRows.push(row);
+                survivingLineage.push(owners);
+              } else {
+                activeRowsChanged = true;
+              }
+            });
+
+            if (survivingRows.length === 0) {
+              ws.activeDataset = null;
+              ws.rowDatasetLineage = [];
+              ws.activeAnalytics = null;
+              ws.ticketAggregation = null;
+            } else if (activeRowsChanged || wasActiveDatasetId) {
+              const headers = Object.keys(survivingRows[0] || {});
+              const columns = profileColumns(headers, survivingRows);
+              const { duplicateCount, missingCellCount } = computeDatasetQualityStats(
+                headers,
+                survivingRows
+              );
+              const mapping = ws.activeDataset.state.mapping;
+              const { issues, isValid } = validateDataset(columns, survivingRows, mapping);
+              const labelReadiness = evaluateChurnReadiness(
+                columns,
+                survivingRows,
+                mapping,
+                company.churnDefinition
+              );
+              const readiness = assessDataReadiness({
+                columns,
+                rows: survivingRows,
+                mapping,
+                churnDefinition: company.churnDefinition,
+                industry: company.industry,
+              });
+              const ownerId = survivingLineage[0][0] || ws.activeDataset.state.datasetId;
+              const ownerEntry = ws.uploadedDatasets.find((d) => d.datasetId === ownerId);
+
+              ws.activeDataset = {
+                rows: survivingRows,
+                state: {
+                  ...ws.activeDataset.state,
+                  datasetId: ownerId,
+                  fileName: ownerEntry ? ownerEntry.fileName : ws.activeDataset.state.fileName,
+                  rowCount: survivingRows.length,
+                  columnCount: columns.length,
+                  duplicateCount,
+                  missingCellCount,
+                  columns,
+                  issues,
+                  isValid,
+                  hasValidChurnLabels: labelReadiness.hasValidChurnLabels,
+                  churnReadinessMessage: labelReadiness.churnReadinessMessage,
+                  readiness,
+                  previewRows: survivingRows.slice(0, 15),
+                },
+              };
+              ws.rowDatasetLineage = survivingLineage;
+              ws.activeAnalytics =
+                buildWorkspaceAnalytics(company, ws) ||
+                computeAnalytics(
+                  columns,
+                  survivingRows,
+                  mapping,
+                  {},
+                  company.churnDefinition
+                );
+            }
+          }
+        }
+
+        // Invalidate models, predictions, and batch scores derived exclusively from deleted dataset
+        const invalidatedModelIds = new Set<string>();
+        ws.modelHistory = ws.modelHistory.map((m) => {
+          if (m.datasetId === datasetId) {
+            invalidatedModelIds.add(m.modelId);
+            return {
+              ...m,
+              isOutdated: true,
+              outdatedReason: `Source dataset "${target.fileName}" was deleted.`,
+            };
+          }
+          return m;
+        });
+
+        const activeModelTrainedOnDeleted =
+          ws.activeModelArtifact?.evaluation.datasetId === datasetId ||
+          wasActiveDatasetId ||
+          activeRowsChanged ||
+          !ws.activeDataset;
+
+        if (activeModelTrainedOnDeleted) {
+          if (ws.activeModelArtifact) {
+            invalidatedModelIds.add(ws.activeModelArtifact.evaluation.modelId);
+          }
+          ws.activeModelArtifact = null;
+          ws.automationStatus = null;
+        }
+
+        if (invalidatedModelIds.size > 0) {
+          ws.batchScores = (ws.batchScores || []).filter(
+            (b) => !invalidatedModelIds.has(b.modelId)
+          );
+        }
+
+        const currentActiveId = ws.activeDataset?.state.datasetId || null;
+        ws.uploadedDatasets = ws.uploadedDatasets.map((d) => ({
+          ...d,
+          importStatus:
+            d.datasetId === currentActiveId
+              ? 'Active'
+              : d.importStatus === 'Active'
+                ? 'Imported'
+                : d.importStatus,
+        }));
+
+        // Re-run analytics if remaining active dataset + unrelated model survived
+        if (ws.activeDataset && ws.activeModelArtifact) {
+          ws.activeAnalytics = buildWorkspaceAnalytics(company, ws) || ws.activeAnalytics;
+        }
+
+        persistCompanyWorkspace(company.id, ws, { deletedDatasetId: datasetId });
+
+        recordAuditEvent({
+          companyId: company.id,
+          actorId: req.auth!.user.id,
+          actorEmail: req.auth!.user.email,
+          actorRole: req.auth!.user.role,
+          action: 'DATASET_DELETED',
+          resource: 'dataset',
+          details: `Deleted dataset "${target.fileName}" (${target.customerCount} customers, ${target.ticketCount} tickets) and invalidated dependent predictions/analytics`,
+        });
+
+        res.json({
+          deletedDatasetId: datasetId,
+          deletedFileName: target.fileName,
+          company,
+          dataset: ws.activeDataset ? ws.activeDataset.state : null,
+          uploadedDatasets: listUploadedDatasetSummaries(ws),
+          analytics: ws.activeAnalytics,
+          activeModel: serializeActiveModelEvaluation(ws),
+          modelHistory: ws.modelHistory,
+          batchScores: ws.batchScores || [],
+          automationStatus: ws.automationStatus,
+          usage: buildUsageSummary(company, ws),
+        });
+      } catch (err: unknown) {
+        const message = err instanceof Error ? err.message : 'Failed to delete dataset.';
         res.status(400).json({ error: message });
       }
     }
@@ -2607,16 +3307,17 @@ export function createApiApp() {
           readiness,
         };
 
-        ws.activeAnalytics = computeAnalytics(
-          ws.activeDataset.state.columns,
-          ws.activeDataset.rows,
-          updatedMapping,
-          {},
-          company.churnDefinition
-        );
-
         ws.activeModelArtifact = null;
         ws.modelHistory = [];
+        ws.activeAnalytics =
+          buildWorkspaceAnalytics(company, ws) ||
+          computeAnalytics(
+            ws.activeDataset.state.columns,
+            ws.activeDataset.rows,
+            updatedMapping,
+            {},
+            company.churnDefinition
+          );
         persistCompanyWorkspace(company.id, ws);
 
         const automationStatus = runAutomatedPredictionSetup(company, ws, {
@@ -2792,13 +3493,15 @@ export function createApiApp() {
           previewRows: ds.rows.slice(0, 15),
         };
 
-        ws.activeAnalytics = computeAnalytics(
-          columns,
-          ds.rows,
-          mapping,
-          {},
-          company.churnDefinition
-        );
+        ws.activeAnalytics =
+          buildWorkspaceAnalytics(company, ws) ||
+          computeAnalytics(
+            columns,
+            ds.rows,
+            mapping,
+            {},
+            company.churnDefinition
+          );
         persistCompanyWorkspace(company.id, ws);
 
         const automationStatus = runAutomatedPredictionSetup(company, ws, {
@@ -2930,13 +3633,29 @@ export function createApiApp() {
       previewRows: ds.rows.slice(0, 15),
     };
 
-    ws.activeAnalytics = computeAnalytics(
-      columns,
-      ds.rows,
-      mapping,
-      {},
-      company.churnDefinition
-    );
+    ws.activeAnalytics =
+      buildWorkspaceAnalytics(company, ws) ||
+      computeAnalytics(
+        columns,
+        ds.rows,
+        mapping,
+        {},
+        company.churnDefinition
+      );
+
+    // Sync active dataset entry count in uploadedDatasets
+    const activeEntryIdx = ws.uploadedDatasets.findIndex((d) => d.datasetId === ds.state.datasetId);
+    if (activeEntryIdx >= 0) {
+      ws.uploadedDatasets[activeEntryIdx] = {
+        ...ws.uploadedDatasets[activeEntryIdx],
+        customerCount: ds.rows.length,
+        dataset: {
+          state: { ...ds.state },
+          rows: [...ds.rows],
+        },
+      };
+    }
+
     persistCompanyWorkspace(company.id, ws);
 
     const automationStatus = runAutomatedPredictionSetup(company, ws, {
@@ -3020,6 +3739,7 @@ export function createApiApp() {
           const latestWs = getCompanyWorkspace(company.id);
           res.status(201).json({
             dataset: latestWs.activeDataset?.state ?? committed.dataset,
+            uploadedDatasets: listUploadedDatasetSummaries(latestWs),
             analytics: latestWs.activeAnalytics ?? committed.analytics,
             activeModel: serializeActiveModelEvaluation(latestWs),
             modelHistory: latestWs.modelHistory,
@@ -3071,6 +3791,9 @@ export function createApiApp() {
         );
 
         ds.rows = nextRows;
+        if (ws.rowDatasetLineage.length > 0) {
+          ws.rowDatasetLineage = [[ds.state.datasetId], ...ws.rowDatasetLineage];
+        }
         const { automationStatus } = refreshActiveDatasetState(
           company,
           ws,
@@ -3091,6 +3814,7 @@ export function createApiApp() {
         const latestWs = getCompanyWorkspace(company.id);
         res.status(201).json({
           dataset: latestWs.activeDataset?.state ?? ds.state,
+          uploadedDatasets: listUploadedDatasetSummaries(latestWs),
           analytics: latestWs.activeAnalytics ?? ws.activeAnalytics,
           activeModel: serializeActiveModelEvaluation(latestWs),
           modelHistory: latestWs.modelHistory,
@@ -3220,6 +3944,9 @@ export function createApiApp() {
         const idCol = ds.state.mapping.idColumn;
         const removedId = idCol ? ds.rows[rowIndex]?.[idCol] : `#${rowIndex + 1}`;
         ds.rows.splice(rowIndex, 1);
+        if (ws.rowDatasetLineage.length > rowIndex) {
+          ws.rowDatasetLineage.splice(rowIndex, 1);
+        }
 
         const actor = {
           id: req.auth!.user.id,
@@ -3228,12 +3955,15 @@ export function createApiApp() {
         };
 
         if (ds.rows.length === 0) {
+          const emptyId = ds.state.datasetId;
+          ws.uploadedDatasets = ws.uploadedDatasets.filter((d) => d.datasetId !== emptyId);
           ws.activeDataset = null;
+          ws.rowDatasetLineage = [];
           ws.activeAnalytics = null;
           ws.activeModelArtifact = null;
           ws.modelHistory = [];
           ws.automationStatus = null;
-          persistCompanyWorkspace(company.id, ws);
+          persistCompanyWorkspace(company.id, ws, { deletedDatasetId: emptyId });
 
           recordAuditEvent({
             companyId: company.id,
@@ -3247,6 +3977,7 @@ export function createApiApp() {
 
           res.json({
             dataset: null,
+            uploadedDatasets: listUploadedDatasetSummaries(ws),
             analytics: null,
             activeModel: null,
             modelHistory: [],
@@ -3279,6 +4010,7 @@ export function createApiApp() {
         const latestWs = getCompanyWorkspace(company.id);
         res.json({
           dataset: latestWs.activeDataset?.state ?? ds.state,
+          uploadedDatasets: listUploadedDatasetSummaries(latestWs),
           analytics: latestWs.activeAnalytics ?? ws.activeAnalytics,
           activeModel: serializeActiveModelEvaluation(latestWs),
           modelHistory: latestWs.modelHistory,
@@ -3333,8 +4065,7 @@ export function createApiApp() {
       }
     }
 
-    const targetCol = mapping.targetColumn;
-    const positiveVal = (mapping.positiveClassValue || '').trim().toLowerCase();
+    const statusHints = detectStatusColumnHints(ds.state.columns, mapping);
     const idCol = mapping.idColumn;
     const dateCol = mapping.dateColumn;
 
@@ -3342,27 +4073,54 @@ export function createApiApp() {
       all: ds.rows.length,
       active: 0,
       churned: 0,
+      inconsistent: 0,
       highRisk: 0,
       pending: 0,
     };
 
     const indexed = ds.rows.map((row, idx) => {
-      const targetRaw = targetCol ? (row[targetCol] || '').trim() : '';
-      const isMissingOutcome = !targetCol || isMissingValue(targetRaw);
-      const isChurned = !isMissingOutcome && targetRaw.toLowerCase() === positiveVal;
-      const isActive = !isMissingOutcome && !isChurned;
+      const resolved = resolveCustomerStatusRecord(
+        row,
+        idx + 1,
+        statusHints,
+        ds.state.churnDefinition
+      );
+
+      const isMissingOutcome = resolved.actualStatus === 'Unknown';
+      const isChurned = resolved.isActualChurned;
+      const isInconsistent = resolved.isInconsistent;
+      const isActive = resolved.isActive;
 
       const rowIdKey = idCol && row[idCol] ? row[idCol].trim().toLowerCase() : '';
-      const risk =
-        predByRowIndex.get(idx) || (rowIdKey ? predByCustomerId.get(rowIdKey) : undefined) || null;
-      const isHighRisk = risk?.riskCategory === 'Higher Estimated Churn Risk';
+      const rawRisk =
+        predByRowIndex.get(idx + 1) ||
+        (rowIdKey ? predByCustomerId.get(rowIdKey) : undefined) ||
+        null;
 
-      if (isMissingOutcome) counts.pending++;
+      // Forward predicted risk applies ONLY to Active (or pending Active) accounts, never Churned/Inconsistent
+      const riskApplicable = !isChurned && !isInconsistent;
+      const risk = riskApplicable ? rawRisk : null;
+      const isHighRisk = riskApplicable && risk?.riskCategory === 'Higher Estimated Churn Risk';
+
+      if (isInconsistent) counts.inconsistent++;
+      else if (isMissingOutcome) counts.pending++;
       else if (isChurned) counts.churned++;
       else counts.active++;
       if (isHighRisk) counts.highRisk++;
 
-      return { row, idx, risk, isActive, isChurned, isMissingOutcome, isHighRisk };
+      return {
+        row,
+        idx,
+        risk,
+        actualStatus: resolved.actualStatus,
+        conflictReason: resolved.conflictReason,
+        riskApplicable,
+        isActive,
+        isChurned,
+        isInconsistent,
+        isMissingOutcome,
+        isHighRisk,
+      };
     });
 
     let filtered = indexed;
@@ -3375,6 +4133,8 @@ export function createApiApp() {
       filtered = filtered.filter((entry) => entry.isActive);
     } else if (statusFilter === 'churned') {
       filtered = filtered.filter((entry) => entry.isChurned);
+    } else if (statusFilter === 'inconsistent') {
+      filtered = filtered.filter((entry) => entry.isInconsistent);
     } else if (statusFilter === 'high_risk') {
       filtered = filtered.filter((entry) => entry.isHighRisk);
     } else if (statusFilter === 'pending') {
@@ -3400,6 +4160,11 @@ export function createApiApp() {
       items: slice.map((s) => s.row),
       rowIndices: slice.map((s) => s.idx),
       risks: slice.map((s) => s.risk),
+      statuses: slice.map((s) => ({
+        actualStatus: s.actualStatus,
+        conflictReason: s.conflictReason,
+        riskApplicable: s.riskApplicable,
+      })),
       counts,
       total,
       page,
@@ -3427,15 +4192,19 @@ export function createApiApp() {
             : 'ALL',
         tenureGroup: body.tenureGroup || 'ALL',
         paymentMethod: body.paymentMethod || 'ALL',
+        reportingPeriod: body.reportingPeriod || 'ALL',
       };
 
-      const filtered = computeAnalytics(
-        ws.activeDataset.state.columns,
-        ws.activeDataset.rows,
-        ws.activeDataset.state.mapping,
-        filters,
-        company.churnDefinition
-      );
+      const filtered =
+        buildWorkspaceAnalytics(company, ws, filters) ||
+        computeAnalytics(
+          ws.activeDataset.state.columns,
+          ws.activeDataset.rows,
+          ws.activeDataset.state.mapping,
+          filters,
+          company.churnDefinition,
+          ws.activeModelArtifact
+        );
 
       res.json({ analytics: filtered });
     } catch (err: unknown) {
@@ -3560,6 +4329,7 @@ export function createApiApp() {
           }),
         };
 
+        ws.activeAnalytics = buildWorkspaceAnalytics(company, ws) || ws.activeAnalytics;
         persistCompanyWorkspace(company.id, ws);
 
         recordAuditEvent({
@@ -3573,6 +4343,7 @@ export function createApiApp() {
         });
 
         res.json({
+          analytics: ws.activeAnalytics,
           activeModel: serializeActiveModelEvaluation(ws),
           modelHistory: ws.modelHistory,
           automationStatus: ws.automationStatus,
@@ -3611,6 +4382,7 @@ export function createApiApp() {
         });
 
         res.json({
+          analytics: ws.activeAnalytics,
           activeModel: serializeActiveModelEvaluation(ws),
           modelHistory: ws.modelHistory,
           automationStatus,
@@ -3756,28 +4528,39 @@ export function createApiApp() {
       return;
     }
 
-    const preds = ws.activeModelArtifact.evaluation.predictions;
+    const serialized = serializeActiveModelEvaluation(ws);
+    const preds = serialized?.predictions || ws.activeModelArtifact.evaluation.predictions;
     const headers = [
       'Row',
       'CustomerID',
+      'CustomerName',
       'DatasetSplit',
-      'ActualStatus',
-      'PredictedStatus',
-      'EstimatedChurnProbability',
-      'RiskCategory',
+      'ActualCustomerStatus',
+      'PredictedChurnProbability',
+      'PredictedRiskClassification',
     ];
 
     const lines = [headers.join(',')];
     for (const p of preds) {
+      const actualStatus =
+        p.actualStatus || (p.actualChurn === 'Churned' ? 'Churned' : 'Active');
+      const isRiskApplicable =
+        p.riskApplicable !== false && actualStatus !== 'Churned' && actualStatus !== 'Inconsistent';
+      const probText = isRiskApplicable
+        ? `${(p.churnProbability * 100).toFixed(1)}%`
+        : 'Not Applicable';
+      const riskText = isRiskApplicable
+        ? p.predictedRiskLabel || classifyPredictedRiskLabel(p.riskCategory)
+        : 'Not Applicable';
       lines.push(
         [
           String(p.rowIndex),
           escapeCsvCell(p.customerId),
+          escapeCsvCell(p.customerName || 'Name unavailable'),
           escapeCsvCell(p.split),
-          escapeCsvCell(p.actualChurn),
-          escapeCsvCell(p.predictedChurn),
-          `${(p.churnProbability * 100).toFixed(1)}%`,
-          escapeCsvCell(p.riskCategory),
+          escapeCsvCell(actualStatus),
+          escapeCsvCell(probText),
+          escapeCsvCell(riskText),
         ].join(',')
       );
     }
@@ -3875,12 +4658,14 @@ export function createApiApp() {
     const headers = [
       'CustomerID',
       'CustomerName',
+      'ActualCustomerStatus',
       'Segment',
       'ValueScore',
       'ValueSegment',
       'AnnualizedRevenue',
       'ProfitContribution',
-      'ChurnProbability',
+      'PredictedChurnProbability',
+      'PredictedRiskClassification',
       'ValueRiskQuadrant',
       'RetentionPriority',
       'ExpectedRevenueExposure',
@@ -3888,19 +4673,35 @@ export function createApiApp() {
     ];
     const lines = [headers.join(',')];
     for (const c of summary.customers) {
+      const isRiskApplicable =
+        c.riskApplicable !== false &&
+        c.actualStatus !== 'Churned' &&
+        c.actualStatus !== 'Inconsistent';
       lines.push(
         [
           escapeCsvCell(c.customerId),
           escapeCsvCell(c.customerName),
+          escapeCsvCell(c.actualStatus || 'Unknown'),
           escapeCsvCell(c.segment),
           String(c.valueScore),
           escapeCsvCell(c.valueSegment),
           c.annualizedRevenue !== null ? String(c.annualizedRevenue) : 'Unavailable',
           c.profitContribution !== null ? String(c.profitContribution) : 'Unavailable',
-          c.churnProbability !== null ? `${(c.churnProbability * 100).toFixed(1)}%` : 'Unavailable',
+          !isRiskApplicable
+            ? 'Not Applicable'
+            : c.churnProbability !== null
+              ? `${(c.churnProbability * 100).toFixed(1)}%`
+              : 'Unavailable',
+          !isRiskApplicable
+            ? 'Not Applicable'
+            : escapeCsvCell(c.predictedRiskLabel || c.riskCategory || 'Unavailable'),
           escapeCsvCell(c.quadrantLabel),
           escapeCsvCell(c.retentionPriority),
-          c.expectedRevenueExposure !== null ? String(c.expectedRevenueExposure) : 'Unavailable',
+          !isRiskApplicable
+            ? 'Not Applicable'
+            : c.expectedRevenueExposure !== null
+              ? String(c.expectedRevenueExposure)
+              : 'Unavailable',
           escapeCsvCell(c.riskFactors.join('; ')),
         ].join(',')
       );

@@ -54,8 +54,7 @@ export const ModelEvaluationView: React.FC<ModelEvaluationViewProps> = ({
         <div>
           <h1 className="text-2xl font-bold text-[#15152F] tracking-tight">Model Performance</h1>
           <p className="text-sm text-slate-600 mt-0.5">
-            Plain-language summary of prediction quality, customer retention accuracy, and model
-            readiness
+            Prediction reliability, validation accuracy, and active model status
           </p>
         </div>
 
@@ -158,6 +157,32 @@ export const ModelEvaluationView: React.FC<ModelEvaluationViewProps> = ({
         </div>
       </div>
 
+      {/* Outdated Model Notice */}
+      {activeModel.isOutdated && (
+        <div className="bg-amber-50 border border-amber-300 rounded-2xl p-4 flex items-start justify-between gap-3 text-xs text-amber-950">
+          <div className="flex items-start gap-3">
+            <AlertTriangle className="w-4 h-4 text-amber-700 shrink-0 mt-0.5" />
+            <div className="space-y-0.5">
+              <div className="font-bold">Outdated · Source dataset deleted</div>
+              <p>
+                {activeModel.outdatedReason ||
+                  'The dataset used to train this model was deleted. Upload a dataset and refresh to update predictions.'}
+              </p>
+            </div>
+          </div>
+          {canGeneratePredictions && onAutoBuild && (
+            <button
+              type="button"
+              disabled={isBuilding}
+              onClick={() => onAutoBuild()}
+              className="px-3 py-1.5 rounded-lg bg-amber-900 text-white font-semibold shrink-0 cursor-pointer whitespace-nowrap disabled:opacity-50"
+            >
+              Refresh Model
+            </button>
+          )}
+        </div>
+      )}
+
       {/* Refresh Advisory or Data Preparation Note */}
       {automationStatus?.needsRefresh && automationStatus.refreshNotice && (
         <div className="bg-amber-50 border border-amber-300 rounded-2xl p-4 flex items-start gap-3 text-xs text-amber-950">
@@ -201,9 +226,7 @@ export const ModelEvaluationView: React.FC<ModelEvaluationViewProps> = ({
               className="h-full rounded-full bg-gradient-to-r from-[#7655E8] to-[#B84DE0] transition-all duration-500"
             />
           </div>
-          <p className="text-xs text-slate-600 leading-relaxed">
-            Share of unseen validation records whose retention outcome was predicted accurately.
-          </p>
+          <p className="text-xs text-slate-600">Unseen validation accuracy</p>
         </div>
 
         <div className="bg-white border border-purple-100/90 rounded-2xl shadow-sm shadow-purple-950/[0.04] p-5 space-y-3 hover:-translate-y-0.5 transition-transform">
@@ -222,9 +245,8 @@ export const ModelEvaluationView: React.FC<ModelEvaluationViewProps> = ({
               className="h-full rounded-full bg-gradient-to-r from-[#397BFF] to-[#7655E8] transition-all duration-500"
             />
           </div>
-          <p className="text-xs text-slate-600 leading-relaxed">
-            When ChurnSight flags an at-risk {tmpl.entitySingular.toLowerCase()}, how often they
-            truly churned.
+          <p className="text-xs text-slate-600">
+            Precision on flagged at-risk {tmpl.entityPlural.toLowerCase()}
           </p>
         </div>
 
@@ -244,9 +266,8 @@ export const ModelEvaluationView: React.FC<ModelEvaluationViewProps> = ({
               className="h-full rounded-full bg-gradient-to-r from-[#E84FA8] to-[#FF786B] transition-all duration-500"
             />
           </div>
-          <p className="text-xs text-slate-600 leading-relaxed">
-            Proportion of actual churned {tmpl.entityPlural.toLowerCase()} successfully spotted in
-            advance.
+          <p className="text-xs text-slate-600">
+            Share of actual churned {tmpl.entityPlural.toLowerCase()} detected
           </p>
         </div>
 
@@ -266,29 +287,28 @@ export const ModelEvaluationView: React.FC<ModelEvaluationViewProps> = ({
               className="h-full rounded-full bg-gradient-to-r from-[#16C995] to-[#397BFF] transition-all duration-500"
             />
           </div>
-          <p className="text-xs text-slate-600 leading-relaxed">
-            Overall balance between catching departing accounts and avoiding unnecessary outreach.
-          </p>
+          <p className="text-xs text-slate-600">F1 balance of precision and recall</p>
         </div>
       </div>
 
-      {/* Plain-English Quality Explanation */}
-      <div className="bg-[#397BFF]/8 border border-[#397BFF]/25 rounded-2xl p-4 flex flex-col sm:flex-row sm:items-center sm:justify-between gap-4 text-xs text-[#15152F] leading-relaxed">
-        <div className="flex items-start gap-3">
-          <Info className="w-4 h-4 text-[#397BFF] shrink-0 mt-0.5" />
-          <div className="space-y-1">
-            <div className="font-bold">How ChurnSight Checks Prediction Quality</div>
-            <p>
-              In your validation sample, <strong>{activeModel.testChurnRate.toFixed(1)}%</strong> of{' '}
-              {tmpl.entityPlural.toLowerCase()} churned. Simply guessing &ldquo;everyone stays&rdquo;
-              would score{' '}
-              <strong className="font-mono tabular-nums">
-                {activeModel.majorityBaselineAccuracy.toFixed(1)}%
-              </strong>{' '}
-              while catching <strong>0%</strong> of churners. Managed prediction setup verified{' '}
-              <strong>{activeModel.recall.toFixed(1)}%</strong> churn capture before enabling
-              predictions.
-            </p>
+      {/* Baseline Comparison */}
+      <div className="bg-[#397BFF]/8 border border-[#397BFF]/25 rounded-2xl p-4 flex flex-col sm:flex-row sm:items-center sm:justify-between gap-4 text-xs text-[#15152F]">
+        <div className="flex items-center gap-3">
+          <Info className="w-4 h-4 text-[#397BFF] shrink-0" />
+          <div>
+            <strong>Validation Check:</strong> Sample churn rate{' '}
+            <span className="font-mono tabular-nums font-bold">
+              {activeModel.testChurnRate.toFixed(1)}%
+            </span>{' '}
+            · Naive baseline{' '}
+            <span className="font-mono tabular-nums font-bold">
+              {activeModel.majorityBaselineAccuracy.toFixed(1)}%
+            </span>{' '}
+            (0% recall) vs. active model{' '}
+            <span className="font-mono tabular-nums font-bold text-[#7655E8]">
+              {activeModel.recall.toFixed(1)}% recall
+            </span>
+            .
           </div>
         </div>
         <button
@@ -307,8 +327,8 @@ export const ModelEvaluationView: React.FC<ModelEvaluationViewProps> = ({
           <div>
             <h2 className="text-base font-bold text-[#15152F]">Validation Outcome Breakdown</h2>
             <p className="text-xs text-slate-500 mt-0.5">
-              How predictions compared with real outcomes across {activeModel.testCount} held-out{' '}
-              {tmpl.entityPlural.toLowerCase()}
+              Predictions vs. real outcomes ({activeModel.testCount} held-out{' '}
+              {tmpl.entityPlural.toLowerCase()})
             </p>
           </div>
 

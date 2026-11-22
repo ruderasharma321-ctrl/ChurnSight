@@ -14,6 +14,7 @@ import {
 } from 'lucide-react';
 import type {
   CompanyWorkspaceInfo,
+  CustomerActualStatus,
   DatasetState,
   ModelEvaluationResult,
 } from '../types/churn';
@@ -33,6 +34,7 @@ interface DirectoryCounts {
   all: number;
   active: number;
   churned: number;
+  inconsistent?: number;
   highRisk: number;
   pending: number;
 }
@@ -46,7 +48,7 @@ interface CustomerDirectorySectionProps {
   onNavigateData?: () => void;
 }
 
-type StatusFilterKey = 'ALL' | 'active' | 'churned' | 'high_risk' | 'pending';
+type StatusFilterKey = 'ALL' | 'active' | 'churned' | 'inconsistent' | 'high_risk' | 'pending';
 
 export const CustomerDirectorySection: React.FC<CustomerDirectorySectionProps> = ({
   company,
@@ -72,10 +74,12 @@ export const CustomerDirectorySection: React.FC<CustomerDirectorySectionProps> =
   const [rows, setRows] = useState<Record<string, string>[]>([]);
   const [rowIndices, setRowIndices] = useState<number[]>([]);
   const [risks, setRisks] = useState<(DirectoryRiskInfo | null)[]>([]);
+  const [statuses, setStatuses] = useState<CustomerActualStatus[]>([]);
   const [counts, setCounts] = useState<DirectoryCounts>({
     all: 0,
     active: 0,
     churned: 0,
+    inconsistent: 0,
     highRisk: 0,
     pending: 0,
   });
@@ -95,6 +99,7 @@ export const CustomerDirectorySection: React.FC<CustomerDirectorySectionProps> =
     row: Record<string, string>;
     rowIndex: number;
     risk: DirectoryRiskInfo | null;
+    actualStatus?: CustomerActualStatus;
   } | null>(null);
 
   const [confirmDeleteIndex, setConfirmDeleteIndex] = useState<number | null>(null);
@@ -105,7 +110,8 @@ export const CustomerDirectorySection: React.FC<CustomerDirectorySectionProps> =
       setRows([]);
       setRowIndices([]);
       setRisks([]);
-      setCounts({ all: 0, active: 0, churned: 0, highRisk: 0, pending: 0 });
+      setStatuses([]);
+      setCounts({ all: 0, active: 0, churned: 0, inconsistent: 0, highRisk: 0, pending: 0 });
       setTotal(0);
       setTotalPages(1);
       return;
@@ -131,6 +137,7 @@ export const CustomerDirectorySection: React.FC<CustomerDirectorySectionProps> =
       setRows(Array.isArray(data.items) ? data.items : []);
       setRowIndices(Array.isArray(data.rowIndices) ? data.rowIndices : []);
       setRisks(Array.isArray(data.risks) ? data.risks : []);
+      setStatuses(Array.isArray(data.statuses) ? data.statuses : []);
       if (data.counts) {
         setCounts(data.counts);
       }
@@ -275,7 +282,7 @@ export const CustomerDirectorySection: React.FC<CustomerDirectorySectionProps> =
   const resolveRowSummary = (
     row: Record<string, string>,
     idx: number,
-    risk: DirectoryRiskInfo | null
+    apiStatus?: CustomerActualStatus
   ) => {
     const idVal =
       (idCol && row[idCol]?.trim()) ||
@@ -289,21 +296,26 @@ export const CustomerDirectorySection: React.FC<CustomerDirectorySectionProps> =
     const freqVal = freqCol && row[freqCol]?.trim() ? row[freqCol].trim() : null;
 
     const targetRaw = targetCol ? (row[targetCol] || '').trim() : '';
-    let statusLabel = 'Monitored';
-    let statusStyle = 'bg-sky-500 text-white';
-
-    if (targetCol && targetRaw) {
-      if (targetRaw.toLowerCase() === positiveVal) {
-        statusLabel = 'Churned';
-        statusStyle = 'bg-rose-500 text-white';
-      } else {
-        statusLabel = 'Active';
-        statusStyle = 'bg-emerald-500 text-white';
-      }
-    } else if (risk?.riskCategory === 'Higher Estimated Churn Risk') {
-      statusLabel = 'High Risk';
-      statusStyle = 'bg-amber-500 text-white';
+    let resolvedStatus: CustomerActualStatus = apiStatus || 'Unknown';
+    if (!apiStatus && targetCol && targetRaw) {
+      resolvedStatus = targetRaw.toLowerCase() === positiveVal ? 'Churned' : 'Active';
     }
+
+    let statusLabel = 'Pending Outcome';
+    let statusStyle = 'bg-sky-600 text-white';
+
+    if (resolvedStatus === 'Churned') {
+      statusLabel = 'Churned';
+      statusStyle = 'bg-[#DC2626] text-white';
+    } else if (resolvedStatus === 'Inconsistent') {
+      statusLabel = 'Inconsistent';
+      statusStyle = 'bg-amber-600 text-white';
+    } else if (resolvedStatus === 'Active') {
+      statusLabel = 'Active';
+      statusStyle = 'bg-[#059669] text-white';
+    }
+
+    const riskApplicable = resolvedStatus !== 'Churned' && resolvedStatus !== 'Inconsistent';
 
     // Pick up to 2 extra display attributes if standard mapped columns are sparse
     const usedKeys = new Set(
@@ -320,6 +332,8 @@ export const CustomerDirectorySection: React.FC<CustomerDirectorySectionProps> =
       revenueVal,
       dateVal,
       freqVal,
+      resolvedStatus,
+      riskApplicable,
       statusLabel,
       statusStyle,
       extraPairs,
@@ -352,8 +366,11 @@ export const CustomerDirectorySection: React.FC<CustomerDirectorySectionProps> =
                 { key: 'ALL' as const, label: 'All', count: counts.all },
                 { key: 'active' as const, label: 'Active', count: counts.active },
                 { key: 'churned' as const, label: 'Churned', count: counts.churned },
+                ...((counts.inconsistent ?? 0) > 0
+                  ? [{ key: 'inconsistent' as const, label: 'Inconsistent', count: counts.inconsistent ?? 0 }]
+                  : []),
                 ...(activeModel
-                  ? [{ key: 'high_risk' as const, label: 'High Risk', count: counts.highRisk }]
+                  ? [{ key: 'high_risk' as const, label: 'Active High Risk', count: counts.highRisk }]
                   : []),
                 ...(counts.pending > 0
                   ? [{ key: 'pending' as const, label: 'Pending Outcome', count: counts.pending }]
@@ -543,7 +560,8 @@ export const CustomerDirectorySection: React.FC<CustomerDirectorySectionProps> =
           {rows.map((row, localIdx) => {
             const actualIdx = rowIndices[localIdx] ?? localIdx;
             const risk = risks[localIdx] || null;
-            const info = resolveRowSummary(row, actualIdx, risk);
+            const apiStatus = statuses[localIdx];
+            const info = resolveRowSummary(row, actualIdx, apiStatus);
             const isDeletingThis = confirmDeleteIndex === actualIdx;
 
             return (
@@ -605,20 +623,26 @@ export const CustomerDirectorySection: React.FC<CustomerDirectorySectionProps> =
                       </span>
                     </div>
 
-                    {risk && (
+                    {activeModel && (
                       <div className="py-2.5 flex items-center justify-between gap-3">
-                        <span className="text-slate-500">Churn Risk Score</span>
-                        <span
-                          className={`font-bold font-mono tabular-nums ${
-                            risk.riskCategory === 'Higher Estimated Churn Risk'
-                              ? 'text-[#D63384]'
-                              : risk.riskCategory === 'Moderate Estimated Churn Risk'
-                                ? 'text-[#D97706]'
-                                : 'text-[#0E9F6E]'
-                          }`}
-                        >
-                          {(risk.churnProbability * 100).toFixed(1)}%
-                        </span>
+                        <span className="text-slate-500">Predicted Risk</span>
+                        {!info.riskApplicable ? (
+                          <span className="font-semibold text-slate-500">Not Applicable</span>
+                        ) : risk ? (
+                          <span
+                            className={`font-bold font-mono tabular-nums ${
+                              risk.riskCategory === 'Higher Estimated Churn Risk'
+                                ? 'text-[#EA580C]'
+                                : risk.riskCategory === 'Moderate Estimated Churn Risk'
+                                  ? 'text-[#7655E8]'
+                                  : 'text-[#059669]'
+                            }`}
+                          >
+                            {(risk.churnProbability * 100).toFixed(1)}%
+                          </span>
+                        ) : (
+                          <span className="font-semibold text-slate-400">—</span>
+                        )}
                       </div>
                     )}
 
@@ -640,7 +664,14 @@ export const CustomerDirectorySection: React.FC<CustomerDirectorySectionProps> =
                 <div className="px-5 py-3 bg-slate-50/70 border-t border-slate-100 flex items-center gap-2">
                   <button
                     type="button"
-                    onClick={() => setInspectTarget({ row, rowIndex: actualIdx, risk })}
+                    onClick={() =>
+                      setInspectTarget({
+                        row,
+                        rowIndex: actualIdx,
+                        risk,
+                        actualStatus: info.resolvedStatus,
+                      })
+                    }
                     className="flex-1 inline-flex items-center justify-center gap-1.5 px-3 py-2 bg-[#35C5E8] hover:bg-[#1EB2D6] text-white text-xs font-bold rounded-xl transition-colors cursor-pointer whitespace-nowrap"
                   >
                     <Eye className="w-3.5 h-3.5" />
@@ -707,7 +738,8 @@ export const CustomerDirectorySection: React.FC<CustomerDirectorySectionProps> =
                 {rows.map((row, localIdx) => {
                   const actualIdx = rowIndices[localIdx] ?? localIdx;
                   const risk = risks[localIdx] || null;
-                  const info = resolveRowSummary(row, actualIdx, risk);
+                  const apiStatus = statuses[localIdx];
+                  const info = resolveRowSummary(row, actualIdx, apiStatus);
                   const isDeletingThis = confirmDeleteIndex === actualIdx;
 
                   return (
@@ -739,14 +771,39 @@ export const CustomerDirectorySection: React.FC<CustomerDirectorySectionProps> =
                       </td>
                       {activeModel && (
                         <td className="py-3 px-4 text-right font-mono tabular-nums font-bold whitespace-nowrap">
-                          {risk ? `${(risk.churnProbability * 100).toFixed(1)}%` : '—'}
+                          {!info.riskApplicable ? (
+                            <span className="font-sans font-semibold text-slate-500">
+                              Not Applicable
+                            </span>
+                          ) : risk ? (
+                            <span
+                              className={
+                                risk.riskCategory === 'Higher Estimated Churn Risk'
+                                  ? 'text-[#EA580C]'
+                                  : risk.riskCategory === 'Moderate Estimated Churn Risk'
+                                    ? 'text-[#7655E8]'
+                                    : 'text-[#059669]'
+                              }
+                            >
+                              {(risk.churnProbability * 100).toFixed(1)}%
+                            </span>
+                          ) : (
+                            '—'
+                          )}
                         </td>
                       )}
                       <td className="py-3 px-4 text-right whitespace-nowrap">
                         <div className="inline-flex items-center gap-1.5">
                           <button
                             type="button"
-                            onClick={() => setInspectTarget({ row, rowIndex: actualIdx, risk })}
+                            onClick={() =>
+                              setInspectTarget({
+                                row,
+                                rowIndex: actualIdx,
+                                risk,
+                                actualStatus: info.resolvedStatus,
+                              })
+                            }
                             className="px-2.5 py-1 bg-sky-50 hover:bg-sky-100 text-sky-700 font-semibold rounded-lg cursor-pointer"
                           >
                             View
@@ -945,9 +1002,12 @@ export const CustomerDirectorySection: React.FC<CustomerDirectorySectionProps> =
                     : `${tmpl.entitySingular} #${inspectTarget.rowIndex + 1}`}
                 </h3>
                 <div className="text-xs text-white/85 mt-0.5">
-                  {inspectTarget.risk
-                    ? `Estimated Churn Risk: ${(inspectTarget.risk.churnProbability * 100).toFixed(1)}% (${inspectTarget.risk.riskCategory})`
-                    : `${tmpl.shortLabel} Record`}
+                  {inspectTarget.actualStatus === 'Churned' ||
+                  inspectTarget.actualStatus === 'Inconsistent'
+                    ? `Actual Status: ${inspectTarget.actualStatus} · Predicted Risk: Not Applicable`
+                    : inspectTarget.risk
+                      ? `Actual Status: Active · Predicted Risk: ${(inspectTarget.risk.churnProbability * 100).toFixed(1)}% (${inspectTarget.risk.riskCategory})`
+                      : `${tmpl.shortLabel} Record`}
                 </div>
               </div>
               <button
