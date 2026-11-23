@@ -10,7 +10,7 @@ import type {
   UploadPathway,
 } from '../src/types/churn.ts';
 import type { TrainedModelArtifact } from './mlEngine.ts';
-import { isMissingValue, parseCsvText } from './mlEngine.ts';
+import { base64ToUint8Array, isMissingValue, parseCsvText, utf8BytesToString } from './mlEngine.ts';
 
 export interface MultiSheetParseResult {
   headers: string[];
@@ -115,16 +115,13 @@ export function parseMultiSheetSpreadsheetUpload(input: {
   }
 
   if (input.fileBase64 && typeof input.fileBase64 === 'string') {
-    const cleanB64 = input.fileBase64.includes(',')
-      ? input.fileBase64.split(',').pop() || ''
-      : input.fileBase64;
-    const buffer = Buffer.from(cleanB64, 'base64');
-    if (buffer.length === 0) {
+    const bytes = base64ToUint8Array(input.fileBase64);
+    if (bytes.length === 0) {
       throw new Error('The uploaded spreadsheet file is empty.');
     }
 
     if (!isExcel) {
-      const text = buffer.toString('utf-8');
+      const text = utf8BytesToString(bytes);
       const { headers, rows } = parseCsvText(text);
       const detectedUploadMode: 'customer' | 'tickets' =
         input.requestedUploadMode === 'tickets' || looksLikeTicketDataset(headers)
@@ -140,7 +137,7 @@ export function parseMultiSheetSpreadsheetUpload(input: {
       };
     }
 
-    const workbook = XLSX.read(buffer, { type: 'buffer', cellDates: true });
+    const workbook = XLSX.read(bytes, { type: 'array', cellDates: true });
     if (!workbook.SheetNames.length) {
       throw new Error('The Excel workbook contains no readable sheets.');
     }

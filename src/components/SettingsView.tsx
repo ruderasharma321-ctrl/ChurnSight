@@ -1,5 +1,5 @@
 import React, { useEffect, useState } from 'react';
-import { BookOpen, Building2, ShieldCheck, User, Users } from 'lucide-react';
+import { BookOpen, Building2, Database, ShieldCheck, User, Users } from 'lucide-react';
 import {
   AnalyticsSummary,
   CompanyWorkspaceInfo,
@@ -11,15 +11,17 @@ import {
 } from '../types/churn';
 import { AboutProjectView } from './AboutProjectView';
 import { CompanySettingsView } from './CompanySettingsView';
+import { DemoWorkspacePanel } from './DemoWorkspacePanel';
 import { ManageUsersView } from './ManageUsersView';
 import { MyProfileView } from './MyProfileView';
 import { PlatformGovernanceView } from './PlatformGovernanceView';
 
-export type SettingsSection = 'company' | 'users' | 'profile' | 'platform' | 'about';
+export type SettingsSection = 'company' | 'demo' | 'users' | 'profile' | 'platform' | 'about';
 
 interface SettingsViewProps {
   user: UserAccount;
   company: CompanyWorkspaceInfo;
+  dataset: DatasetState | null;
   usage: WorkspaceUsageSummary | null;
   initialSection?: SettingsSection;
   focusPasswordSection?: boolean;
@@ -33,24 +35,29 @@ interface SettingsViewProps {
     nextModelHistory?: ModelEvaluationResult[],
     nextAutomationStatus?: PredictionPipelineStatus | null
   ) => void;
+  onWorkspaceMutated: (data: Record<string, any>) => void;
   onUsersChanged: () => void | Promise<void>;
+  onNavigateToData?: () => void;
 }
 
 export const SettingsView: React.FC<SettingsViewProps> = ({
   user,
   company,
+  dataset,
   usage,
   initialSection,
   focusPasswordSection = false,
   onUserUpdated,
   onCompanyUpdated,
+  onWorkspaceMutated,
   onUsersChanged,
+  onNavigateToData,
 }) => {
   const isPlatformOwner = user.role === 'PLATFORM_OWNER';
   const isWorkspaceAdmin = user.role === 'FIRM_ADMIN' || isPlatformOwner;
 
   const defaultSection: SettingsSection =
-    initialSection || (isWorkspaceAdmin ? 'company' : 'profile');
+    initialSection || (isWorkspaceAdmin ? 'company' : 'demo');
   const [section, setSection] = useState<SettingsSection>(defaultSection);
 
   useEffect(() => {
@@ -67,9 +74,10 @@ export const SettingsView: React.FC<SettingsViewProps> = ({
     ...(isWorkspaceAdmin
       ? [
           { id: 'company' as SettingsSection, label: 'Workspace & Churn Setup', icon: Building2 },
+          { id: 'demo' as SettingsSection, label: 'Demo Workspace', icon: Database },
           { id: 'users' as SettingsSection, label: 'Team & Permissions', icon: Users },
         ]
-      : []),
+      : [{ id: 'demo' as SettingsSection, label: 'Demo Workspace', icon: Database }]),
     { id: 'profile', label: 'My Profile & Password', icon: User },
     ...(isPlatformOwner
       ? [{ id: 'platform' as SettingsSection, label: 'Platform Governance', icon: ShieldCheck }]
@@ -105,8 +113,20 @@ export const SettingsView: React.FC<SettingsViewProps> = ({
         <CompanySettingsView
           user={user}
           company={company}
+          dataset={dataset}
           usage={usage}
           onCompanyUpdated={onCompanyUpdated}
+          onWorkspaceMutated={onWorkspaceMutated}
+          onNavigateToData={onNavigateToData}
+        />
+      )}
+
+      {section === 'demo' && (
+        <DemoWorkspacePanel
+          company={company}
+          dataset={dataset}
+          onWorkspaceMutated={onWorkspaceMutated}
+          onNavigateToData={onNavigateToData}
         />
       )}
 

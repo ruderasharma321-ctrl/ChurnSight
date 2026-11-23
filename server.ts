@@ -1158,6 +1158,17 @@ export function createApiApp() {
   app.get('/api/health', async (_req, res) => {
     const persistence = getPersistenceStatus();
     if (!persistence.persistent) {
+      if (process.env.VITE_REMOTE_API_ONLY !== 'true') {
+        res.status(200).json({
+          status: 'ok',
+          demoMode: true,
+          storagePersistent: false,
+          storageMode: 'demo',
+          provider: 'browser_indexeddb',
+          message: 'ChurnSight Demo Mode active (no external database required).',
+        });
+        return;
+      }
       res.status(503).json({
         status: 'unconfigured',
         storagePersistent: false,
@@ -1271,12 +1282,16 @@ export function createApiApp() {
     if (persistence.persistent && isRemotePersistenceActive()) {
       await ensureAuthHydrated(true).catch(() => undefined);
     }
+    const demoFallback = !persistence.persistent && process.env.VITE_REMOTE_API_ONLY !== 'true';
     res.json({
       hasRegisteredWorkspaces: persistence.persistent ? hasAnyRegisteredUsers() : false,
+      demoMode: demoFallback,
       storagePersistent: persistence.persistent,
-      storageMode: persistence.mode,
-      provider: persistence.provider,
-      message: persistence.message,
+      storageMode: demoFallback ? 'demo' : persistence.mode,
+      provider: demoFallback ? 'browser_indexeddb' : persistence.provider,
+      message: demoFallback
+        ? 'ChurnSight Demo Mode active (browser-local storage; no external database required).'
+        : persistence.message,
     });
   });
 
@@ -1977,7 +1992,7 @@ export function createApiApp() {
         });
         res.setHeader('Content-Type', exported.contentType);
         res.setHeader('Content-Disposition', `attachment; filename="${exported.fileName}"`);
-        res.send(exported.body);
+        res.send(typeof exported.body === 'string' ? exported.body : Buffer.from(exported.body));
         return;
       }
 
@@ -1992,7 +2007,7 @@ export function createApiApp() {
 
       res.setHeader('Content-Type', exported.contentType);
       res.setHeader('Content-Disposition', `attachment; filename="${exported.fileName}"`);
-      res.send(exported.body);
+      res.send(typeof exported.body === 'string' ? exported.body : Buffer.from(exported.body));
     } catch (err: unknown) {
       const message = err instanceof Error ? err.message : 'Failed to generate template.';
       res.status(400).json({ error: message });
@@ -2053,7 +2068,7 @@ export function createApiApp() {
 
       res.setHeader('Content-Type', exported.contentType);
       res.setHeader('Content-Disposition', `attachment; filename="${exported.fileName}"`);
-      res.send(exported.body);
+      res.send(typeof exported.body === 'string' ? exported.body : Buffer.from(exported.body));
     } catch (err: unknown) {
       const message =
         err instanceof Error ? err.message : 'Failed to build current customer prediction template.';
@@ -4407,7 +4422,10 @@ export function createApiApp() {
           res.status(400).json({ error: 'Please train a classification model first.' });
           return;
         }
-        const attributes = req.body as Record<string, string>;
+        const attributes: Record<string, string> = {};
+        for (const [k, v] of Object.entries((req.body || {}) as Record<string, unknown>)) {
+          attributes[k] = v === null || v === undefined ? '' : String(v);
+        }
         const result = predictSingleCustomer(ws.activeModelArtifact, attributes);
         res.json(result);
       } catch (err: unknown) {

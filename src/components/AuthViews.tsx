@@ -6,11 +6,13 @@ import {
   BrainCircuit,
   Building2,
   CheckCircle2,
+  Database,
   Eye,
   EyeOff,
   Info,
   Lock,
   Mail,
+  RotateCcw,
   ShieldCheck,
   Sparkles,
   User,
@@ -29,7 +31,8 @@ import {
   INDUSTRY_OPTIONS,
   getDefaultRelationshipForIndustry,
 } from '../utils/industryConfig';
-import { apiFetch } from '../utils/apiClient';
+import { apiFetch, IS_DEMO_MODE } from '../utils/apiClient';
+import { DEFAULT_DEMO_EMAIL, DEFAULT_DEMO_PASSWORD } from '../demo/demoDb';
 
 type AuthMode = 'login' | 'register' | 'forgot';
 
@@ -90,14 +93,15 @@ export const AuthViews: React.FC<AuthViewsProps> = ({
 
   // Forgot Password State
   const [forgotEmail, setForgotEmail] = useState('');
+  const [forgotNewPassword, setForgotNewPassword] = useState('');
+  const [showForgotPw, setShowForgotPw] = useState(false);
   const [forgotMessage, setForgotMessage] = useState<string | null>(null);
   const [forgotError, setForgotError] = useState<string | null>(null);
   const [isSendingReset, setIsSendingReset] = useState(false);
 
   const [hasRegisteredWorkspaces, setHasRegisteredWorkspaces] = useState<boolean | null>(null);
-  const [storageMode, setStorageMode] = useState<
-    'postgres' | 'kv' | 'disk' | 'unconfigured' | null
-  >(null);
+  const [confirmDemoReset, setConfirmDemoReset] = useState(false);
+  const [isResettingDemo, setIsResettingDemo] = useState(false);
 
   useEffect(() => {
     let active = true;
@@ -110,14 +114,6 @@ export const AuthViews: React.FC<AuthViewsProps> = ({
         if (!active || !data) return;
         if (typeof data.hasRegisteredWorkspaces === 'boolean') {
           setHasRegisteredWorkspaces(data.hasRegisteredWorkspaces);
-        }
-        if (
-          data.storageMode === 'postgres' ||
-          data.storageMode === 'kv' ||
-          data.storageMode === 'disk' ||
-          data.storageMode === 'unconfigured'
-        ) {
-          setStorageMode(data.storageMode);
         }
       })
       .catch(() => {
@@ -186,9 +182,6 @@ export const AuthViews: React.FC<AuthViewsProps> = ({
         return;
       }
       if (!res.ok) {
-        if (data.code === 'DATABASE_NOT_CONFIGURED') {
-          setStorageMode('unconfigured');
-        }
         const msg = data.error || 'Unable to sign in. Please check your credentials.';
         setLoginError(msg);
         if (data.code === 'ACCOUNT_NOT_FOUND' || /account not found/i.test(msg)) {
@@ -210,10 +203,72 @@ export const AuthViews: React.FC<AuthViewsProps> = ({
     }
   };
 
+  const handleQuickDemoSignIn = async () => {
+    setLoginError(null);
+    setLoginNotFoundEmail(null);
+    setLoginSuccess(null);
+    setLoginEmail(DEFAULT_DEMO_EMAIL);
+    setLoginPassword(DEFAULT_DEMO_PASSWORD);
+    setIsLoggingIn(true);
+    try {
+      const res = await apiFetch('/api/auth/login', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          email: DEFAULT_DEMO_EMAIL,
+          password: DEFAULT_DEMO_PASSWORD,
+          rememberMe: true,
+        }),
+      });
+      const data = await res.json().catch(() => ({}));
+      if (!res.ok) {
+        setLoginError(data.error || 'Unable to sign in to the built-in demo workspace.');
+        return;
+      }
+      onAuthenticated({
+        user: data.user,
+        company: data.company,
+        expiresAt: data.expiresAt,
+        sessionToken: data.sessionToken,
+        rememberMe: Boolean(data.rememberMe ?? true),
+      });
+    } catch {
+      setLoginError('Unable to initialize the local browser demo workspace.');
+    } finally {
+      setIsLoggingIn(false);
+    }
+  };
+
+  const handleFactoryResetDemo = async () => {
+    setIsResettingDemo(true);
+    setLoginError(null);
+    setLoginNotFoundEmail(null);
+    try {
+      const res = await apiFetch('/api/demo/factory-reset', { method: 'POST' });
+      const data = await res.json().catch(() => ({}));
+      if (!res.ok) {
+        setLoginError(data.error || 'Failed to reset local demo workspace.');
+        return;
+      }
+      setConfirmDemoReset(false);
+      setHasRegisteredWorkspaces(true);
+      setLoginSuccess(
+        data.message ||
+          'Local browser demo workspace restored. Sign in with demo@churnsight.app or register a new company.'
+      );
+    } catch {
+      setLoginError('Failed to reset local demo workspace.');
+    } finally {
+      setIsResettingDemo(false);
+    }
+  };
+
   const handleRegisterSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
     setRegError(null);
     setRegDuplicateEmail(null);
+
+    const resolvedCompanyEmail = (companyEmail.trim() || adminEmail.trim()).toLowerCase();
 
     if (companyName.trim().length < 2) {
       setRegError('Company name must be at least 2 characters long.');
@@ -223,16 +278,16 @@ export const AuthViews: React.FC<AuthViewsProps> = ({
       setRegError('Please specify your custom industry name.');
       return;
     }
-    if (!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(companyEmail.trim())) {
-      setRegError('Please provide a valid company email address.');
-      return;
-    }
     if (adminFullName.trim().length < 2) {
       setRegError('Administrator full name must be at least 2 characters long.');
       return;
     }
     if (!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(adminEmail.trim())) {
-      setRegError('Please provide a valid administrator email address.');
+      setRegError('Please provide a valid email address.');
+      return;
+    }
+    if (!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(resolvedCompanyEmail)) {
+      setRegError('Please provide a valid company email address.');
       return;
     }
     if (regPassword.length < 8) {
@@ -251,7 +306,7 @@ export const AuthViews: React.FC<AuthViewsProps> = ({
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
           companyName: companyName.trim(),
-          companyEmail: companyEmail.trim(),
+          companyEmail: resolvedCompanyEmail,
           registrationNumber: registrationNumber.trim() || undefined,
           industry,
           customIndustryName: industry === 'other' ? customIndustryName.trim() : undefined,
@@ -278,9 +333,6 @@ export const AuthViews: React.FC<AuthViewsProps> = ({
         return;
       }
       if (!res.ok) {
-        if (data.code === 'DATABASE_NOT_CONFIGURED') {
-          setStorageMode('unconfigured');
-        }
         const msg = data.error || 'Company registration failed.';
         setRegError(msg);
         if (
@@ -338,13 +390,20 @@ export const AuthViews: React.FC<AuthViewsProps> = ({
       setForgotError('Please enter a valid email address.');
       return;
     }
+    if (forgotNewPassword && forgotNewPassword.length < 8) {
+      setForgotError('New password must be at least 8 characters long.');
+      return;
+    }
 
     setIsSendingReset(true);
     try {
       const res = await apiFetch('/api/auth/forgot-password', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ email: forgotEmail.trim() }),
+        body: JSON.stringify({
+          email: forgotEmail.trim(),
+          ...(forgotNewPassword ? { newPassword: forgotNewPassword } : {}),
+        }),
       });
       const text = await res.text();
       let data: Record<string, any> = {};
@@ -359,6 +418,9 @@ export const AuthViews: React.FC<AuthViewsProps> = ({
         return;
       }
       setForgotMessage(data.message);
+      if (data.passwordResetInDemo) {
+        setForgotNewPassword('');
+      }
     } catch {
       setForgotError('Network error while contacting the server.');
     } finally {
@@ -382,7 +444,14 @@ export const AuthViews: React.FC<AuthViewsProps> = ({
               <BrainCircuit className="w-6 h-6 text-white" />
             </div>
             <div>
-              <div className="text-xl font-bold tracking-tight text-white">ChurnSight</div>
+              <div className="flex items-center gap-2.5">
+                <div className="text-xl font-bold tracking-tight text-white">ChurnSight</div>
+                {IS_DEMO_MODE && (
+                  <span className="inline-flex items-center px-2 py-0.5 rounded-md bg-white/10 border border-white/20 text-[10px] font-bold tracking-wider text-[#35C5E8] uppercase">
+                    DEMO
+                  </span>
+                )}
+              </div>
               <div className="text-xs font-medium text-indigo-200/80">
                 Customer Churn Analysis &amp; Prediction
               </div>
@@ -495,6 +564,22 @@ export const AuthViews: React.FC<AuthViewsProps> = ({
             </div>
           )}
 
+          {/* Demo Mode Notice Banner */}
+          {IS_DEMO_MODE && (
+            <div className="bg-white/95 border border-purple-200/90 rounded-2xl px-4 py-3 flex items-start gap-2.5 text-xs text-[#11142B] shadow-xs">
+              <Database className="w-4 h-4 text-[#7655E8] shrink-0 mt-0.5" />
+              <div className="space-y-0.5">
+                <div className="font-bold text-[#11142B]">
+                  DEMO MODE — Data stored locally in this browser.
+                </div>
+                <p className="text-[11px] text-slate-500">
+                  Demo accounts, uploaded datasets, and ML predictions persist in your browser via
+                  IndexedDB and do not sync across devices.
+                </p>
+              </div>
+            </div>
+          )}
+
           {/* LOGIN CARD */}
           {mode === 'login' && (
             <div className="bg-white border border-purple-100/90 rounded-3xl shadow-xl shadow-purple-950/[0.06] p-7 sm:p-9 space-y-6">
@@ -505,39 +590,85 @@ export const AuthViews: React.FC<AuthViewsProps> = ({
                 </p>
               </div>
 
-              {storageMode === 'unconfigured' ? (
-                <div className="bg-[#FF786B]/12 border border-[#FF786B]/40 rounded-2xl p-4 flex items-start gap-2.5 text-xs text-[#9A2E25] leading-relaxed">
-                  <AlertCircle className="w-4 h-4 text-[#E04F44] shrink-0 mt-0.5" />
-                  <div className="space-y-1">
-                    <p>
-                      <strong>Persistent database not configured:</strong> Add{' '}
-                      <code className="font-mono font-semibold">DATABASE_URL</code> (PostgreSQL —
-                      recommended) or{' '}
-                      <code className="font-mono font-semibold">KV_REST_API_URL</code> &amp;{' '}
-                      <code className="font-mono font-semibold">KV_REST_API_TOKEN</code> (Upstash
-                      Redis) in your Vercel Environment Variables and redeploy.
-                    </p>
+              {IS_DEMO_MODE && (
+                <div className="bg-[#F5F3FF] border border-purple-200/90 rounded-2xl p-4 space-y-3">
+                  <div className="flex flex-col sm:flex-row sm:items-center sm:justify-between gap-2.5">
+                    <div className="space-y-0.5">
+                      <div className="text-xs font-bold text-[#11142B]">
+                        Instant Demo Workspace (Horizon Telecom)
+                      </div>
+                      <div className="text-[11px] font-mono text-slate-600">
+                        {DEFAULT_DEMO_EMAIL} · {DEFAULT_DEMO_PASSWORD}
+                      </div>
+                    </div>
+                    <button
+                      type="button"
+                      disabled={isLoggingIn || isResettingDemo}
+                      onClick={handleQuickDemoSignIn}
+                      className="inline-flex items-center justify-center gap-1.5 px-3.5 py-2 rounded-xl bg-[#11142B] hover:bg-[#1C2147] text-white text-xs font-semibold transition-colors disabled:opacity-50 cursor-pointer whitespace-nowrap shrink-0"
+                    >
+                      <Sparkles className="w-3.5 h-3.5 text-[#35C5E8]" />
+                      <span>Launch Demo Workspace</span>
+                    </button>
                   </div>
-                </div>
-              ) : (
-                hasRegisteredWorkspaces === false && (
-                  <div className="bg-amber-50 border border-amber-200 rounded-2xl p-4 flex items-start gap-2.5 text-xs text-amber-950 leading-relaxed">
-                    <Info className="w-4 h-4 text-amber-700 shrink-0 mt-0.5" />
-                    <div className="space-y-1.5">
-                      <p>
-                        <strong>No company workspaces yet.</strong> Register your organization to
-                        create your Firm Admin account.
-                      </p>
+
+                  {!confirmDemoReset ? (
+                    <div className="flex items-center justify-between pt-2 border-t border-purple-200/70 text-[11px] text-slate-500">
+                      <span>Pre-loaded with 250 customer records</span>
                       <button
                         type="button"
-                        onClick={() => switchMode('register')}
-                        className="font-bold text-[#7655E8] hover:text-[#E84FA8] underline underline-offset-2 cursor-pointer"
+                        onClick={() => setConfirmDemoReset(true)}
+                        className="inline-flex items-center gap-1 font-semibold text-[#7655E8] hover:text-[#E84FA8] cursor-pointer"
                       >
-                        Register Company Workspace →
+                        <RotateCcw className="w-3 h-3" />
+                        <span>Reset Demo Data</span>
                       </button>
                     </div>
+                  ) : (
+                    <div className="pt-2 border-t border-purple-200/70 flex flex-wrap items-center justify-between gap-2 text-xs">
+                      <span className="text-[#9A2E25] font-medium">
+                        Reset all local browser demo accounts and datasets?
+                      </span>
+                      <div className="flex items-center gap-2">
+                        <button
+                          type="button"
+                          onClick={() => setConfirmDemoReset(false)}
+                          disabled={isResettingDemo}
+                          className="px-2.5 py-1 rounded-lg border border-purple-200 bg-white text-slate-600 text-[11px] font-semibold cursor-pointer"
+                        >
+                          Cancel
+                        </button>
+                        <button
+                          type="button"
+                          onClick={handleFactoryResetDemo}
+                          disabled={isResettingDemo}
+                          className="px-2.5 py-1 rounded-lg bg-[#E04F44] text-white text-[11px] font-semibold cursor-pointer disabled:opacity-50"
+                        >
+                          {isResettingDemo ? 'Resetting...' : 'Confirm Reset'}
+                        </button>
+                      </div>
+                    </div>
+                  )}
+                </div>
+              )}
+
+              {hasRegisteredWorkspaces === false && !IS_DEMO_MODE && (
+                <div className="bg-amber-50 border border-amber-200 rounded-2xl p-4 flex items-start gap-2.5 text-xs text-amber-950 leading-relaxed">
+                  <Info className="w-4 h-4 text-amber-700 shrink-0 mt-0.5" />
+                  <div className="space-y-1.5">
+                    <p>
+                      <strong>No company workspaces yet.</strong> Register your organization to
+                      create your Firm Admin account.
+                    </p>
+                    <button
+                      type="button"
+                      onClick={() => switchMode('register')}
+                      className="font-bold text-[#7655E8] hover:text-[#E84FA8] underline underline-offset-2 cursor-pointer"
+                    >
+                      Register Company Workspace →
+                    </button>
                   </div>
-                )
+                </div>
               )}
 
               {loginSuccess && (
@@ -677,22 +808,9 @@ export const AuthViews: React.FC<AuthViewsProps> = ({
                   Register Company Workspace
                 </h2>
                 <p className="text-sm text-slate-500 mt-1">
-                  Create a private workspace and initial Firm Admin account.
+                  Create a private demo workspace and administrator account in this browser.
                 </p>
               </div>
-
-              {storageMode === 'unconfigured' && (
-                <div className="bg-[#FF786B]/12 border border-[#FF786B]/40 rounded-2xl p-4 flex items-start gap-2.5 text-xs text-[#9A2E25] leading-relaxed">
-                  <AlertCircle className="w-4 h-4 text-[#E04F44] shrink-0 mt-0.5" />
-                  <p>
-                    <strong>Database setup required:</strong> Configure{' '}
-                    <code className="font-mono font-semibold">DATABASE_URL</code> (PostgreSQL) or{' '}
-                    <code className="font-mono font-semibold">KV_REST_API_URL</code> &amp;{' '}
-                    <code className="font-mono font-semibold">KV_REST_API_TOKEN</code> in Vercel
-                    Environment Variables before registering.
-                  </p>
-                </div>
-              )}
 
               {regError && (
                 <div className="bg-[#FF786B]/12 border border-[#FF786B]/40 rounded-2xl p-4 flex items-start gap-2.5 text-xs text-[#9A2E25]">
@@ -764,14 +882,14 @@ export const AuthViews: React.FC<AuthViewsProps> = ({
                         htmlFor="reg-company-email"
                         className="block text-xs font-semibold text-[#4C4A6E] mb-1"
                       >
-                        Company Email <span className="text-[#E04F44]">*</span>
+                        Company Email (Optional)
                       </label>
                       <input
                         id="reg-company-email"
                         type="email"
                         value={companyEmail}
                         onChange={(e) => setCompanyEmail(e.target.value)}
-                        placeholder="analytics@company.com"
+                        placeholder="Defaults to your email"
                         className="w-full px-3 py-2 text-sm rounded-xl border border-purple-200 bg-[#F5F3FF]/40 text-[#11142B] focus:outline-none focus:border-[#7655E8] focus:ring-2 focus:ring-[#7655E8]/20"
                       />
                     </div>
@@ -1075,7 +1193,9 @@ export const AuthViews: React.FC<AuthViewsProps> = ({
                   Password Recovery
                 </h2>
                 <p className="text-sm text-slate-500 mt-1">
-                  Enter your account email to check password recovery options for your workspace.
+                  {IS_DEMO_MODE
+                    ? 'Reset the password for a local demo account stored in this browser.'
+                    : 'Enter your account email to check password recovery options for your workspace.'}
                 </p>
               </div>
 
@@ -1087,8 +1207,8 @@ export const AuthViews: React.FC<AuthViewsProps> = ({
               )}
 
               {forgotMessage && (
-                <div className="bg-amber-50 border border-amber-200 rounded-2xl p-4 flex items-start gap-2.5 text-xs text-amber-900 leading-relaxed">
-                  <Info className="w-4 h-4 text-amber-700 shrink-0 mt-0.5" />
+                <div className="bg-[#16C995]/12 border border-[#16C995]/35 rounded-2xl p-4 flex items-start gap-2.5 text-xs text-[#065F46] leading-relaxed">
+                  <CheckCircle2 className="w-4 h-4 text-[#16C995] shrink-0 mt-0.5" />
                   <span>{forgotMessage}</span>
                 </div>
               )}
@@ -1110,12 +1230,48 @@ export const AuthViews: React.FC<AuthViewsProps> = ({
                     className="w-full px-3.5 py-2.5 text-sm rounded-xl border border-purple-200 bg-[#F5F3FF]/40 text-[#11142B] focus:outline-none focus:border-[#7655E8] focus:ring-2 focus:ring-[#7655E8]/20"
                   />
                 </div>
+                {IS_DEMO_MODE && (
+                  <div>
+                    <label
+                      htmlFor="forgot-new-password"
+                      className="block text-xs font-semibold text-[#4C4A6E] mb-1.5"
+                    >
+                      New Demo Password (min 8 chars)
+                    </label>
+                    <div className="relative">
+                      <input
+                        id="forgot-new-password"
+                        type={showForgotPw ? 'text' : 'password'}
+                        value={forgotNewPassword}
+                        onChange={(e) => setForgotNewPassword(e.target.value)}
+                        placeholder="Enter a new password for this local account"
+                        className="w-full pl-3.5 pr-10 py-2.5 text-sm rounded-xl border border-purple-200 bg-[#F5F3FF]/40 text-[#11142B] focus:outline-none focus:border-[#7655E8] focus:ring-2 focus:ring-[#7655E8]/20"
+                      />
+                      <button
+                        type="button"
+                        onClick={() => setShowForgotPw((p) => !p)}
+                        className="absolute right-3 top-1/2 -translate-y-1/2 text-slate-400 hover:text-[#7655E8] p-1 cursor-pointer"
+                        aria-label={showForgotPw ? 'Hide new password' : 'Show new password'}
+                      >
+                        {showForgotPw ? (
+                          <EyeOff className="w-4 h-4" />
+                        ) : (
+                          <Eye className="w-4 h-4" />
+                        )}
+                      </button>
+                    </div>
+                  </div>
+                )}
                 <button
                   type="submit"
                   disabled={isSendingReset}
                   className="w-full px-5 py-2.5 bg-gradient-to-r from-[#7655E8] to-[#397BFF] hover:opacity-95 text-white text-sm font-bold rounded-xl shadow-md shadow-[#7655E8]/25 transition-all disabled:opacity-50 cursor-pointer"
                 >
-                  {isSendingReset ? 'Checking...' : 'Request Password Reset'}
+                  {isSendingReset
+                    ? 'Processing...'
+                    : forgotNewPassword
+                      ? 'Update Local Demo Password'
+                      : 'Reset Local Demo Password'}
                 </button>
               </form>
             </div>

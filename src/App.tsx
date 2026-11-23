@@ -53,6 +53,7 @@ import {
 import {
   apiFetch,
   getClientSessionToken,
+  IS_DEMO_MODE,
   setClientSessionToken,
   subscribeUnauthorized,
 } from './utils/apiClient';
@@ -878,6 +879,7 @@ export default function App() {
   };
 
   const handleWorkspaceMutated = (data: Record<string, any>) => {
+    setStagedImport(null);
     if (data.company) {
       setAuth((prev) => (prev ? { ...prev, company: data.company } : prev));
     }
@@ -886,6 +888,7 @@ export default function App() {
     if (data.analytics !== undefined) setAnalytics(data.analytics);
     if (data.activeModel !== undefined) setActiveModel(data.activeModel);
     if (data.modelHistory !== undefined) setModelHistory(data.modelHistory);
+    if (Array.isArray(data.batchScores)) setBatchScores(data.batchScores);
     if (data.automationStatus !== undefined) setAutomationStatus(data.automationStatus);
     if (data.usage !== undefined) setUsage(data.usage);
   };
@@ -942,9 +945,16 @@ export default function App() {
               <div className="w-8 h-8 rounded-xl bg-gradient-to-br from-[#7655E8] via-[#B84DE0] to-[#E84FA8] flex items-center justify-center shadow-md shadow-[#7655E8]/40 border border-white/20 shrink-0">
                 <BrainCircuit className="w-4 h-4 text-white" />
               </div>
-              <span className="font-display text-base font-bold tracking-tight text-white whitespace-nowrap">
-                ChurnSight
-              </span>
+              <div className="flex items-center gap-2 min-w-0">
+                <span className="font-display text-base font-bold tracking-tight text-white whitespace-nowrap">
+                  ChurnSight
+                </span>
+                {IS_DEMO_MODE && (
+                  <span className="inline-flex items-center px-1.5 py-0.5 rounded-md bg-white/10 border border-white/20 text-[10px] font-bold tracking-wider text-[#35C5E8] uppercase shrink-0">
+                    DEMO
+                  </span>
+                )}
+              </div>
             </div>
             <button
               type="button"
@@ -1009,11 +1019,11 @@ export default function App() {
           </nav>
         </div>
 
-        <div className="p-5 border-t border-white/10 text-xs text-indigo-200/70 space-y-1">
+        <div className="p-5 border-t border-white/10 text-xs text-indigo-200/70 space-y-1.5">
           <div className="font-semibold text-white/90 leading-snug">
             Predict Churn. Discover Insights. Retain Customers.
           </div>
-          <div>Multi-Industry ChurnSight SaaS</div>
+          <div>Demo Mode · Local Browser Storage</div>
         </div>
       </aside>
 
@@ -1323,12 +1333,15 @@ export default function App() {
                   <SettingsView
                     user={user}
                     company={company}
+                    dataset={dataset}
                     usage={usage}
                     initialSection={settingsSection}
                     focusPasswordSection={focusPasswordSection}
                     onUserUpdated={handleUserUpdated}
                     onCompanyUpdated={handleCompanyUpdated}
+                    onWorkspaceMutated={handleWorkspaceMutated}
                     onUsersChanged={fetchCompanyWorkspaceState}
+                    onNavigateToData={() => navigateTo('data')}
                   />
                 )}
               </motion.div>

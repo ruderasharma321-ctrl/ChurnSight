@@ -1163,7 +1163,7 @@ export function generateIndustryTemplateExport(params: {
 }): {
   fileName: string;
   contentType: string;
-  body: string | Buffer;
+  body: string | Uint8Array;
 } {
   const {
     industry,
@@ -1224,11 +1224,12 @@ export function generateIndustryTemplateExport(params: {
         ]),
         'Instructions'
       );
-      const buffer = XLSX.write(wb, { type: 'buffer', bookType: 'xlsx' }) as Buffer;
+      const raw = XLSX.write(wb, { type: 'array', bookType: 'xlsx' }) as ArrayBuffer | Uint8Array;
+      const bytes = raw instanceof Uint8Array ? raw : new Uint8Array(raw);
       return {
         fileName: `churnsight_${slug}_ticket_import_template.xlsx`,
         contentType: 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
-        body: buffer,
+        body: bytes,
       };
     }
 
@@ -1518,12 +1519,13 @@ export function generateIndustryTemplateExport(params: {
     ];
     XLSX.utils.book_append_sheet(wb, XLSX.utils.json_to_sheet(instructionRows), 'Instructions');
 
-    const buffer = XLSX.write(wb, { type: 'buffer', bookType: 'xlsx' }) as Buffer;
+    const raw = XLSX.write(wb, { type: 'array', bookType: 'xlsx' }) as ArrayBuffer | Uint8Array;
+    const bytes = raw instanceof Uint8Array ? raw : new Uint8Array(raw);
     return {
       fileName: `churnsight_${slug}_${suffix}.xlsx`,
       contentType:
         'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
-      body: buffer,
+      body: bytes,
     };
   }
 
@@ -1547,7 +1549,7 @@ export function generatePredictionInputTemplateExport(params: {
 }): {
   fileName: string;
   contentType: string;
-  body: string | Buffer;
+  body: string | Uint8Array;
   columns: { name: string; kind: string; exampleValue: string; acceptedValues: string }[];
 } {
   const { industry, format, artifact, customIndustryName } = params;
@@ -1641,12 +1643,13 @@ export function generatePredictionInputTemplateExport(params: {
     ]);
     XLSX.utils.book_append_sheet(wb, noteSheet, 'Scoring_Instructions');
 
-    const buffer = XLSX.write(wb, { type: 'buffer', bookType: 'xlsx' }) as Buffer;
+    const raw = XLSX.write(wb, { type: 'array', bookType: 'xlsx' }) as ArrayBuffer | Uint8Array;
+    const bytes = raw instanceof Uint8Array ? raw : new Uint8Array(raw);
     return {
       fileName: `${baseName}.xlsx`,
       contentType:
         'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
-      body: buffer,
+      body: bytes,
       columns,
     };
   }

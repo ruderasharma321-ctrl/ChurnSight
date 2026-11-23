@@ -34,6 +34,7 @@ import {
   WorkspaceUsageSummary,
 } from '../types/churn';
 import { apiFetch } from '../utils/apiClient';
+import { DemoWorkspacePanel } from './DemoWorkspacePanel';
 import { getInitials, readAndCompressImageFile } from '../utils/imageHelpers';
 import {
   BUSINESS_MODEL_OPTIONS,
@@ -59,6 +60,7 @@ import {
 interface CompanySettingsViewProps {
   user: UserAccount;
   company: CompanyWorkspaceInfo;
+  dataset: DatasetState | null;
   usage: WorkspaceUsageSummary | null;
   onCompanyUpdated: (
     company: CompanyWorkspaceInfo,
@@ -69,13 +71,18 @@ interface CompanySettingsViewProps {
     nextModelHistory?: ModelEvaluationResult[],
     nextAutomationStatus?: PredictionPipelineStatus | null
   ) => void;
+  onWorkspaceMutated: (data: Record<string, any>) => void;
+  onNavigateToData?: () => void;
 }
 
 export const CompanySettingsView: React.FC<CompanySettingsViewProps> = ({
   user,
   company,
+  dataset,
   usage,
   onCompanyUpdated,
+  onWorkspaceMutated,
+  onNavigateToData,
 }) => {
   const fileInputRef = useRef<HTMLInputElement | null>(null);
   const isWorkspaceAdmin = user.role === 'FIRM_ADMIN' || user.role === 'PLATFORM_OWNER';
@@ -1013,6 +1020,18 @@ export const CompanySettingsView: React.FC<CompanySettingsViewProps> = ({
             </table>
           </div>
         )}
+      </div>
+
+      {/* 5. DEMO WORKSPACE CONTROLS */}
+      <div className="space-y-2">
+        <h2 className="text-base font-bold text-[#11142B]">Demo Workspace</h2>
+        <DemoWorkspacePanel
+          embedded
+          company={company}
+          dataset={dataset}
+          onWorkspaceMutated={onWorkspaceMutated}
+          onNavigateToData={onNavigateToData}
+        />
       </div>
     </div>
   );

@@ -1,6 +1,10 @@
+import { handleDemoApiRequest } from '../demo/demoApiRouter';
+
 const SESSION_TOKEN_STORAGE_KEY = 'churnsight_session_token';
 let inMemorySessionToken: string | null = null;
 const unauthorizedListeners = new Set<() => void>();
+
+export const IS_DEMO_MODE = import.meta.env?.VITE_REMOTE_API_ONLY !== 'true';
 
 export function subscribeUnauthorized(listener: () => void): () => void {
   unauthorizedListeners.add(listener);
@@ -49,7 +53,7 @@ export function setClientSessionToken(
   }
 }
 
-const RAW_API_BASE = (import.meta.env.VITE_API_BASE_URL || '').trim().replace(/\/+$/, '');
+const RAW_API_BASE = (import.meta.env?.VITE_API_BASE_URL || '').trim().replace(/\/+$/, '');
 
 function isEmbeddedOrCrossOrigin(): boolean {
   if (RAW_API_BASE) return true;
@@ -65,6 +69,17 @@ export function resolveApiUrl(input: RequestInfo | URL): RequestInfo | URL {
     return `${RAW_API_BASE}${input}`;
   }
   return input;
+}
+
+function resolveInputUrlString(input: RequestInfo | URL): string {
+  if (typeof input === 'string') return input;
+  if (typeof URL !== 'undefined' && input instanceof URL) return input.toString();
+  if (typeof Request !== 'undefined' && input instanceof Request) return input.url;
+  return String(input);
+}
+
+function isLocalApiRoute(urlStr: string): boolean {
+  return urlStr.startsWith('/api/') || urlStr === '/api' || /^https?:\/\/[^/]+\/api(\/|\?|$)/.test(urlStr);
 }
 
 const PUBLIC_AUTH_401_ENDPOINTS = [
@@ -85,16 +100,20 @@ export async function apiFetch(input: RequestInfo | URL, init: RequestInit = {})
     headers.set('X-ChurnSight-Embedded', '1');
   }
 
-  const res = await fetch(resolveApiUrl(input), {
-    ...init,
-    credentials: init.credentials ?? 'include',
-    cache: init.cache ?? 'no-store',
-    headers,
-  });
+  const urlStr = resolveInputUrlString(input);
+
+  const res =
+    IS_DEMO_MODE && isLocalApiRoute(urlStr)
+      ? await handleDemoApiRequest(urlStr, { ...init, headers }, token)
+      : await fetch(resolveApiUrl(input), {
+          ...init,
+          credentials: init.credentials ?? 'include',
+          cache: init.cache ?? 'no-store',
+          headers,
+        });
 
   if (res.status === 401) {
     setClientSessionToken(null);
-    const urlStr = typeof input === 'string' ? input : input.toString();
     const isPublicAuthCall = PUBLIC_AUTH_401_ENDPOINTS.some((ep) => urlStr.includes(ep));
     if (!isPublicAuthCall) {
       unauthorizedListeners.forEach((cb) => {

@@ -94,9 +94,9 @@ export interface TrainedModelArtifact {
 
 const MISSING_TOKENS = new Set(['', 'null', 'na', 'n/a', 'nan', 'none', 'undefined', '?']);
 
-export function isMissingValue(val: string | undefined): boolean {
+export function isMissingValue(val: string | number | boolean | null | undefined): boolean {
   if (val === undefined || val === null) return true;
-  return MISSING_TOKENS.has(val.trim().toLowerCase());
+  return MISSING_TOKENS.has(String(val).trim().toLowerCase());
 }
 
 const NAME_MISSING_TOKENS = new Set([
@@ -251,6 +251,27 @@ export function parseCsvText(csvText: string): { headers: string[]; rows: Record
   return { headers: uniqueHeaders, rows };
 }
 
+export function base64ToUint8Array(base64: string): Uint8Array {
+  const cleanB64 = base64.includes(',') ? base64.split(',').pop() || '' : base64;
+  if (typeof atob === 'function') {
+    const bin = atob(cleanB64);
+    const bytes = new Uint8Array(bin.length);
+    for (let i = 0; i < bin.length; i++) {
+      bytes[i] = bin.charCodeAt(i);
+    }
+    return bytes;
+  }
+  const buf = Buffer.from(cleanB64, 'base64');
+  return new Uint8Array(buf.buffer, buf.byteOffset, buf.byteLength);
+}
+
+export function utf8BytesToString(bytes: Uint8Array): string {
+  if (typeof TextDecoder !== 'undefined') {
+    return new TextDecoder('utf-8').decode(bytes);
+  }
+  return Buffer.from(bytes).toString('utf-8');
+}
+
 export function parseSpreadsheetUpload(input: {
   fileName: string;
   csvText?: string;
@@ -269,21 +290,18 @@ export function parseSpreadsheetUpload(input: {
   }
 
   if (input.fileBase64 && typeof input.fileBase64 === 'string') {
-    const cleanB64 = input.fileBase64.includes(',')
-      ? input.fileBase64.split(',').pop() || ''
-      : input.fileBase64;
-    const buffer = Buffer.from(cleanB64, 'base64');
-    if (buffer.length === 0) {
+    const bytes = base64ToUint8Array(input.fileBase64);
+    if (bytes.length === 0) {
       throw new Error('The uploaded spreadsheet file is empty.');
     }
 
     if (!isExcel) {
-      const text = buffer.toString('utf-8');
+      const text = utf8BytesToString(bytes);
       const { headers, rows } = parseCsvText(text);
       return { headers, rows, sourceFormat: 'csv' };
     }
 
-    const workbook = XLSX.read(buffer, { type: 'buffer', cellDates: true });
+    const workbook = XLSX.read(bytes, { type: 'array', cellDates: true });
     const firstSheetName = workbook.SheetNames[0];
     if (!firstSheetName) {
       throw new Error('The Excel workbook contains no readable sheets.');
