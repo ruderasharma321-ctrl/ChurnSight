@@ -17,11 +17,20 @@ import {
 } from 'recharts';
 import {
   CategoryChurnStat,
+  CompanyWorkspaceInfo,
+  DatasetState,
   FeatureImportance,
   ModelEvaluationResult,
   MonthlyChargesComparison,
   NumericComparisonStat,
 } from '../types/churn';
+import {
+  formatAttributeValue,
+  formatCurrencyUSD,
+  formatFeatureDisplayName,
+  getHumanReadableFieldLabel,
+  inferFieldKind,
+} from '../utils/formatters';
 
 const COLOR_STAYED = '#059669'; // green for Active / Retained
 const COLOR_CHURNED = '#DC2626'; // red for Churned (Left)
@@ -429,19 +438,31 @@ interface AverageChargesBarChartProps {
   comparison: MonthlyChargesComparison | null;
   valuePrefix?: string;
   metricLabel?: string;
+  dataset?: DatasetState | null;
+  company?: CompanyWorkspaceInfo | null;
 }
 
 export const AverageChargesBarChart: React.FC<AverageChargesBarChartProps> = ({
   comparison,
   valuePrefix = '$',
   metricLabel,
+  dataset,
+  company,
 }) => {
   if (!comparison || (comparison.stayedCount === 0 && comparison.churnedCount === 0)) {
     return <ChartEmptyState message="No numeric comparison records match the current filters." />;
   }
 
-  const labelText = metricLabel || `Avg ${comparison.columnName}`;
-  const formatVal = (n: number) => `${valuePrefix}${n.toFixed(2)}`;
+  const ctx = { dataset, company };
+  const labelText =
+    metricLabel || `Avg ${getHumanReadableFieldLabel(comparison.columnName, ctx)}`;
+  const isCurrency = valuePrefix === '$';
+  const formatVal = (n: number) =>
+    isCurrency
+      ? formatCurrencyUSD(n)
+      : valuePrefix
+        ? `${valuePrefix}${n.toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`
+        : formatAttributeValue(comparison.columnName, n, ctx);
 
   const chartData = [
     {
@@ -479,9 +500,13 @@ export const AverageChargesBarChart: React.FC<AverageChargesBarChartProps> = ({
               tick={{ fontSize: 11, fill: COLOR_AXIS }}
               axisLine={false}
               tickLine={false}
-              tickFormatter={(v) => `${valuePrefix}${v}`}
+              tickFormatter={(v) =>
+                isCurrency
+                  ? `$${Number(v).toLocaleString('en-US', { maximumFractionDigits: 0 })}`
+                  : `${valuePrefix}${Number(v).toLocaleString('en-US', { maximumFractionDigits: 1 })}`
+              }
               label={{
-                value: valuePrefix ? `${labelText} (${valuePrefix})` : labelText,
+                value: isCurrency ? `${labelText} (USD)` : labelText,
                 angle: -90,
                 position: 'insideLeft',
                 offset: 2,
@@ -699,9 +724,15 @@ export const CategoryChurnRateBarChart: React.FC<CategoryChurnRateBarChartProps>
 
 interface NumericComparisonChartProps {
   stats: NumericComparisonStat[];
+  dataset?: DatasetState | null;
+  company?: CompanyWorkspaceInfo | null;
 }
 
-export const NumericComparisonChart: React.FC<NumericComparisonChartProps> = ({ stats }) => {
+export const NumericComparisonChart: React.FC<NumericComparisonChartProps> = ({
+  stats,
+  dataset,
+  company,
+}) => {
   if (!stats || stats.length === 0) {
     return (
       <div className="py-8 text-center text-sm text-slate-500">
@@ -709,6 +740,19 @@ export const NumericComparisonChart: React.FC<NumericComparisonChartProps> = ({ 
       </div>
     );
   }
+
+  const ctx = { dataset, company };
+
+  const formatDiff = (colName: string, diff: number) => {
+    const kind = inferFieldKind(colName, ctx);
+    if (kind === 'currency_usd') {
+      return `${diff >= 0 ? '+' : ''}${formatCurrencyUSD(diff)}`;
+    }
+    if (kind === 'percentage') {
+      return `${diff >= 0 ? '+' : ''}${diff.toFixed(1)} pts`;
+    }
+    return `${diff >= 0 ? '+' : ''}${diff.toLocaleString('en-US', { maximumFractionDigits: 1 })}`;
+  };
 
   return (
     <div className="overflow-x-auto">
@@ -724,20 +768,22 @@ export const NumericComparisonChart: React.FC<NumericComparisonChartProps> = ({ 
         <tbody className="divide-y divide-purple-50 text-sm">
           {stats.map((row) => {
             const diff = row.churnedAvg - row.stayedAvg;
+            const readableLabel = getHumanReadableFieldLabel(row.column, ctx);
             return (
               <tr key={row.column} className="hover:bg-[#F6F3FF]/70 transition-colors">
-                <td className="py-2.5 pr-4 font-medium text-[#15152F]">{row.column}</td>
+                <td className="py-2.5 pr-4 font-medium text-[#15152F]" title={row.column}>
+                  {readableLabel}
+                </td>
                 <td className="py-2.5 px-4 text-right font-mono tabular-nums text-slate-700">
-                  {row.overallAvg.toLocaleString(undefined, { maximumFractionDigits: 2 })}
+                  {formatAttributeValue(row.column, row.overallAvg, ctx)}
                 </td>
                 <td className="py-2.5 px-4 text-right font-mono tabular-nums text-[#059669] font-semibold">
-                  {row.stayedAvg.toLocaleString(undefined, { maximumFractionDigits: 2 })}
+                  {formatAttributeValue(row.column, row.stayedAvg, ctx)}
                 </td>
                 <td className="py-2.5 pl-4 text-right font-mono tabular-nums text-[#DC2626] font-semibold">
-                  {row.churnedAvg.toLocaleString(undefined, { maximumFractionDigits: 2 })}{' '}
+                  {formatAttributeValue(row.column, row.churnedAvg, ctx)}{' '}
                   <span className="text-xs text-slate-400 font-normal">
-                    ({diff >= 0 ? '+' : ''}
-                    {diff.toFixed(1)})
+                    ({formatDiff(row.column, diff)})
                   </span>
                 </td>
               </tr>
@@ -751,9 +797,15 @@ export const NumericComparisonChart: React.FC<NumericComparisonChartProps> = ({ 
 
 interface FeatureImportanceChartProps {
   importances: FeatureImportance[];
+  dataset?: DatasetState | null;
+  company?: CompanyWorkspaceInfo | null;
 }
 
-export const FeatureImportanceChart: React.FC<FeatureImportanceChartProps> = ({ importances }) => {
+export const FeatureImportanceChart: React.FC<FeatureImportanceChartProps> = ({
+  importances,
+  dataset,
+  company,
+}) => {
   if (!importances || importances.length === 0) {
     return (
       <div className="py-8 text-center text-sm text-slate-500">
@@ -762,11 +814,13 @@ export const FeatureImportanceChart: React.FC<FeatureImportanceChartProps> = ({ 
     );
   }
 
+  const ctx = { dataset, company };
   const maxImportance = Math.max(1, ...importances.map((i) => i.importance));
 
   return (
     <div className="space-y-3">
       {importances.map((item) => {
+        const displayFeature = formatFeatureDisplayName(item.feature, ctx);
         const barColor =
           item.direction === 'increases_churn'
             ? 'bg-gradient-to-r from-[#FF786B] to-[#E84FA8]'
@@ -776,10 +830,10 @@ export const FeatureImportanceChart: React.FC<FeatureImportanceChartProps> = ({ 
 
         const directionLabel =
           item.direction === 'increases_churn'
-            ? 'Positive association'
+            ? 'Increases Risk'
             : item.direction === 'decreases_churn'
-              ? 'Negative association'
-              : 'Gini split share';
+              ? 'Reduces Risk'
+              : 'Model Share';
 
         const coefText =
           item.coefficient !== undefined
@@ -791,12 +845,15 @@ export const FeatureImportanceChart: React.FC<FeatureImportanceChartProps> = ({ 
         return (
           <div key={item.feature} className="space-y-1.5">
             <div className="flex items-center justify-between text-xs gap-2">
-              <span className="font-semibold text-[#15152F] truncate max-w-[52%]" title={item.feature}>
-                {item.feature}
+              <span
+                className="font-semibold text-[#15152F] truncate max-w-[52%]"
+                title={displayFeature}
+              >
+                {displayFeature}
               </span>
               <span className="text-slate-600 font-mono tabular-nums shrink-0">
                 {coefText}
-                {directionLabel} · {item.importance.toFixed(1)}%
+                {directionLabel} · Impact share {item.importance.toFixed(1)}%
               </span>
             </div>
             <div className="h-2.5 w-full bg-[#F6F3FF] rounded-full overflow-hidden border border-purple-100/70">

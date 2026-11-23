@@ -6,6 +6,7 @@ import type {
   DatasetState,
   ModelEvaluationResult,
 } from '../types/churn';
+import { formatFeatureDisplayName, formatReadableDate } from './formatters';
 import { getIndustryTemplate } from './industryConfig';
 
 function sanitizeCsvField(val: string | number | null | undefined): string {
@@ -45,7 +46,7 @@ function addPdfHeader(
   doc.setFontSize(9);
   doc.setFont('helvetica', 'normal');
   doc.text(`${company.name} · ${tmpl.label} · ${company.country}`, 14, 21);
-  doc.text(`Generated ${new Date().toLocaleString()} · ${subtitle}`, 14, 27);
+  doc.text(`Generated ${formatReadableDate(new Date(), { includeTime: true })} · ${subtitle}`, 14, 27);
   doc.setTextColor(17, 20, 43);
   return 44;
 }
@@ -189,7 +190,11 @@ export function exportChurnSummaryPdf(
     doc.text('Top Predictive Features:', 14, y);
     y += 5;
     for (const f of activeModel.featureImportances.slice(0, 6)) {
-      doc.text(`- ${f.feature}: ${f.importance.toFixed(1)}% relative importance`, 16, y);
+      doc.text(
+        `- ${formatFeatureDisplayName(f.feature, { dataset, company })}: ${f.importance.toFixed(1)}% impact share`,
+        16,
+        y
+      );
       y += 4.8;
     }
   }
@@ -252,7 +257,7 @@ export function exportModelEvaluationPdf(
   );
   y += 5;
   doc.text(
-    `Training Rows: ${model.trainCount.toLocaleString()} | Unseen Test Rows: ${model.testCount.toLocaleString()} | Trained At: ${new Date(model.trainedAt).toLocaleString()}`,
+    `Training Rows: ${model.trainCount.toLocaleString()} | Unseen Test Rows: ${model.testCount.toLocaleString()} | Trained At: ${formatReadableDate(model.trainedAt, { includeTime: true })}`,
     14,
     y
   );
@@ -310,7 +315,7 @@ export function exportModelEvaluationPdf(
       f.coefficient !== undefined
         ? ` (beta=${f.coefficient >= 0 ? '+' : ''}${f.coefficient.toFixed(3)})`
         : '';
-    doc.text(`- ${f.feature}: ${f.importance.toFixed(1)}%${dir}`, 16, y);
+    doc.text(`- ${formatFeatureDisplayName(f.feature, { company })}: ${f.importance.toFixed(1)}%${dir}`, 16, y);
     y += 5;
   }
 

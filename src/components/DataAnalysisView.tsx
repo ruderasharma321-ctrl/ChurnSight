@@ -8,6 +8,13 @@ import {
   NavTab,
 } from '../types/churn';
 import { apiFetch } from '../utils/apiClient';
+import {
+  formatAttributeValue,
+  formatCurrencyUSD,
+  formatDuration,
+  formatReadableDate,
+  getHumanReadableFieldLabel,
+} from '../utils/formatters';
 import { getIndustryTemplate } from '../utils/industryConfig';
 import {
   AverageChargesBarChart,
@@ -41,6 +48,7 @@ export const DataAnalysisView: React.FC<DataAnalysisViewProps> = ({
   onNavigate,
 }) => {
   const tmpl = getIndustryTemplate(company.industry, company.customIndustryName);
+  const formatCtx = { dataset, company };
   const [filters, setFilters] = useState<AnalyticsFilters>(DEFAULT_FILTERS);
   const [filteredAnalytics, setFilteredAnalytics] = useState<AnalyticsSummary | null>(analytics);
   const [isFiltering, setIsFiltering] = useState(false);
@@ -180,11 +188,11 @@ export const DataAnalysisView: React.FC<DataAnalysisViewProps> = ({
       )}
 
       {hp && hp.inconsistentRecordsCount > 0 && (
-        <div className="bg-amber-50 border border-amber-300 rounded-2xl p-4 flex items-start gap-2.5 text-xs text-amber-950">
+        <div className="bg-amber-50 border border-amber-300 rounded-2xl px-4 py-3 flex items-start gap-2.5 text-xs text-amber-950">
           <AlertTriangle className="w-4 h-4 text-amber-700 shrink-0 mt-0.5" />
           <div>
-            <strong>Inconsistent Status Records ({hp.inconsistentRecordsCount}):</strong>{' '}
-            Conflicting churn labels or cancellation/registration dates were detected and excluded from clean historical rates so figures remain trustworthy.
+            <strong>{hp.inconsistentRecordsCount} inconsistent record(s):</strong>{' '}
+            Excluded from historical churn rates.
           </div>
         </div>
       )}
@@ -198,7 +206,7 @@ export const DataAnalysisView: React.FC<DataAnalysisViewProps> = ({
         </div>
       )}
 
-      {activeData.calculationExplanation && (
+      {hasActiveFilter && activeData.calculationExplanation && (
         <div className="bg-[#F5F3FF] border border-purple-200/80 rounded-xl px-4 py-2.5 text-xs font-mono text-[#4C4A6E]">
           {activeData.calculationExplanation}
         </div>
@@ -289,7 +297,9 @@ export const DataAnalysisView: React.FC<DataAnalysisViewProps> = ({
           {activeData.filterOptions.paymentMethods.length > 0 && (
             <div>
               <label className="block text-xs font-semibold text-[#4C4A6E] mb-1">
-                {activeData.paymentMethodColumn || 'Category Breakdown'}
+                {activeData.paymentMethodColumn
+                  ? getHumanReadableFieldLabel(activeData.paymentMethodColumn, formatCtx)
+                  : 'Category Breakdown'}
               </label>
               <select
                 value={filters.paymentMethod || 'ALL'}
@@ -366,13 +376,15 @@ export const DataAnalysisView: React.FC<DataAnalysisViewProps> = ({
                 Average {tmpl.revenueLabel} by Churn Status
               </h2>
               <p className="text-xs text-slate-500 mt-0.5">
-                Mean {activeData.monthlyChargesComparison.columnName} for retained vs. churned{' '}
+                Mean {getHumanReadableFieldLabel(activeData.monthlyChargesComparison.columnName, formatCtx)} for retained vs. churned{' '}
                 {tmpl.entityPlural.toLowerCase()}
               </p>
             </div>
             <AverageChargesBarChart
               comparison={activeData.monthlyChargesComparison}
               metricLabel={tmpl.revenueLabel}
+              dataset={dataset}
+              company={company}
             />
           </div>
         )}
@@ -385,13 +397,15 @@ export const DataAnalysisView: React.FC<DataAnalysisViewProps> = ({
                 Average {tmpl.frequencyLabel} by Churn Status
               </h2>
               <p className="text-xs text-slate-500 mt-0.5">
-                Mean {activeData.frequencyComparison.columnName} comparing retained vs. churned
+                Mean {getHumanReadableFieldLabel(activeData.frequencyComparison.columnName, formatCtx)} comparing retained vs. churned
               </p>
             </div>
             <AverageChargesBarChart
               comparison={activeData.frequencyComparison}
               valuePrefix=""
               metricLabel={tmpl.frequencyLabel}
+              dataset={dataset}
+              company={company}
             />
           </div>
         )}
@@ -404,7 +418,7 @@ export const DataAnalysisView: React.FC<DataAnalysisViewProps> = ({
                 Churn by {tmpl.segmentLabel}
               </h2>
               <p className="text-xs text-slate-500 mt-0.5">
-                Retained vs. churned counts across &ldquo;{dataset.mapping.contractColumn}&rdquo;
+                Retained vs. churned counts across &ldquo;{dataset.mapping.contractColumn ? getHumanReadableFieldLabel(dataset.mapping.contractColumn, formatCtx) : tmpl.segmentLabel}&rdquo;
               </p>
             </div>
             <GroupedChurnBarChart data={activeData.contractStats} xAxisLabel={tmpl.segmentLabel} />
@@ -449,10 +463,17 @@ export const DataAnalysisView: React.FC<DataAnalysisViewProps> = ({
           <div className="lg:col-span-6 bg-white border border-purple-100/90 rounded-2xl shadow-sm shadow-purple-950/[0.04] p-6 space-y-4">
             <div>
               <h2 className="text-base font-bold text-[#15152F]">
-                Churn Rate by {activeData.paymentMethodColumn}
+                Churn Rate by{' '}
+                {activeData.paymentMethodColumn
+                  ? getHumanReadableFieldLabel(activeData.paymentMethodColumn, formatCtx)
+                  : 'Category'}
               </h2>
               <p className="text-xs text-slate-500 mt-0.5">
-                Category churn percentage across &ldquo;{activeData.paymentMethodColumn}&rdquo;
+                Category churn percentage across &ldquo;
+                {activeData.paymentMethodColumn
+                  ? getHumanReadableFieldLabel(activeData.paymentMethodColumn, formatCtx)
+                  : 'Category'}
+                &rdquo;
               </p>
             </div>
             <CategoryChurnRateBarChart
@@ -491,7 +512,7 @@ export const DataAnalysisView: React.FC<DataAnalysisViewProps> = ({
                   <div>
                     <h3 className="text-base font-bold text-[#15152F]">{chart.title}</h3>
                     <p className="text-xs text-slate-500 mt-0.5">
-                      Column: &ldquo;{chart.columnName}&rdquo; ·{' '}
+                      Attribute: &ldquo;{getHumanReadableFieldLabel(chart.columnName, formatCtx)}&rdquo; ·{' '}
                       {useRateBar
                         ? 'Churn rate (%) within each category'
                         : 'Retained vs. churned counts and category churn rate'}
@@ -523,7 +544,11 @@ export const DataAnalysisView: React.FC<DataAnalysisViewProps> = ({
               Mean values for all numeric columns grouped by churn outcome
             </p>
           </div>
-          <NumericComparisonChart stats={activeData.numericComparisons} />
+          <NumericComparisonChart
+            stats={activeData.numericComparisons}
+            dataset={dataset}
+            company={company}
+          />
         </div>
 
         {categoricalKeys.length > 0 && (
@@ -545,7 +570,7 @@ export const DataAnalysisView: React.FC<DataAnalysisViewProps> = ({
               >
                 {categoricalKeys.map((key) => (
                   <option key={key} value={key}>
-                    {key}
+                    {getHumanReadableFieldLabel(key, formatCtx)}
                   </option>
                 ))}
               </select>
@@ -567,7 +592,7 @@ export const DataAnalysisView: React.FC<DataAnalysisViewProps> = ({
                   Behaviour Monitoring Watchlist
                 </h2>
                 <p className="text-xs text-slate-500 mt-0.5">
-                  Early inactivity and low-engagement signals ({activeData.behaviourMonitoring.inactivityWatchlistCount} inactivity alerts · {activeData.behaviourMonitoring.lowEngagementCount} low engagement) — never classified as churn without confirmed outcomes
+                  Early inactivity and low-engagement signals ({activeData.behaviourMonitoring.inactivityWatchlistCount} inactivity alerts · {activeData.behaviourMonitoring.lowEngagementCount} low engagement)
                 </p>
               </div>
               <button
@@ -598,16 +623,24 @@ export const DataAnalysisView: React.FC<DataAnalysisViewProps> = ({
                         {item.customerId}
                       </td>
                       <td className="py-2 px-3 font-mono text-slate-600">
-                        {item.lastDate || '—'}
+                        {formatReadableDate(item.lastDate)}
                       </td>
                       <td className="py-2 px-3 text-right font-mono tabular-nums text-[#D97706] font-semibold">
-                        {item.daysSinceActivity !== null ? `${item.daysSinceActivity}d` : '—'}
+                        {item.daysSinceActivity !== null
+                          ? formatDuration(item.daysSinceActivity, 'day')
+                          : '—'}
                       </td>
                       <td className="py-2 px-3 text-right font-mono tabular-nums text-slate-700">
-                        {item.engagementValue ?? '—'}
+                        {formatAttributeValue(
+                          dataset.mapping.frequencyColumn || 'engagement_score',
+                          item.engagementValue,
+                          formatCtx
+                        )}
                       </td>
                       <td className="py-2 px-3 text-right font-mono tabular-nums text-slate-700">
-                        {item.revenueValue ?? '—'}
+                        {item.revenueValue !== null && item.revenueValue !== undefined
+                          ? formatCurrencyUSD(item.revenueValue)
+                          : '—'}
                       </td>
                       <td className="py-2 pl-3 text-slate-600">{item.reason}</td>
                     </tr>

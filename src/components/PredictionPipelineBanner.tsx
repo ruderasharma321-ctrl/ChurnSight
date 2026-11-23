@@ -35,6 +35,7 @@ export const PredictionPipelineBanner: React.FC<PredictionPipelineBannerProps> =
   compact = false,
 }) => {
   const [liveIdx, setLiveIdx] = useState(0);
+  const [showSteps, setShowSteps] = useState(false);
 
   useEffect(() => {
     if (!isRunning) {
@@ -56,7 +57,7 @@ export const PredictionPipelineBanner: React.FC<PredictionPipelineBannerProps> =
         <div className="flex flex-col sm:flex-row sm:items-center sm:justify-between gap-2">
           <div>
             <div className="text-xs font-semibold text-[#35C5E8]">
-              Managed prediction setup
+              Prediction Setup
             </div>
             <h3 className="font-display text-base sm:text-lg font-bold text-white mt-0.5">
               {LIVE_PROGRESS_STEPS[liveIdx]}
@@ -75,30 +76,6 @@ export const PredictionPipelineBanner: React.FC<PredictionPipelineBannerProps> =
             className="h-full bg-gradient-to-r from-[#35C5E8] via-[#397BFF] to-[#7655E8] transition-all duration-300"
           />
         </div>
-
-        <div className="grid grid-cols-1 sm:grid-cols-5 gap-2.5">
-          {LIVE_PROGRESS_STEPS.map((label, idx) => {
-            const done = idx < liveIdx;
-            const active = idx === liveIdx;
-            return (
-              <div
-                key={label}
-                className={`rounded-xl border px-3 py-2.5 text-xs transition-colors ${
-                  active
-                    ? 'border-[#35C5E8]/70 bg-[#35C5E8]/12 text-white font-semibold'
-                    : done
-                      ? 'border-[#7655E8]/45 bg-white/[0.05] text-indigo-100'
-                      : 'border-white/10 text-slate-400'
-                }`}
-              >
-                <div className="text-[11px] font-mono text-indigo-200/80 mb-0.5">
-                  {done ? 'Done' : active ? 'In progress' : 'Queued'}
-                </div>
-                <div className="leading-snug">{label}</div>
-              </div>
-            );
-          })}
-        </div>
       </section>
     );
   }
@@ -111,10 +88,20 @@ export const PredictionPipelineBanner: React.FC<PredictionPipelineBannerProps> =
     automationStatus.stage === 'predictions_ready' && automationStatus.predictionAvailable;
   const needsMoreData = automationStatus.stage === 'more_historical_data_required';
   const isFailed = automationStatus.stage === 'setup_failed';
+  const isAutomaticLeakageRefresh = Boolean(
+    automationStatus.refreshNotice &&
+      /post-churn|post-outcome|target leakage/i.test(automationStatus.refreshNotice)
+  );
+  const showInlineRefreshNotice = Boolean(
+    isReady &&
+      automationStatus.needsRefresh &&
+      automationStatus.refreshNotice &&
+      !isAutomaticLeakageRefresh
+  );
 
   return (
     <section
-      className={`rounded-2xl border p-5 sm:p-6 space-y-4 shadow-sm ${
+      className={`rounded-2xl border p-4 sm:p-5 space-y-3 shadow-sm ${
         isReady
           ? 'bg-white border-purple-100/90'
           : isFailed
@@ -122,10 +109,10 @@ export const PredictionPipelineBanner: React.FC<PredictionPipelineBannerProps> =
             : 'bg-amber-50/90 border-amber-200'
       }`}
     >
-      <div className="flex flex-col lg:flex-row lg:items-start lg:justify-between gap-4">
-        <div className="flex items-start gap-3.5">
+      <div className="flex flex-col lg:flex-row lg:items-center lg:justify-between gap-4">
+        <div className="flex items-start gap-3">
           <div
-            className={`w-10 h-10 rounded-xl flex items-center justify-center shrink-0 ${
+            className={`w-9 h-9 rounded-xl flex items-center justify-center shrink-0 ${
               isReady
                 ? 'bg-[#16C995]/15 text-[#0E9F6E]'
                 : isFailed
@@ -142,59 +129,54 @@ export const PredictionPipelineBanner: React.FC<PredictionPipelineBannerProps> =
             )}
           </div>
 
-          <div className="space-y-1">
-            <div className="flex flex-wrap items-center gap-2 text-xs text-slate-500">
-              <span className="font-semibold text-[#7655E8]">Managed prediction setup</span>
-              <span aria-hidden="true">·</span>
-              <span>
-                Prediction availability:{' '}
-                <strong className={isReady ? 'text-[#0E9F6E]' : 'text-amber-800'}>
-                  {isReady ? 'Active' : 'Paused'}
-                </strong>
+          <div className="space-y-0.5">
+            <div className="flex flex-wrap items-center gap-2 text-xs">
+              <h3 className="font-display text-sm sm:text-base font-bold text-[#11142B]">
+                {automationStatus.headline}
+              </h3>
+              <span
+                className={`text-[11px] font-semibold px-2 py-0.5 rounded-md ${
+                  isReady
+                    ? 'bg-[#16C995]/12 text-[#0E9F6E]'
+                    : 'bg-amber-100 text-amber-800'
+                }`}
+              >
+                {isReady ? 'Active' : 'Paused'}
               </span>
             </div>
 
-            <h3 className="font-display text-base sm:text-lg font-bold text-[#11142B]">
-              {automationStatus.headline}
-            </h3>
-
-            <p className="text-sm text-slate-600 max-w-3xl">
-              {automationStatus.summary}
+            <p className="text-xs text-slate-600 max-w-3xl">
+              {automationStatus.failureReason && !isReady
+                ? automationStatus.failureReason
+                : automationStatus.summary}
             </p>
 
-            {automationStatus.failureReason && !isReady && (
-              <div className="pt-1 text-xs text-slate-800 space-y-0.5">
-                <div>
-                  <strong>Reason:</strong> {automationStatus.failureReason}
-                </div>
-                {automationStatus.recommendedAction && (
-                  <div>
-                    <strong>Next step:</strong> {automationStatus.recommendedAction}
-                  </div>
-                )}
-              </div>
+            {automationStatus.recommendedAction && !isReady && (
+              <p className="text-xs font-medium text-[#11142B] pt-0.5">
+                Next: {automationStatus.recommendedAction}
+              </p>
             )}
 
-            {isReady && automationStatus.needsRefresh && automationStatus.refreshNotice && (
-              <div className="mt-2 rounded-xl border border-amber-200 bg-amber-50 px-3.5 py-2 text-xs text-amber-950">
-                <strong>Model update advised:</strong> {automationStatus.refreshNotice}
+            {showInlineRefreshNotice && (
+              <div className="mt-1.5 rounded-xl border border-amber-200 bg-amber-50 px-3 py-1.5 text-xs text-amber-950">
+                <strong>Update advised:</strong> {automationStatus.refreshNotice}
               </div>
             )}
           </div>
         </div>
 
-        <div className="flex flex-wrap items-center gap-2.5 shrink-0">
+        <div className="flex flex-wrap items-center gap-2 shrink-0">
           {!isReady && onNavigate && (
             <button
               type="button"
               onClick={() => onNavigate('data')}
-              className="px-4 py-2 rounded-xl border border-amber-300 bg-white hover:bg-amber-100/60 text-xs font-semibold text-[#11142B] transition-colors cursor-pointer whitespace-nowrap"
+              className="px-3.5 py-2 rounded-xl border border-amber-300 bg-white hover:bg-amber-100/60 text-xs font-semibold text-[#11142B] transition-colors cursor-pointer whitespace-nowrap"
             >
-              Review Data Management
+              Review Data
             </button>
           )}
 
-          {canGeneratePredictions && onAutoBuild && (needsMoreData || isFailed || automationStatus.needsRefresh) && (
+          {canGeneratePredictions && onAutoBuild && (needsMoreData || isFailed || (automationStatus.needsRefresh && !isAutomaticLeakageRefresh)) && (
             <button
               type="button"
               onClick={onAutoBuild}
@@ -202,19 +184,19 @@ export const PredictionPipelineBanner: React.FC<PredictionPipelineBannerProps> =
             >
               <RefreshCw className="w-3.5 h-3.5 text-[#35C5E8]" />
               <span>
-                {isReady ? 'Refresh prediction model' : 'Build prediction model'}
+                {isReady ? 'Refresh Model' : 'Build Prediction Model'}
               </span>
             </button>
           )}
 
-          {isReady && !automationStatus.needsRefresh && canGeneratePredictions && onAutoBuild && !compact && (
+          {isReady && (!automationStatus.needsRefresh || isAutomaticLeakageRefresh) && canGeneratePredictions && onAutoBuild && !compact && (
             <button
               type="button"
               onClick={onAutoBuild}
               className="inline-flex items-center gap-2 px-3.5 py-2 rounded-xl border border-purple-200 bg-[#F5F3FF]/60 hover:bg-[#F5F3FF] text-xs font-semibold text-[#11142B] transition-colors cursor-pointer whitespace-nowrap"
             >
               <RefreshCw className="w-3.5 h-3.5 text-[#7655E8]" />
-              <span>Refresh prediction model</span>
+              <span>Refresh Model</span>
             </button>
           )}
 
@@ -225,37 +207,57 @@ export const PredictionPipelineBanner: React.FC<PredictionPipelineBannerProps> =
               className="inline-flex items-center gap-1.5 px-3.5 py-2 rounded-xl border border-slate-200 bg-white hover:bg-slate-50 text-xs font-semibold text-slate-700 transition-colors cursor-pointer whitespace-nowrap"
             >
               <SlidersHorizontal className="w-3.5 h-3.5 text-[#7655E8]" />
-              <span>Advanced Tuning</span>
+              <span>ML Studio</span>
+            </button>
+          )}
+
+          {!compact && (automationStatus.steps.length > 0 || isAutomaticLeakageRefresh) && (
+            <button
+              type="button"
+              onClick={() => setShowSteps((prev) => !prev)}
+              className="text-xs font-semibold text-[#7655E8] hover:text-[#E84FA8] px-2 py-1 cursor-pointer whitespace-nowrap"
+            >
+              {showSteps ? 'Hide Details' : 'View Details'}
             </button>
           )}
         </div>
       </div>
 
-      {!compact && automationStatus.steps.length > 0 && (
-        <div className="flex flex-wrap items-center gap-2 pt-2 border-t border-slate-200/70">
-          {automationStatus.steps.map((step) => {
-            const done = step.status === 'completed';
-            const warn = step.status === 'warning';
-            const failed = step.status === 'failed';
-            return (
-              <div
-                key={step.key}
-                title={step.detail}
-                className="inline-flex items-center gap-1.5 rounded-lg border border-slate-200/80 bg-[#F5F3FF]/35 px-2.5 py-1.5 text-xs font-medium text-[#11142B]"
-              >
-                {done ? (
-                  <CheckCircle2 className="w-3.5 h-3.5 text-[#0E9F6E] shrink-0" />
-                ) : failed ? (
-                  <XCircle className="w-3.5 h-3.5 text-rose-600 shrink-0" />
-                ) : warn ? (
-                  <AlertTriangle className="w-3.5 h-3.5 text-amber-600 shrink-0" />
-                ) : (
-                  <Clock className="w-3.5 h-3.5 text-slate-400 shrink-0" />
-                )}
-                <span>{step.label}</span>
-              </div>
-            );
-          })}
+      {!compact && showSteps && (automationStatus.steps.length > 0 || isAutomaticLeakageRefresh) && (
+        <div className="space-y-2.5 pt-2.5 border-t border-slate-200/70">
+          {isAutomaticLeakageRefresh && automationStatus.refreshNotice && (
+            <div className="rounded-lg border border-purple-200/80 bg-[#F5F3FF]/60 px-3 py-2 text-xs text-slate-700">
+              <strong className="text-[#11142B]">Target Leakage Protection: </strong>
+              {automationStatus.refreshNotice}
+            </div>
+          )}
+          {automationStatus.steps.length > 0 && (
+            <div className="flex flex-wrap items-center gap-2">
+              {automationStatus.steps.map((step) => {
+                const done = step.status === 'completed';
+                const warn = step.status === 'warning';
+                const failed = step.status === 'failed';
+                return (
+                  <div
+                    key={step.key}
+                    title={step.detail}
+                    className="inline-flex items-center gap-1.5 rounded-lg border border-slate-200/80 bg-[#F5F3FF]/35 px-2.5 py-1.5 text-xs font-medium text-[#11142B]"
+                  >
+                    {done ? (
+                      <CheckCircle2 className="w-3.5 h-3.5 text-[#0E9F6E] shrink-0" />
+                    ) : failed ? (
+                      <XCircle className="w-3.5 h-3.5 text-rose-600 shrink-0" />
+                    ) : warn ? (
+                      <AlertTriangle className="w-3.5 h-3.5 text-amber-600 shrink-0" />
+                    ) : (
+                      <Clock className="w-3.5 h-3.5 text-slate-400 shrink-0" />
+                    )}
+                    <span>{step.label}</span>
+                  </div>
+                );
+              })}
+            </div>
+          )}
         </div>
       )}
     </section>

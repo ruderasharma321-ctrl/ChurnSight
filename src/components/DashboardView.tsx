@@ -27,6 +27,7 @@ import {
 } from '../types/churn';
 import { apiFetch } from '../utils/apiClient';
 import { deriveCustomerIntelligence } from '../utils/churnIntelligence';
+import { formatCurrencyUSD, getHumanReadableFieldLabel } from '../utils/formatters';
 import { getIndustryTemplate } from '../utils/industryConfig';
 import { exportChurnSummaryCsv, exportChurnSummaryPdf } from '../utils/reportExporter';
 import { getSubscriptionPlanSpec } from '../utils/subscriptionPlans';
@@ -66,8 +67,7 @@ const revealProps = {
 };
 
 function formatCurrencyCompact(value: number | null | undefined): string {
-  if (value === null || value === undefined || !Number.isFinite(value)) return 'Unavailable';
-  return `$${value.toLocaleString(undefined, { maximumFractionDigits: 0 })}`;
+  return formatCurrencyUSD(value, { fallback: 'Unavailable' });
 }
 
 export const DashboardView: React.FC<DashboardViewProps> = ({
@@ -597,9 +597,10 @@ export const DashboardView: React.FC<DashboardViewProps> = ({
             value={
               valueSummary?.riskPredictionsAvailable &&
               valueSummary.estimatedExpectedRevenueExposure !== null
-                ? Math.round(valueSummary.estimatedExpectedRevenueExposure)
+                ? valueSummary.estimatedExpectedRevenueExposure
                 : 0
             }
+            decimals={2}
             prefix="$"
             displayText={
               valueSummary?.riskPredictionsAvailable &&
@@ -784,12 +785,14 @@ export const DashboardView: React.FC<DashboardViewProps> = ({
                   {tmpl.revenueLabel} Comparison
                 </h3>
                 <p className="text-xs text-slate-500 mt-0.5">
-                  Average {analytics.monthlyChargesComparison.columnName} by status
+                  Average {getHumanReadableFieldLabel(analytics.monthlyChargesComparison.columnName, { dataset, company })} by status
                 </p>
               </div>
               <AverageChargesBarChart
                 comparison={analytics.monthlyChargesComparison}
                 metricLabel={tmpl.revenueLabel}
+                dataset={dataset}
+                company={company}
               />
             </div>
           ) : (

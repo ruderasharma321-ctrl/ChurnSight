@@ -101,7 +101,10 @@ import {
   detectStatusColumnHints,
   resolveCustomerStatusRecord,
 } from './server/customerStatusEngine.ts';
-import { generateSampleIndustryCsv } from './server/sampleDataset.ts';
+import {
+  generateSampleIndustryBundle,
+  generateSampleIndustryCsv,
+} from './server/sampleDataset.ts';
 import { pgHealthCheck } from './server/database.ts';
 import {
   getPersistenceStatus,
@@ -1891,11 +1894,31 @@ export function createApiApp() {
       try {
         const company = getCompanyById(req.auth!.company.id) || req.auth!.company;
         const ws = getCompanyWorkspace(company.id);
-        const sample = generateSampleIndustryCsv(company.industry, 250);
-        const { headers, rows, sourceFormat } = parseSpreadsheetUpload({
+        const sample = generateSampleIndustryBundle(company.industry, 250);
+        const parsed = parseSpreadsheetUpload({
           fileName: sample.fileName,
           csvText: sample.csvText,
         });
+
+        let headers = parsed.headers;
+        let rows = parsed.rows;
+        let ticketAggregation: TicketAggregationSummary | null = null;
+        let ticketRows: Record<string, string>[] | undefined = undefined;
+
+        if (sample.ticketRows.length > 0) {
+          const merged = mergeTicketsIntoCustomerRows({
+            source: 'workbook_sheet',
+            customerHeaders: parsed.headers,
+            customerRows: parsed.rows,
+            ticketHeaders: sample.ticketHeaders,
+            ticketRows: sample.ticketRows,
+            idColumnHint: 'customer_id',
+          });
+          headers = merged.headers;
+          rows = merged.rows;
+          ticketAggregation = merged.summary;
+          ticketRows = sample.ticketRows;
+        }
 
         const confirmedChurnDef: ChurnDefinition = {
           ...(company.churnDefinition || buildDefaultChurnDefinition(company.industry)),
@@ -1903,12 +1926,30 @@ export function createApiApp() {
           confirmedAt: company.churnDefinition?.confirmedAt || new Date().toISOString(),
         };
 
-        const result = commitRowsIntoWorkspace(company, ws, {
-          fileName: sample.fileName,
-          sourceFormat,
+        const profiledCols = profileColumns(headers, rows);
+        const autoMapping = autoDetectMapping(profiledCols, rows, company.industry);
+        const rowValidation = validateCustomerImportRows({
           headers,
           rows,
+          mapping: autoMapping,
+          satisfactionScale: ws.satisfactionScale || company.satisfactionScale || '1-5',
+          ticketAggregation,
+        });
+
+        ws.uploadedDatasets = ws.uploadedDatasets.filter(
+          (entry) => !(entry.isSample && entry.fileName === sample.fileName)
+        );
+
+        const result = commitRowsIntoWorkspace(company, ws, {
+          fileName: sample.fileName,
+          sourceFormat: parsed.sourceFormat,
+          headers,
+          rows,
+          mapping: autoMapping,
           churnDefinition: confirmedChurnDef,
+          rowValidation,
+          ticketAggregation,
+          ticketRows,
           duplicateStrategy: 'replace',
           isSample: true,
         });

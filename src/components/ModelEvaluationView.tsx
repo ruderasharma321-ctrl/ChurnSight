@@ -1,4 +1,4 @@
-import React from 'react';
+import React, { useState } from 'react';
 import {
   Activity,
   AlertTriangle,
@@ -44,6 +44,7 @@ export const ModelEvaluationView: React.FC<ModelEvaluationViewProps> = ({
 }) => {
   const tmpl = getIndustryTemplate(company.industry, company.customIndustryName);
   const plan = getSubscriptionPlanSpec(company.subscriptionPlan);
+  const [showTechnicalDetails, setShowTechnicalDetails] = useState(false);
 
   const predictionsReady =
     Boolean(activeModel) && (automationStatus ? automationStatus.predictionAvailable : true);
@@ -103,6 +104,19 @@ export const ModelEvaluationView: React.FC<ModelEvaluationViewProps> = ({
   }
 
   const { confusionMatrix: cm } = activeModel;
+  const isAutomaticLeakageNotice = (msg: string) =>
+    /post-churn|post-outcome|target leakage|excluded from/i.test(msg);
+  const hasActionableRefreshNotice = Boolean(
+    automationStatus?.needsRefresh &&
+      automationStatus.refreshNotice &&
+      !isAutomaticLeakageNotice(automationStatus.refreshNotice)
+  );
+  const hasTechnicalAuditNotices = Boolean(
+    (activeModel.leakageWarnings && activeModel.leakageWarnings.length > 0) ||
+      (automationStatus?.needsRefresh &&
+        automationStatus.refreshNotice &&
+        isAutomaticLeakageNotice(automationStatus.refreshNotice))
+  );
 
   return (
     <div className="space-y-6">
@@ -183,27 +197,13 @@ export const ModelEvaluationView: React.FC<ModelEvaluationViewProps> = ({
         </div>
       )}
 
-      {/* Refresh Advisory or Data Preparation Note */}
-      {automationStatus?.needsRefresh && automationStatus.refreshNotice && (
+      {/* Actionable Refresh Advisory Only */}
+      {hasActionableRefreshNotice && automationStatus?.refreshNotice && (
         <div className="bg-amber-50 border border-amber-300 rounded-2xl p-4 flex items-start gap-3 text-xs text-amber-950">
           <AlertTriangle className="w-4 h-4 text-amber-700 shrink-0 mt-0.5" />
           <div className="space-y-1">
             <div className="font-bold">Model Refresh Advised</div>
             <p>{automationStatus.refreshNotice}</p>
-          </div>
-        </div>
-      )}
-
-      {activeModel.leakageWarnings && activeModel.leakageWarnings.length > 0 && (
-        <div className="bg-amber-50 border border-amber-300 rounded-2xl p-4 flex items-start gap-3 text-xs text-amber-950">
-          <AlertTriangle className="w-4 h-4 text-amber-700 shrink-0 mt-0.5" />
-          <div className="space-y-1">
-            <div className="font-bold">Data Quality &amp; Outcome Leakage Notice</div>
-            <ul className="list-disc pl-4 space-y-0.5">
-              {activeModel.leakageWarnings.map((w, i) => (
-                <li key={i}>{w}</li>
-              ))}
-            </ul>
           </div>
         </div>
       )}
@@ -291,34 +291,64 @@ export const ModelEvaluationView: React.FC<ModelEvaluationViewProps> = ({
         </div>
       </div>
 
-      {/* Baseline Comparison */}
-      <div className="bg-[#397BFF]/8 border border-[#397BFF]/25 rounded-2xl p-4 flex flex-col sm:flex-row sm:items-center sm:justify-between gap-4 text-xs text-[#15152F]">
-        <div className="flex items-center gap-3">
-          <Info className="w-4 h-4 text-[#397BFF] shrink-0" />
-          <div>
-            <strong>Validation Check:</strong> Sample churn rate{' '}
-            <span className="font-mono tabular-nums font-bold">
-              {activeModel.testChurnRate.toFixed(1)}%
-            </span>{' '}
-            · Naive baseline{' '}
-            <span className="font-mono tabular-nums font-bold">
-              {activeModel.majorityBaselineAccuracy.toFixed(1)}%
-            </span>{' '}
-            (0% recall) vs. active model{' '}
-            <span className="font-mono tabular-nums font-bold text-[#7655E8]">
-              {activeModel.recall.toFixed(1)}% recall
-            </span>
-            .
+      {/* Collapsed-by-default Technical Details & Studio Link */}
+      <div className="bg-white border border-purple-100/90 rounded-2xl p-4 space-y-3 text-xs text-[#15152F]">
+        <div className="flex flex-wrap items-center justify-between gap-3">
+          <div className="flex items-center gap-2 text-slate-600">
+            <Info className="w-4 h-4 text-[#397BFF] shrink-0" />
+            <span>Technical validation metrics &amp; target leakage protection</span>
+          </div>
+          <div className="flex flex-wrap items-center gap-2">
+            <button
+              type="button"
+              onClick={() => setShowTechnicalDetails((prev) => !prev)}
+              className="px-3 py-1.5 rounded-xl border border-purple-200 bg-[#F5F3FF]/60 hover:bg-[#F5F3FF] text-xs font-semibold text-[#5B3AD6] cursor-pointer whitespace-nowrap"
+            >
+              {showTechnicalDetails ? 'Hide Details' : 'View Details'}
+            </button>
+            <button
+              type="button"
+              onClick={() => onNavigate('technical')}
+              className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-xl bg-white border border-purple-200 hover:bg-[#F5F3FF] text-xs font-semibold text-[#11142B] shrink-0 cursor-pointer whitespace-nowrap"
+            >
+              <SlidersHorizontal className="w-3.5 h-3.5 text-[#7655E8]" />
+              <span>Technical Studio</span>
+            </button>
           </div>
         </div>
-        <button
-          type="button"
-          onClick={() => onNavigate('technical')}
-          className="inline-flex items-center gap-1.5 px-3.5 py-2 rounded-xl bg-white border border-purple-200 hover:bg-[#F5F3FF] text-xs font-semibold text-[#11142B] shrink-0 cursor-pointer whitespace-nowrap"
-        >
-          <SlidersHorizontal className="w-3.5 h-3.5 text-[#7655E8]" />
-          <span>Inspect in Technical Studio</span>
-        </button>
+
+        {showTechnicalDetails && (
+          <div className="pt-3 border-t border-purple-100 space-y-2.5 text-xs">
+            <div className="rounded-xl bg-[#397BFF]/8 border border-[#397BFF]/20 px-3.5 py-2.5">
+              <strong>Validation Check:</strong> Sample churn rate{' '}
+              <span className="font-mono tabular-nums font-bold">
+                {activeModel.testChurnRate.toFixed(1)}%
+              </span>{' '}
+              · Naive baseline{' '}
+              <span className="font-mono tabular-nums font-bold">
+                {activeModel.majorityBaselineAccuracy.toFixed(1)}%
+              </span>{' '}
+              (0% recall) vs. active model{' '}
+              <span className="font-mono tabular-nums font-bold text-[#7655E8]">
+                {activeModel.recall.toFixed(1)}% recall
+              </span>
+              .
+            </div>
+            {hasTechnicalAuditNotices && (
+              <div className="rounded-xl bg-[#F5F3FF] border border-purple-200/80 px-3.5 py-2.5 space-y-1 text-slate-700">
+                <div className="font-bold text-[#15152F]">Excluded Columns &amp; Leakage Protection</div>
+                {automationStatus?.needsRefresh &&
+                  automationStatus.refreshNotice &&
+                  isAutomaticLeakageNotice(automationStatus.refreshNotice) && (
+                    <p>{automationStatus.refreshNotice}</p>
+                  )}
+                {activeModel.leakageWarnings?.map((w, i) => (
+                  <p key={i}>{w}</p>
+                ))}
+              </div>
+            )}
+          </div>
+        )}
       </div>
 
       {/* Customer Outcomes Breakdown & Top Retention Drivers */}
@@ -398,7 +428,7 @@ export const ModelEvaluationView: React.FC<ModelEvaluationViewProps> = ({
               Customer attributes showing the strongest statistical link with retention or churn
             </p>
           </div>
-          <FeatureImportanceChart importances={activeModel.featureImportances} />
+          <FeatureImportanceChart importances={activeModel.featureImportances} company={company} />
         </div>
       </div>
     </div>

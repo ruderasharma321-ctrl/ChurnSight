@@ -15,6 +15,12 @@ import {
   PredictionPipelineStatus,
 } from '../types/churn';
 import { deriveCustomerIntelligence, InsightTone } from '../utils/churnIntelligence';
+import {
+  formatAttributeValue,
+  formatDuration,
+  formatReadableDate,
+  getHumanReadableFieldLabel,
+} from '../utils/formatters';
 import { getIndustryTemplate } from '../utils/industryConfig';
 import { PredictionPipelineBanner } from './PredictionPipelineBanner';
 
@@ -81,6 +87,8 @@ export const CustomerIntelligenceView: React.FC<CustomerIntelligenceViewProps> =
 }) => {
   const tmpl = getIndustryTemplate(company.industry, company.customIndustryName);
 
+  const fmtCtx = useMemo(() => ({ dataset, company }), [dataset, company]);
+
   const insights = useMemo(() => {
     if (!dataset || !analytics) return [];
     return deriveCustomerIntelligence(
@@ -88,9 +96,10 @@ export const CustomerIntelligenceView: React.FC<CustomerIntelligenceViewProps> =
       analytics,
       activeModel,
       company.industry,
-      company.customIndustryName
+      company.customIndustryName,
+      company
     );
-  }, [dataset, analytics, activeModel, company.industry, company.customIndustryName]);
+  }, [dataset, analytics, activeModel, company]);
 
   const highRiskAccounts = useMemo(() => {
     if (!activeModel) return [];
@@ -289,7 +298,10 @@ export const CustomerIntelligenceView: React.FC<CustomerIntelligenceViewProps> =
                 {highRiskAccounts.map((acct) => {
                   const previewAttrs = Object.entries(acct.attributes)
                     .slice(0, 3)
-                    .map(([k, v]) => `${k}: ${v}`)
+                    .map(
+                      ([k, v]) =>
+                        `${getHumanReadableFieldLabel(k, fmtCtx)}: ${formatAttributeValue(k, v, fmtCtx)}`
+                    )
                     .join(' · ');
                   return (
                     <tr key={`${acct.rowIndex}-${acct.customerId}`} className="hover:bg-[#F5F3FF]/50">
@@ -353,13 +365,19 @@ export const CustomerIntelligenceView: React.FC<CustomerIntelligenceViewProps> =
                         {item.customerId}
                       </td>
                       <td className="py-2 px-3 font-mono text-slate-600">
-                        {item.lastDate || '—'}
+                        {formatReadableDate(item.lastDate)}
                       </td>
                       <td className="py-2 px-3 text-right font-mono tabular-nums text-[#D97706] font-semibold">
-                        {item.daysSinceActivity !== null ? `${item.daysSinceActivity}d` : '—'}
+                        {item.daysSinceActivity !== null
+                          ? formatDuration(item.daysSinceActivity, 'day')
+                          : '—'}
                       </td>
                       <td className="py-2 px-3 text-right font-mono tabular-nums text-slate-700">
-                        {item.engagementValue ?? '—'}
+                        {formatAttributeValue(
+                          dataset.mapping.frequencyColumn || 'engagement_score',
+                          item.engagementValue,
+                          fmtCtx
+                        )}
                       </td>
                       <td className="py-2 pl-3 text-slate-600">{item.reason}</td>
                     </tr>

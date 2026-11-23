@@ -32,6 +32,7 @@ import {
   ValueSegmentTier,
 } from '../types/churn';
 import { apiFetch, downloadProtectedCsv } from '../utils/apiClient';
+import { formatCurrencyUSD, formatScore } from '../utils/formatters';
 import { DashboardLoadingSkeleton } from './PremiumUI';
 
 interface CustomerValueViewProps {
@@ -57,8 +58,7 @@ const QUADRANT_COLORS: Record<ValueMatrixQuadrant, string> = {
 };
 
 function formatCurrency(val: number | null | undefined): string {
-  if (val === null || val === undefined || !Number.isFinite(val)) return 'Unavailable';
-  return `$${val.toLocaleString(undefined, { maximumFractionDigits: 0 })}`;
+  return formatCurrencyUSD(val, { fallback: 'Unavailable' });
 }
 
 export const CustomerValueView: React.FC<CustomerValueViewProps> = ({
@@ -694,7 +694,7 @@ export const CustomerValueView: React.FC<CustomerValueViewProps> = ({
                             <div className="font-bold text-[#11142B]">{pt.customerId}</div>
                             <div className="text-slate-600 mt-0.5">{pt.quadrantLabel}</div>
                             <div className="font-mono tabular-nums mt-1 text-[#11142B]">
-                              Value: {pt.valueScore} · Risk: {pt.churnRiskPct}%
+                              Value Score: {formatScore(pt.valueScore, '0-100')} · Churn Risk: {pt.churnRiskPct}%
                             </div>
                           </div>
                         );
@@ -906,7 +906,7 @@ export const CustomerValueView: React.FC<CustomerValueViewProps> = ({
                     </td>
                     <td className="py-3 px-4 text-slate-700">{c.segment}</td>
                     <td className="py-3 px-4 text-right font-mono tabular-nums font-bold text-[#11142B]">
-                      {c.valueScore.toFixed(1)}
+                      {formatScore(c.valueScore, '0-100')}
                     </td>
                     <td className="py-3 px-4 font-medium text-[#11142B]">{c.valueSegment}</td>
                     <td className="py-3 px-4 text-right font-mono tabular-nums text-slate-700">
@@ -999,7 +999,7 @@ export const CustomerValueView: React.FC<CustomerValueViewProps> = ({
               <div className="p-3 rounded-xl bg-[#F5F3FF]/60 border border-purple-100">
                 <div className="text-slate-500">Composite Score</div>
                 <div className="text-lg font-bold font-mono tabular-nums text-[#7655E8] mt-1">
-                  {selectedCustomer.valueScore.toFixed(1)} / 100
+                  {formatScore(selectedCustomer.valueScore, '0-100')}
                 </div>
               </div>
               <div className="p-3 rounded-xl bg-[#F5F3FF]/60 border border-purple-100">

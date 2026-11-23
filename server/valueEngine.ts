@@ -22,6 +22,12 @@ import {
   detectStatusColumnHints,
   resolveCustomerStatusRecord,
 } from './customerStatusEngine.ts';
+import {
+  formatCurrencyUSD,
+  formatDuration,
+  formatPercentage,
+  formatScore,
+} from '../src/utils/formatters.ts';
 
 export const DEFAULT_CUSTOMER_VALUE_CONFIG: CustomerValueConfig = {
   weights: {
@@ -756,27 +762,33 @@ export function computeCustomerValueIntelligence(params: {
         score: revenuePct[idx],
         rawDisplay:
           displayRevenues[idx].value !== null
-            ? `$${displayRevenues[idx].value!.toLocaleString(undefined, { maximumFractionDigits: 2 })}`
-            : 'N/A',
+            ? formatCurrencyUSD(displayRevenues[idx].value!)
+            : 'Unavailable',
       },
       {
         key: 'frequency',
         label: 'Purchase / Usage Frequency',
         score: frequencyPct[idx],
-        rawDisplay: frequencyMetric[idx] !== null ? String(frequencyMetric[idx]) : 'N/A',
+        rawDisplay:
+          frequencyMetric[idx] !== null
+            ? frequencyMetric[idx]!.toLocaleString('en-US', { maximumFractionDigits: 2 })
+            : 'Unavailable',
       },
       {
         key: 'tenure',
         label: 'Customer Lifetime',
         score: tenurePct[idx],
-        rawDisplay: tenureMetric[idx] !== null ? `${tenureMetric[idx]} mo` : 'N/A',
+        rawDisplay:
+          tenureMetric[idx] !== null ? formatDuration(tenureMetric[idx]!, 'month') : 'Unavailable',
       },
       {
         key: 'paymentHealth',
         label: 'Payment Reliability',
         score: paymentHealthMetric[idx],
         rawDisplay:
-          paymentHealthMetric[idx] !== null ? `${paymentHealthMetric[idx]!.toFixed(0)}/100` : 'N/A',
+          paymentHealthMetric[idx] !== null
+            ? formatScore(Number(paymentHealthMetric[idx]!.toFixed(0)), '0-100')
+            : 'Unavailable',
       },
       {
         key: 'profit',
@@ -784,14 +796,15 @@ export function computeCustomerValueIntelligence(params: {
         score: profitPct[idx],
         rawDisplay:
           profitMetric[idx] !== null
-            ? `$${profitMetric[idx]!.toLocaleString(undefined, { maximumFractionDigits: 2 })}`
+            ? formatCurrencyUSD(profitMetric[idx]!)
             : 'Unavailable',
       },
       {
         key: 'growth',
         label: 'Spending Growth',
         score: growthPct[idx],
-        rawDisplay: growthMetric[idx] !== null ? `${growthMetric[idx]}%` : 'N/A',
+        rawDisplay:
+          growthMetric[idx] !== null ? formatPercentage(growthMetric[idx]!, 1) : 'Unavailable',
       },
     ];
 
@@ -1170,7 +1183,7 @@ export function computeCustomerValueIntelligence(params: {
         affectedCustomers: criticalGroup.length,
         estimatedRevenueAtRisk: critRev,
         evidence: `${criticalGroup.length} top-tier accounts exceed ${(config.highRiskCutoff * 100).toFixed(0)}% estimated churn probability${
-          critRev !== null ? `, representing $${critRev.toLocaleString()} in annualized revenue associated with elevated churn risk` : ''
+          critRev !== null ? `, representing ${formatCurrencyUSD(critRev)} in annualized revenue associated with elevated churn risk` : ''
         }.`,
         recommendedAction:
           'Assign executive or account-manager review calls within 7 days, resolve open support escalations first, and test tailored renewal terms. Outcomes should be tracked as outreach responses are recorded.',

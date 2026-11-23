@@ -174,7 +174,7 @@ export const ReportsView: React.FC<ReportsViewProps> = ({
             <p className="text-xs text-slate-600 leading-relaxed">
               {activeModel
                 ? `Exports ${activeModel.predictions.length.toLocaleString()} scored ${tmpl.entityPlural.toLowerCase()} ranked with churn probabilities and risk tiers.`
-                : 'Available once your prediction model finishes validation checks and activates predictions.'}
+                : 'Available once a prediction model is built and active.'}
             </p>
           </div>
           <div className="flex flex-wrap items-center gap-2.5 pt-2 border-t border-purple-100">
@@ -242,8 +242,8 @@ export const ReportsView: React.FC<ReportsViewProps> = ({
               Data Preparation &amp; Schema Audit
             </h2>
             <p className="text-xs text-slate-600 leading-relaxed">
-              Exports column types, semantic mappings, missing cell counts, and unique value
-              coverage across {dataset.columnCount} columns in {dataset.fileName}.
+              Exports column types, field mappings, and data quality stats for {dataset.fileName} (
+              {dataset.columnCount} columns).
             </p>
           </div>
           <div className="flex flex-wrap items-center gap-2.5 pt-2 border-t border-purple-100">

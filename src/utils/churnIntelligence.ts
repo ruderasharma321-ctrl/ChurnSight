@@ -1,10 +1,19 @@
 import {
   AnalyticsSummary,
   CategoryChurnStat,
+  CompanyWorkspaceInfo,
   DatasetState,
   IndustryKey,
   ModelEvaluationResult,
 } from '../types/churn';
+import {
+  formatAttributeValue,
+  formatCurrencyUSD,
+  formatDuration,
+  formatFeatureDisplayName,
+  formatScore,
+  getHumanReadableFieldLabel,
+} from './formatters';
 import { getIndustryTemplate } from './industryConfig';
 
 export type InsightTone = 'danger' | 'purple' | 'blue' | 'cyan' | 'emerald';
@@ -42,11 +51,13 @@ export function deriveCustomerIntelligence(
   analytics: AnalyticsSummary,
   activeModel: ModelEvaluationResult | null,
   industry?: IndustryKey,
-  customIndustryName?: string | null
+  customIndustryName?: string | null,
+  company?: Pick<CompanyWorkspaceInfo, 'industry' | 'satisfactionScale'> | null
 ): CustomerIntelligenceInsight[] {
   const insights: CustomerIntelligenceInsight[] = [];
   const tmpl = getIndustryTemplate(industry, customIndustryName);
   const entityLower = tmpl.entityPlural.toLowerCase();
+  const fmtCtx = { dataset, company: company || (industry ? { industry } : undefined) };
 
   // Cold-start / Unlabeled Dataset Intelligence Mode
   if (analytics.isUnlabeledColdStart || dataset.hasValidChurnLabels === false) {
@@ -96,7 +107,7 @@ export function deriveCustomerIntelligence(
             ? `${bm.inactivityWatchlistCount.toLocaleString()} Inactive / Quiet ${tmpl.entityPlural} Flagged`
             : 'All Monitored Accounts Within Normal Activity Window',
         statLabel: bm.inactivityThresholdDays
-          ? `Threshold (${bm.inactivityThresholdDays}d)`
+          ? `Threshold (${formatDuration(bm.inactivityThresholdDays, 'day')})`
           : 'Low-Engagement Accounts',
         statValue:
           bm.inactivityWatchlistCount > 0
@@ -115,13 +126,15 @@ export function deriveCustomerIntelligence(
     // 3. Value / Spend Baseline
     if (analytics.monthlyChargesComparison) {
       const mc = analytics.monthlyChargesComparison;
+      const colLabel = getHumanReadableFieldLabel(mc.columnName, fmtCtx);
+      const meanUsd = formatCurrencyUSD(mc.overallAvg);
       insights.push({
         id: 'cold-start-revenue',
         category: tmpl.revenueLabel,
-        title: `Active Portfolio Mean: $${mc.overallAvg.toFixed(2)}`,
-        statLabel: `Mean ${mc.columnName}`,
-        statValue: `$${mc.overallAvg.toFixed(2)}`,
-        explanation: `Across ${total.toLocaleString()} monitored ${entityLower}, average "${mc.columnName}" is $${mc.overallAvg.toFixed(2)}. Once historical outcomes accumulate, ChurnSight will compare retained vs. churned spend directly.`,
+        title: `Active Portfolio Mean: ${meanUsd}`,
+        statLabel: `Mean ${colLabel}`,
+        statValue: meanUsd,
+        explanation: `Across ${total.toLocaleString()} monitored ${entityLower}, average ${colLabel} is ${meanUsd}. Once historical outcomes accumulate, ChurnSight will compare retained vs. churned spend directly.`,
         recommendation: `Focus proactive retention check-ins on high-value accounts showing declining ${tmpl.frequencyLabel.toLowerCase()} or approaching renewal.`,
         tone: 'blue',
         meterPercent: 68,
@@ -137,7 +150,7 @@ export function deriveCustomerIntelligence(
         ? 'Prediction Ready'
         : 'Accumulating Observed Churn Outcomes',
       statLabel: 'Data Readiness Score',
-      statValue: `${readiness?.readinessScore ?? 55}/100`,
+      statValue: formatScore(readiness?.readinessScore ?? 55, '0-100'),
       explanation:
         readiness?.predictionReady.blockers[0] ||
         dataset.churnReadinessMessage ||
@@ -166,11 +179,12 @@ export function deriveCustomerIntelligence(
 
   if (topSegment) {
     const { dimension, stat } = topSegment;
+    const dimLabel = getHumanReadableFieldLabel(dimension, fmtCtx);
     const rateReliable = analytics.historicalPerformance?.historicalRateReliable !== false;
     insights.push({
       id: 'highest-risk-group',
       category: 'Highest Historical Churn Segment',
-      title: `${dimension}: "${stat.category}"`,
+      title: `${dimLabel}: "${stat.category}"`,
       statLabel: 'Segment Historical Churn',
       statValue: `${stat.churnRate.toFixed(1)}%`,
       explanation: rateReliable
@@ -180,7 +194,7 @@ export function deriveCustomerIntelligence(
               : `${(analytics.churnRate - stat.churnRate).toFixed(1)} pts below`
           } the ${analytics.churnRate.toFixed(1)}% historical average.`
         : `${stat.churned.toLocaleString()} of ${stat.total.toLocaleString()} ${entityLower} in "${stat.category}" have recorded churned status.`,
-      recommendation: `Prioritise proactive retention campaigns and onboarding check-ins for active ${dimension} = "${stat.category}" accounts.`,
+      recommendation: `Prioritise proactive retention campaigns and onboarding check-ins for active ${dimLabel} = "${stat.category}" accounts.`,
       tone: 'danger',
       meterPercent: Math.min(100, Math.max(8, stat.churnRate)),
     });
@@ -235,23 +249,30 @@ export function deriveCustomerIntelligence(
   // 4. Engagement Frequency or Payment Method or Revenue Signal
   if (analytics.frequencyComparison) {
     const fc = analytics.frequencyComparison;
+    const colLabel = getHumanReadableFieldLabel(fc.columnName, fmtCtx);
     const diff = fc.stayedAvg - fc.churnedAvg;
     insights.push({
       id: 'frequency-signal',
       category: tmpl.frequencyLabel,
       title:
         diff >= 0
-          ? `Higher ${fc.columnName} Correlates with Retention`
-          : `Churned Accounts Show Elevated ${fc.columnName}`,
+          ? `Higher ${colLabel} Correlates with Retention`
+          : `Churned Accounts Show Elevated ${colLabel}`,
       statLabel: 'Retained vs Churned Mean',
-      statValue: `${fc.stayedAvg.toFixed(1)} vs ${fc.churnedAvg.toFixed(1)}`,
-      explanation: `Retained ${entityLower} averaged ${fc.stayedAvg.toFixed(
-        2
-      )} on "${fc.columnName}" compared with ${fc.churnedAvg.toFixed(2)} among churned records.`,
+      statValue: `${formatAttributeValue(fc.columnName, fc.stayedAvg, fmtCtx)} vs ${formatAttributeValue(fc.columnName, fc.churnedAvg, fmtCtx)}`,
+      explanation: `Retained ${entityLower} averaged ${formatAttributeValue(
+        fc.columnName,
+        fc.stayedAvg,
+        fmtCtx
+      )} on ${colLabel} compared with ${formatAttributeValue(
+        fc.columnName,
+        fc.churnedAvg,
+        fmtCtx
+      )} among churned records.`,
       recommendation:
         diff >= 0
-          ? `Monitor drops in ${fc.columnName} as an early warning signal to trigger automated outreach.`
-          : `Investigate friction spikes in "${fc.columnName}" driving elevated attrition.`,
+          ? `Monitor drops in ${colLabel} as an early warning signal to trigger automated outreach.`
+          : `Investigate friction spikes in ${colLabel} driving elevated attrition.`,
       tone: 'cyan',
       meterPercent: Math.min(100, Math.max(15, fc.stayedAvg > 0 ? (fc.churnedAvg / fc.stayedAvg) * 75 : 50)),
     });
@@ -277,19 +298,20 @@ export function deriveCustomerIntelligence(
     }
   } else if (analytics.monthlyChargesComparison) {
     const mc = analytics.monthlyChargesComparison;
+    const colLabel = getHumanReadableFieldLabel(mc.columnName, fmtCtx);
     const delta = mc.churnedAvg - mc.stayedAvg;
     insights.push({
       id: 'monthly-charges',
       category: tmpl.revenueLabel,
       title:
         delta >= 0
-          ? `Churned Accounts Carry Higher ${mc.columnName}`
-          : `Lower-${mc.columnName} Accounts Churn More Often`,
+          ? `Churned Accounts Carry Higher ${colLabel}`
+          : `Lower-${colLabel} Accounts Churn More Often`,
       statLabel: 'Mean Value Delta',
-      statValue: `${delta >= 0 ? '+' : '-'}$${Math.abs(delta).toFixed(2)}`,
-      explanation: `Churned ${entityLower} averaged $${mc.churnedAvg.toFixed(
-        2
-      )} versus $${mc.stayedAvg.toFixed(2)} among retained ${entityLower} across ${dataset.rowCount.toLocaleString()} records.`,
+      statValue: `${delta >= 0 ? '+' : '-'}${formatCurrencyUSD(Math.abs(delta))}`,
+      explanation: `Churned ${entityLower} averaged ${formatCurrencyUSD(
+        mc.churnedAvg
+      )} versus ${formatCurrencyUSD(mc.stayedAvg)} among retained ${entityLower} across ${dataset.rowCount.toLocaleString()} records.`,
       recommendation:
         delta >= 0
           ? `Review pricing perception and value delivery for higher ${tmpl.revenueLabel} cohorts.`
@@ -321,34 +343,34 @@ export function deriveCustomerIntelligence(
         p.riskCategory === 'Higher Estimated Churn Risk'
     ).length;
 
+    const topDriverLabel = formatFeatureDisplayName(topDriver.feature, fmtCtx);
     insights.push({
       id: 'ml-retention-opportunity',
       category: 'ML Retention Opportunity',
-      title: `Top Driver: ${topDriver.feature}`,
-      statLabel: 'Model Feature Share',
+      title: `Top Driver: ${topDriverLabel}`,
+      statLabel: 'Impact Share',
       statValue: `${topDriver.importance.toFixed(1)}%`,
       explanation: `${activeModel.modelName} (${activeModel.version}, ${activeModel.accuracy.toFixed(
         1
-      )}% test accuracy) identifies "${topDriver.feature}" as a primary predictor and flags ${highRiskCount.toLocaleString()} active higher-risk ${entityLower}.`,
+      )}% test accuracy) identifies "${topDriverLabel}" as a primary predictor and flags ${highRiskCount.toLocaleString()} active higher-risk ${entityLower}.`,
       recommendation: `Target the ${highRiskCount.toLocaleString()} active higher-risk accounts identified by the trained model with tailored retention workflows.`,
       tone: 'emerald',
       meterPercent: Math.min(100, Math.max(12, topDriver.importance)),
     });
   } else if (analytics.monthlyChargesComparison) {
     const mc = analytics.monthlyChargesComparison;
+    const colLabel = getHumanReadableFieldLabel(mc.columnName, fmtCtx);
     const retentionRate = analytics.stayedPercentage;
     const atRiskRevenueEstimate = analytics.churnedCount * mc.churnedAvg;
     insights.push({
       id: 'retention-opportunity',
       category: 'Retention Opportunity',
-      title: `Churned ${tmpl.revenueLabel} Impact: $${atRiskRevenueEstimate.toLocaleString(undefined, { maximumFractionDigits: 0 })}`,
+      title: `Churned ${tmpl.revenueLabel} Impact: ${formatCurrencyUSD(atRiskRevenueEstimate)}`,
       statLabel: 'Current Retention Rate',
       statValue: `${retentionRate.toFixed(1)}%`,
-      explanation: `${analytics.churnedCount.toLocaleString()} churned ${entityLower} averaged $${mc.churnedAvg.toFixed(
-        2
-      )} on "${mc.columnName}", representing $${atRiskRevenueEstimate.toLocaleString(undefined, {
-        maximumFractionDigits: 0,
-      })} in historical churned value.`,
+      explanation: `${analytics.churnedCount.toLocaleString()} churned ${entityLower} averaged ${formatCurrencyUSD(
+        mc.churnedAvg
+      )} on ${colLabel}, representing ${formatCurrencyUSD(atRiskRevenueEstimate)} in historical churned value.`,
       recommendation:
         'Train Logistic Regression, Decision Tree, or Random Forest in Churn Prediction to score account-level risk probabilities.',
       tone: 'emerald',
@@ -363,19 +385,24 @@ export function deriveCustomerIntelligence(
   );
   if (satComp && satComp.stayedAvg !== satComp.churnedAvg) {
     const gap = satComp.stayedAvg - satComp.churnedAvg;
+    const colLabel = getHumanReadableFieldLabel(satComp.column, fmtCtx);
     insights.push({
       id: 'satisfaction-gap-signal',
       category: 'Customer Satisfaction',
       title:
         gap > 0
-          ? `Lower "${satComp.column}" Linked to Churn`
-          : `"${satComp.column}" Variance Across Outcomes`,
+          ? `Lower ${colLabel} Linked to Churn`
+          : `${colLabel} Variance Across Outcomes`,
       statLabel: 'Retained vs Churned Mean',
-      statValue: `${satComp.stayedAvg.toFixed(1)} vs ${satComp.churnedAvg.toFixed(1)}`,
-      explanation: `Retained ${entityLower} averaged ${satComp.stayedAvg.toFixed(
-        2
-      )} on "${satComp.column}", compared with ${satComp.churnedAvg.toFixed(
-        2
+      statValue: `${formatAttributeValue(satComp.column, Number(satComp.stayedAvg.toFixed(1)), fmtCtx)} vs ${formatAttributeValue(satComp.column, Number(satComp.churnedAvg.toFixed(1)), fmtCtx)}`,
+      explanation: `Retained ${entityLower} averaged ${formatAttributeValue(
+        satComp.column,
+        Number(satComp.stayedAvg.toFixed(1)),
+        fmtCtx
+      )} on ${colLabel}, compared with ${formatAttributeValue(
+        satComp.column,
+        Number(satComp.churnedAvg.toFixed(1)),
+        fmtCtx
       )} among churned ${entityLower}.`,
       recommendation:
         'Trigger proactive account reviews immediately whenever satisfaction survey responses dip below your workspace baseline.',
@@ -390,16 +417,21 @@ export function deriveCustomerIntelligence(
     )
   );
   if (frictionComp && frictionComp.churnedAvg > frictionComp.stayedAvg) {
+    const colLabel = getHumanReadableFieldLabel(frictionComp.column, fmtCtx);
     insights.push({
       id: 'service-friction-signal',
       category: 'Complaints & Support Friction',
-      title: `Elevated "${frictionComp.column}" Precedes Attrition`,
+      title: `Elevated ${colLabel} Precedes Attrition`,
       statLabel: 'Churned vs Retained Mean',
-      statValue: `${frictionComp.churnedAvg.toFixed(1)} vs ${frictionComp.stayedAvg.toFixed(1)}`,
-      explanation: `Churned ${entityLower} logged an average of ${frictionComp.churnedAvg.toFixed(
-        2
-      )} on "${frictionComp.column}", compared with ${frictionComp.stayedAvg.toFixed(
-        2
+      statValue: `${formatAttributeValue(frictionComp.column, Number(frictionComp.churnedAvg.toFixed(1)), fmtCtx)} vs ${formatAttributeValue(frictionComp.column, Number(frictionComp.stayedAvg.toFixed(1)), fmtCtx)}`,
+      explanation: `Churned ${entityLower} logged an average of ${formatAttributeValue(
+        frictionComp.column,
+        Number(frictionComp.churnedAvg.toFixed(1)),
+        fmtCtx
+      )} on ${colLabel}, compared with ${formatAttributeValue(
+        frictionComp.column,
+        Number(frictionComp.stayedAvg.toFixed(1)),
+        fmtCtx
       )} for retained ${entityLower}.`,
       recommendation:
         'Escalate accounts with repeat complaints or open unresolved tickets to priority SLA resolution queues.',

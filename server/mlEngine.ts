@@ -854,6 +854,7 @@ export function autoDetectMapping(
         c.name !== targetColumn &&
         c.name !== idColumn &&
         c.name !== churnDateColumn &&
+        !(targetColumn && c.name === statusColumn) &&
         c.dataType !== 'identifier' &&
         c.dataType !== 'date' &&
         !looksLikeLeakageColumn(c.name)
@@ -2752,6 +2753,7 @@ export function trainAndEvaluateModel(
       c.name !== mapping.targetColumn &&
       c.name !== mapping.idColumn &&
       c.name !== mapping.churnDateColumn &&
+      !(mapping.targetColumn && c.name === mapping.statusColumn) &&
       (c.dataType === 'numeric' || c.dataType === 'categorical') &&
       !looksLikeLeakageColumn(colName)
     );

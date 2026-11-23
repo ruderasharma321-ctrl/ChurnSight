@@ -41,6 +41,14 @@ import {
 } from '../types/churn';
 import { apiFetch, downloadProtectedCsv } from '../utils/apiClient';
 import {
+  formatAttributeValue,
+  formatCurrencyUSD,
+  formatDuration,
+  formatReadableDate,
+  formatScore,
+  getHumanReadableFieldLabel,
+} from '../utils/formatters';
+import {
   CALCULATION_METHOD_OPTIONS,
   CHURN_TRIGGER_OPTIONS,
   DENOMINATOR_OPTIONS,
@@ -246,6 +254,24 @@ function readFileAsBase64(file: File): Promise<string> {
   });
 }
 
+function isTechnicalValidationInfo(message: string): boolean {
+  const lower = message.toLowerCase();
+  return (
+    lower.includes('missing value') ||
+    lower.includes('imputed using') ||
+    lower.includes('treated as missing') ||
+    lower.includes('post-outcome') ||
+    lower.includes('automatically excluded') ||
+    lower.includes('target leakage') ||
+    lower.includes('resembles a post-churn or leakage') ||
+    lower.includes('ticket_data sheet validated separately') ||
+    lower.includes('inconsistent casing or trailing spaces') ||
+    lower.includes('treated as churned and other non-empty values') ||
+    lower.includes('minor warnings') ||
+    lower.includes('remain eligible for stratified validation')
+  );
+}
+
 export const CustomerDataView: React.FC<CustomerDataViewProps> = ({
   company,
   dataset,
@@ -316,6 +342,13 @@ export const CustomerDataView: React.FC<CustomerDataViewProps> = ({
   // Staged import review states
   const [stagedMapping, setStagedMapping] = useState<ColumnMapping | null>(null);
   const [stagedChurnDef, setStagedChurnDef] = useState<ChurnDefinition | null>(null);
+  const [showPreDefOptionalHints, setShowPreDefOptionalHints] = useState(false);
+  const [showStagedValidationDetails, setShowStagedValidationDetails] = useState(false);
+  const [showStagedAdvancedMapping, setShowStagedAdvancedMapping] = useState(false);
+  const [showStagedChurnOptionalHints, setShowStagedChurnOptionalHints] = useState(false);
+  const [showStagedMappingRationales, setShowStagedMappingRationales] = useState(false);
+  const [showPostUploadValidationDetails, setShowPostUploadValidationDetails] = useState(false);
+  const [showPostAdvancedMapping, setShowPostAdvancedMapping] = useState(false);
 
   // Paginated table state
   const [rows, setRows] = useState<Record<string, string>[]>([]);
@@ -713,7 +746,7 @@ export const CustomerDataView: React.FC<CustomerDataViewProps> = ({
               Data Management
             </h1>
             <p className="text-sm text-slate-600">
-              Import Excel or CSV datasets, validate quality, and manage uploaded files for {company.name}.
+              Upload Excel or CSV files and manage datasets for {company.name}.
             </p>
           </div>
           {canUploadAndAnalyse && (
@@ -808,11 +841,6 @@ export const CustomerDataView: React.FC<CustomerDataViewProps> = ({
               </button>
             )}
           </div>
-
-          <p className="text-xs text-slate-500">
-            Single Excel workbook with <span className="font-mono font-semibold text-[#15152F]">Customer_Data</span> and{' '}
-            <span className="font-mono font-semibold text-[#15152F]">Ticket_Data</span> sheets (<span className="font-mono">.csv</span> also supported).
-          </p>
         </div>
       </section>
 
@@ -891,7 +919,7 @@ export const CustomerDataView: React.FC<CustomerDataViewProps> = ({
                         </div>
                       </td>
                       <td className="py-2.5 px-4 font-mono tabular-nums text-slate-600 whitespace-nowrap">
-                        {new Date(dsItem.uploadedAt).toLocaleString()}
+                        {formatReadableDate(dsItem.uploadedAt, { includeTime: true })}
                       </td>
                       <td className="py-2.5 px-4 text-right font-mono tabular-nums font-semibold text-[#15152F] whitespace-nowrap">
                         {dsItem.uploadMode === 'tickets'
@@ -953,7 +981,7 @@ export const CustomerDataView: React.FC<CustomerDataViewProps> = ({
               Satisfaction Score Scale
             </h2>
             <p className="text-xs text-slate-500">
-              Validation range for CSAT/NPS columns ({selectedScaleSpec.rangeHint}).
+              Expected scale for CSAT/NPS columns ({selectedScaleSpec.rangeHint}).
             </p>
           </div>
 
@@ -987,7 +1015,7 @@ export const CustomerDataView: React.FC<CustomerDataViewProps> = ({
               Upload Mode
             </h2>
             <p className="text-xs text-slate-500">
-              Import primary customer accounts or enrich with standalone support tickets.
+              Choose customer accounts or support ticket history.
             </p>
           </div>
 
@@ -1057,11 +1085,10 @@ export const CustomerDataView: React.FC<CustomerDataViewProps> = ({
               )}
             </div>
             <h2 className="text-sm sm:text-base font-bold text-[#15152F]">
-              What does churn mean for {company.name}?
+              Churn Definition
             </h2>
-            <p className="text-xs text-slate-600">
-              {company.customerRelationshipType || tmpl.label} · Inactivity is never assumed to
-              equal churn unless you explicitly configure an inactivity window below.
+            <p className="text-xs text-slate-500">
+              Configure how churn is measured for {company.name}.
             </p>
           </div>
 
@@ -1070,7 +1097,7 @@ export const CustomerDataView: React.FC<CustomerDataViewProps> = ({
             onClick={() => setShowPreDefEditor((prev) => !prev)}
             className="px-3.5 py-1.5 rounded-xl border border-purple-200 bg-[#F5F3FF] hover:bg-purple-100 text-xs font-semibold text-[#5B3AD6] cursor-pointer self-start sm:self-auto whitespace-nowrap"
           >
-            {showPreDefEditor ? 'Hide Churn Rule Editor' : 'Edit Churn Definition'}
+            {showPreDefEditor ? 'Hide Settings' : 'Configure Rules'}
           </button>
         </div>
 
@@ -1085,7 +1112,7 @@ export const CustomerDataView: React.FC<CustomerDataViewProps> = ({
             <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-3.5">
               <div>
                 <label className="block text-xs font-semibold text-[#4C4A6E] mb-1">
-                  Churn Trigger Event
+                  Churn Trigger
                 </label>
                 <select
                   value={preUploadChurnDef.triggerType}
@@ -1130,7 +1157,7 @@ export const CustomerDataView: React.FC<CustomerDataViewProps> = ({
 
               <div>
                 <label className="block text-xs font-semibold text-[#4C4A6E] mb-1">
-                  Denominator Population
+                  Customer Base
                 </label>
                 <select
                   value={preUploadChurnDef.denominatorPopulation}
@@ -1192,70 +1219,85 @@ export const CustomerDataView: React.FC<CustomerDataViewProps> = ({
                   />
                 </div>
               )}
-
-              <div>
-                <label className="block text-xs font-semibold text-[#4C4A6E] mb-1">
-                  Churn Status / Event Column Hint
-                </label>
-                <input
-                  type="text"
-                  value={preUploadChurnDef.churnStatusColumnHint || ''}
-                  onChange={(e) =>
-                    setPreUploadChurnDef((p) => ({
-                      ...p,
-                      churnStatusColumnHint: e.target.value || null,
-                    }))
-                  }
-                  placeholder="e.g. churn_status, cancelled, lapsed"
-                  className="w-full rounded-xl border border-purple-200 bg-[#F6F3FF]/40 px-3 py-2 text-xs font-mono text-[#15152F]"
-                />
-              </div>
-
-              <div>
-                <label className="block text-xs font-semibold text-[#4C4A6E] mb-1">
-                  Cancellation / Closure Date Hint
-                </label>
-                <input
-                  type="text"
-                  value={preUploadChurnDef.cancellationDateColumnHint || ''}
-                  onChange={(e) =>
-                    setPreUploadChurnDef((p) => ({
-                      ...p,
-                      cancellationDateColumnHint: e.target.value || null,
-                    }))
-                  }
-                  placeholder="e.g. churn_date, cancel_date (audit only)"
-                  className="w-full rounded-xl border border-purple-200 bg-[#F6F3FF]/40 px-3 py-2 text-xs font-mono text-[#15152F]"
-                />
-              </div>
-
-              <div
-                className={
-                  preUploadChurnDef.triggerType === 'inactivity'
-                    ? 'sm:col-span-2 lg:col-span-3'
-                    : 'sm:col-span-2 lg:col-span-2'
-                }
-              >
-                <label className="block text-xs font-semibold text-[#4C4A6E] mb-1">
-                  Business Churn Event Description
-                </label>
-                <input
-                  type="text"
-                  value={preUploadChurnDef.churnEventDescription}
-                  onChange={(e) =>
-                    setPreUploadChurnDef((p) => ({
-                      ...p,
-                      churnEventDescription: e.target.value,
-                    }))
-                  }
-                  className="w-full rounded-xl border border-purple-200 bg-[#F6F3FF]/40 px-3 py-2 text-xs text-[#15152F]"
-                />
-              </div>
             </div>
 
-            <div className="flex flex-col sm:flex-row sm:items-center sm:justify-between gap-3 bg-[#F5F3FF] border border-purple-200/80 rounded-xl px-4 py-3 text-xs">
-              <div className="font-mono text-[11px] text-[#4C4A6E]">
-                {formatChurnCalculationExplanation(preUploadChurnDef, 25, 250)}
+            <div>
+              <button
+                type="button"
+                onClick={() => setShowPreDefOptionalHints((prev) => !prev)}
+                className="text-xs font-semibold text-[#7655E8] hover:text-[#E84FA8] cursor-pointer"
+              >
+                {showPreDefOptionalHints ? 'Hide Optional Details' : 'Optional Details'}
+              </button>
+
+              {showPreDefOptionalHints && (
+                <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-3.5 mt-3">
+                  <div>
+                    <label className="block text-xs font-semibold text-[#4C4A6E] mb-1">
+                      Churn Status Column Hint
+                    </label>
+                    <input
+                      type="text"
+                      value={preUploadChurnDef.churnStatusColumnHint || ''}
+                      onChange={(e) =>
+                        setPreUploadChurnDef((p) => ({
+                          ...p,
+                          churnStatusColumnHint: e.target.value || null,
+                        }))
+                      }
+                      placeholder="e.g. churn_status, cancelled"
+                      className="w-full rounded-xl border border-purple-200 bg-[#F6F3FF]/40 px-3 py-2 text-xs font-mono text-[#15152F]"
+                    />
+                  </div>
+
+                  <div>
+                    <label className="block text-xs font-semibold text-[#4C4A6E] mb-1">
+                      Cancellation Date Hint
+                    </label>
+                    <input
+                      type="text"
+                      value={preUploadChurnDef.cancellationDateColumnHint || ''}
+                      onChange={(e) =>
+                        setPreUploadChurnDef((p) => ({
+                          ...p,
+                          cancellationDateColumnHint: e.target.value || null,
+                        }))
+                      }
+                      placeholder="e.g. churn_date"
+                      className="w-full rounded-xl border border-purple-200 bg-[#F6F3FF]/40 px-3 py-2 text-xs font-mono text-[#15152F]"
+                    />
+                  </div>
+
+                  <div>
+                    <label className="block text-xs font-semibold text-[#4C4A6E] mb-1">
+                      Churn Event Note
+                    </label>
+                    <input
+                      type="text"
+                      value={preUploadChurnDef.churnEventDescription}
+                      onChange={(e) =>
+                        setPreUploadChurnDef((p) => ({
+                          ...p,
+                          churnEventDescription: e.target.value,
+                        }))
+                      }
+                      className="w-full rounded-xl border border-purple-200 bg-[#F6F3FF]/40 px-3 py-2 text-xs text-[#15152F]"
+                    />
+                  </div>
+                </div>
+              )}
+            </div>
+
+            <div className="flex flex-col sm:flex-row sm:items-center sm:justify-between gap-3 bg-[#F5F3FF] border border-purple-200/80 rounded-xl px-4 py-2.5 text-xs">
+              <div className="text-[#4C4A6E]">
+                <span className="font-semibold text-[#5B3AD6]">Rate Preview: </span>
+                <span className="font-mono">
+                  {formatChurnCalculationExplanation(
+                    preUploadChurnDef,
+                    analytics?.churnedCount ?? 25,
+                    analytics?.totalCustomers ?? 250
+                  )}
+                </span>
               </div>
               {canUploadAndAnalyse && onSaveChurnDefinition && (
                 <button
@@ -1263,7 +1305,7 @@ export const CustomerDataView: React.FC<CustomerDataViewProps> = ({
                   disabled={isSavingChurnDef}
                   className="px-4 py-2 bg-[#11142B] hover:bg-[#1C2147] text-white text-xs font-semibold rounded-xl cursor-pointer disabled:opacity-50 whitespace-nowrap shrink-0"
                 >
-                  {isSavingChurnDef ? 'Confirming...' : 'Confirm Churn Definition'}
+                  {isSavingChurnDef ? 'Confirming...' : 'Save Churn Definition'}
                 </button>
               )}
             </div>
@@ -1395,73 +1437,32 @@ export const CustomerDataView: React.FC<CustomerDataViewProps> = ({
           </button>
         </div>
 
-        {/* Cold-Start Honest Notice for New Business Pathway */}
-        {selectedPathway === 'new_business' && (
-          <div className="bg-amber-50 border border-amber-300 rounded-xl px-4 py-3 flex items-center gap-3 text-xs text-amber-950">
-            <AlertTriangle className="w-4 h-4 text-amber-700 shrink-0" />
-            <span className="font-medium">
-              Monitoring mode active: predictive training unlocks once historical churn outcomes are recorded.
-            </span>
-          </div>
-        )}
-
         {/* Active Pathway Details & Template Download Controls */}
-        <div className="border-t border-purple-100 pt-4 flex flex-col lg:flex-row lg:items-center lg:justify-between gap-4">
+        <div className="border-t border-purple-100 pt-4 flex flex-col lg:flex-row lg:items-center lg:justify-between gap-3">
           {selectedPathway === 'new_business' && (
-            <div className="space-y-1 min-w-0 flex-1 max-w-3xl">
-              <div className="text-xs font-bold text-[#11142B]">
-                New Business Monitoring Template — Guided Capabilities
-              </div>
-              <p className="text-xs text-slate-600 leading-relaxed">
-                Monitor customer activity, track subscription and lifecycle status, establish engagement
-                baselines, and begin collecting outcomes over time.{' '}
-                <strong className="text-[#11142B]">
-                  Supervised churn prediction models will not be trained until valid historical churn
-                  outcomes are present.
-                </strong>
-              </p>
-            </div>
+            <p className="text-xs text-slate-600 min-w-0 flex-1 max-w-2xl">
+              Monitors active customers and behaviour baselines; prediction models unlock once churn outcomes are recorded.
+            </p>
           )}
 
           {selectedPathway === 'established_historical' && (
-            <div className="space-y-1 min-w-0 flex-1 max-w-3xl">
-              <div className="text-xs font-bold text-[#11142B]">
-                Established Business Historical Template — Point-In-Time Discipline
-              </div>
-              <p className="text-xs text-slate-600 leading-relaxed">
-                Ensure attributes, revenue, and usage reflect customer behaviour at{' '}
-                <span className="font-mono font-semibold text-[#11142B]">observation_date</span> before churn
-                occurred. Optional{' '}
-                <span className="font-mono font-semibold text-[#11142B]">churn_date</span> is retained
-                for audit and automatically excluded from ML model training features.
-              </p>
-            </div>
+            <p className="text-xs text-slate-600 min-w-0 flex-1 max-w-2xl">
+              Uses past retained and churned records to train and validate your churn prediction model.
+            </p>
           )}
 
           {selectedPathway === 'current_prediction' && (
-            <div className="space-y-1 min-w-0 flex-1 max-w-3xl">
-              <div className="text-xs font-bold text-[#11142B]">
-                Current Customer Risk Scoring — Active Model Compatibility Check
-              </div>
-              <p className="text-xs text-slate-600 leading-relaxed">
-                {activeModel
-                  ? `Scores active customers using ${activeModel.modelName} (${activeModel.version}) while keeping your trained model intact and updating Value Intelligence exposure.`
-                  : 'Train or activate a historical churn model first, then upload current customer spreadsheets here to score churn risk in bulk.'}
-              </p>
-            </div>
+            <p className="text-xs text-slate-600 min-w-0 flex-1 max-w-2xl">
+              {activeModel
+                ? `Scores active accounts using ${activeModel.modelName} (${activeModel.version}) without replacing your trained model.`
+                : 'Train a historical model first, then upload active customers here for risk scoring.'}
+            </p>
           )}
 
           {selectedPathway === 'existing_custom' && (
-            <div className="space-y-1 min-w-0 flex-1 max-w-3xl">
-              <div className="text-xs font-bold text-[#11142B]">
-                Custom File Auto-Inspection &amp; Mapping Confirmation
-              </div>
-              <p className="text-xs text-slate-600 leading-relaxed">
-                Upload your CRM, billing, or ERP export below. ChurnSight detects identifiers, snapshot
-                dates, revenue, usage, satisfaction, support tickets, and optional churn outcomes, then
-                lets you inspect validation rows before importing.
-              </p>
-            </div>
+            <p className="text-xs text-slate-600 min-w-0 flex-1 max-w-2xl">
+              Upload any CRM or billing export; columns are auto-mapped and checked before importing.
+            </p>
           )}
 
           <div className="flex flex-wrap items-center gap-2">
@@ -1644,7 +1645,7 @@ export const CustomerDataView: React.FC<CustomerDataViewProps> = ({
               </h2>
               <p className="text-xs text-slate-600 max-w-3xl leading-relaxed">
                 {predictionTemplateMeta?.available
-                  ? `Generated directly from your validated workspace model. Includes customer ID and exact trained input features while excluding Churn_Status and Churn_Date.`
+                  ? 'Generated directly from your active model, ready for scoring current active customers.'
                   : predictionTemplateMeta?.reason ||
                     'This model-driven scoring template unlocks once your workspace has an active validated churn prediction model.'}
               </p>
@@ -1709,31 +1710,21 @@ export const CustomerDataView: React.FC<CustomerDataViewProps> = ({
       {/* STAGED SPREADSHEET IMPORT REVIEW & CHURN DEFINITION CONFIRMATION      */}
       {/* ===================================================================== */}
       {stagedImport && stagedMapping && stagedChurnDef && (
-        <div className="bg-white border-2 border-[#7655E8]/50 rounded-2xl shadow-xl shadow-[#7655E8]/10 p-5 sm:p-6 space-y-6 min-w-0">
+        <div className="bg-white border-2 border-[#7655E8]/50 rounded-2xl shadow-xl shadow-[#7655E8]/10 p-5 sm:p-6 space-y-5 min-w-0">
           <div className="flex flex-col sm:flex-row sm:items-start sm:justify-between gap-4 border-b border-purple-100 pb-4">
             <div className="space-y-1 min-w-0 flex-1">
-              <div className="text-[11px] font-bold uppercase tracking-[0.18em] text-[#7655E8]">
-                Step 2 of 2 · Staging Review &amp; Churn Definition Confirmation
+              <div className="text-[11px] font-bold uppercase tracking-[0.16em] text-[#7655E8]">
+                Review &amp; Confirm Import
               </div>
               <h2 className="text-lg font-bold text-[#15152F] break-words">
-                Review &ldquo;{stagedImport.fileName}&rdquo; ({stagedImport.sourceFormat.toUpperCase()})
+                {stagedImport.fileName} ({stagedImport.sourceFormat.toUpperCase()})
               </h2>
               <p className="text-xs text-slate-600 font-mono tabular-nums">
-                {stagedImport.rowCount.toLocaleString()} rows · {stagedImport.columnCount} columns ·{' '}
-                {stagedImport.duplicateCount} duplicate rows ·{' '}
-                {stagedImport.missingCellCount} missing cells ·{' '}
-                {stagedImport.invalidDateCount ?? 0} invalid dates ·{' '}
-                {stagedImport.inconsistentCategoryCount ?? 0} casing mismatches
+                {stagedImport.rowCount.toLocaleString()} rows · {stagedImport.columnCount} columns
+                {stagedImport.readiness
+                  ? ` · Readiness: ${stagedImport.readiness.readinessScore}/100`
+                  : ''}
               </p>
-              {stagedImport.readiness && (
-                <div className="text-xs font-mono font-semibold text-[#7655E8] pt-1">
-                  Staged Readiness: {stagedImport.readiness.overallLabel} (
-                  {stagedImport.readiness.readinessScore}/100)
-                  {stagedImport.uploadPathway
-                    ? ` · ${PATHWAY_LABELS[stagedImport.uploadPathway]}`
-                    : ''}
-                </div>
-              )}
             </div>
 
             <button
@@ -1746,981 +1737,1063 @@ export const CustomerDataView: React.FC<CustomerDataViewProps> = ({
             </button>
           </div>
 
-          {/* Row-Level Validation Summary Grid + Rejected CSV Download */}
-          {stagedImport.rowValidation && (
-            <div className="space-y-4">
-              <div className="flex flex-col sm:flex-row sm:items-center sm:justify-between gap-3">
-                <div>
-                  <h3 className="text-sm font-bold text-[#15152F]">
-                    Row-Level Validation Summary
-                  </h3>
-                  <p className="text-xs text-slate-500">
-                    Inspected all {stagedImport.rowValidation.totalRows.toLocaleString()} uploaded rows
-                    across mapped customer &amp; support fields
-                  </p>
+          {/* Compact Validation Summary */}
+          {(() => {
+            const errorIssues = stagedImport.issues.filter((i) => i.severity === 'error');
+            const warningIssues = stagedImport.issues.filter((i) => i.severity === 'warning');
+            const rowErrorCount = stagedImport.rowValidation?.errorCount ?? 0;
+            const rowWarningCount = stagedImport.rowValidation?.warningCount ?? 0;
+            const incompatError =
+              stagedImport.modelCompatibility && !stagedImport.modelCompatibility.compatible
+                ? stagedImport.modelCompatibility.message
+                : null;
+
+            const customersImportedCount =
+              stagedImport.uploadMode === 'tickets'
+                ? dataset?.rowCount ?? stagedImport.ticketAggregation?.matchedCustomersCount ?? 0
+                : importMode === 'valid_only' && stagedImport.rowValidation
+                  ? stagedImport.rowValidation.validCount + stagedImport.rowValidation.warningCount
+                  : stagedImport.rowCount;
+            const ticketsLinkedCount = stagedImport.ticketAggregation?.ticketRowsCount ?? 0;
+
+            const actionableWarnings: string[] = [];
+            for (const w of warningIssues) {
+              if (!isTechnicalValidationInfo(w.message) && !actionableWarnings.includes(w.message)) {
+                actionableWarnings.push(w.message);
+              }
+            }
+            if (
+              !stagedImport.hasValidChurnLabels &&
+              stagedImport.churnReadinessMessage &&
+              stagedImport.uploadMode !== 'tickets' &&
+              stagedImport.uploadPathway !== 'current_prediction' &&
+              !actionableWarnings.includes(stagedImport.churnReadinessMessage)
+            ) {
+              actionableWarnings.push(stagedImport.churnReadinessMessage);
+            }
+            if (
+              stagedImport.readiness?.datasetProfile.classImbalanceWarning &&
+              actionableWarnings.length < 3
+            ) {
+              actionableWarnings.push(stagedImport.readiness.datasetProfile.classImbalanceWarning);
+            }
+
+            const hasBlockingErrors =
+              errorIssues.length > 0 ||
+              Boolean(incompatError) ||
+              (rowErrorCount > 0 && customersImportedCount === 0);
+            const hasAttentionWarnings =
+              actionableWarnings.length > 0 || rowErrorCount > 0 || rowWarningCount > 0;
+
+            const dataQualityLabel = hasBlockingErrors
+              ? 'Failed'
+              : hasAttentionWarnings
+                ? 'Warnings'
+                : 'Passed';
+            const importStatusLabel = hasBlockingErrors
+              ? 'Failed'
+              : hasAttentionWarnings ||
+                  (!stagedImport.hasValidChurnLabels &&
+                    stagedImport.uploadMode !== 'tickets' &&
+                    stagedImport.uploadPathway !== 'current_prediction')
+                ? 'Needs Attention'
+                : 'Successful';
+
+            const columnsWithMissing = stagedImport.columns.filter((c) => c.missingCount > 0);
+            const excludedLeakageCols =
+              stagedImport.readiness?.datasetProfile.leakageColumnsExcluded ?? [];
+
+            return (
+              <div className="space-y-3">
+                {/* 4-Metric Compact Summary */}
+                <div className="grid grid-cols-2 lg:grid-cols-4 gap-3">
+                  <div className="rounded-xl border border-purple-100 bg-[#F5F3FF]/40 px-4 py-3">
+                    <div className="text-[11px] font-medium text-slate-500">Customers imported</div>
+                    <div className="text-lg font-bold font-mono tabular-nums text-[#15152F] mt-0.5">
+                      {customersImportedCount.toLocaleString()}
+                    </div>
+                  </div>
+                  <div className="rounded-xl border border-purple-100 bg-[#F5F3FF]/40 px-4 py-3">
+                    <div className="text-[11px] font-medium text-slate-500">Tickets linked</div>
+                    <div className="text-lg font-bold font-mono tabular-nums text-[#15152F] mt-0.5">
+                      {ticketsLinkedCount.toLocaleString()}
+                    </div>
+                  </div>
+                  <div className="rounded-xl border border-purple-100 bg-[#F5F3FF]/40 px-4 py-3">
+                    <div className="text-[11px] font-medium text-slate-500">Data quality</div>
+                    <div
+                      className={`text-lg font-bold mt-0.5 ${
+                        dataQualityLabel === 'Failed'
+                          ? 'text-[#E04F44]'
+                          : dataQualityLabel === 'Warnings'
+                            ? 'text-amber-700'
+                            : 'text-[#0E9F6E]'
+                      }`}
+                    >
+                      {dataQualityLabel}
+                    </div>
+                  </div>
+                  <div className="rounded-xl border border-purple-100 bg-[#F5F3FF]/40 px-4 py-3">
+                    <div className="text-[11px] font-medium text-slate-500">Import status</div>
+                    <div
+                      className={`text-lg font-bold mt-0.5 ${
+                        importStatusLabel === 'Failed'
+                          ? 'text-[#E04F44]'
+                          : importStatusLabel === 'Needs Attention'
+                            ? 'text-amber-700'
+                            : 'text-[#0E9F6E]'
+                      }`}
+                    >
+                      {importStatusLabel}
+                    </div>
+                  </div>
                 </div>
 
-                {stagedImport.rowValidation.hasRejectedRowsCsv && (
-                  <button
-                    type="button"
-                    onClick={() => {
-                      downloadProtectedCsv(
-                        '/api/dataset/staged-rejected-csv',
-                        `rejected_rows_${stagedImport.stagedId}.csv`
-                      ).catch((err: unknown) => {
-                        setUploadError(
-                          err instanceof Error ? err.message : 'Failed to download rejected rows CSV.'
-                        );
-                      });
-                    }}
-                    className="inline-flex items-center gap-1.5 px-3.5 py-2 rounded-xl border border-[#FF786B]/50 bg-[#FF786B]/10 hover:bg-[#FF786B]/20 text-xs font-semibold text-[#9A2E25] cursor-pointer whitespace-nowrap self-start sm:self-auto"
+                {/* Actionable Errors & Important Warnings Only */}
+                {(hasBlockingErrors || rowErrorCount > 0 || actionableWarnings.length > 0 || rowWarningCount > 0) && (
+                  <div
+                    className={`rounded-xl border p-3.5 space-y-1.5 text-xs ${
+                      hasBlockingErrors || rowErrorCount > 0
+                        ? 'bg-[#FF786B]/10 border-[#FF786B]/40 text-[#9A2E25]'
+                        : 'bg-amber-50/90 border-amber-300 text-amber-950'
+                    }`}
                   >
-                    <Download className="w-3.5 h-3.5" />
-                    <span>Download Rejected Rows CSV</span>
-                  </button>
-                )}
-              </div>
-
-              <div className="grid grid-cols-2 sm:grid-cols-4 lg:grid-cols-8 gap-2.5">
-                <div className="rounded-xl border border-purple-100 bg-[#F5F3FF]/40 p-3">
-                  <div className="text-[10px] font-semibold uppercase tracking-wider text-slate-500">Total Rows</div>
-                  <div className="text-lg font-extrabold font-mono tabular-nums text-[#15152F] mt-0.5">
-                    {stagedImport.rowValidation.totalRows.toLocaleString()}
-                  </div>
-                </div>
-                <div className="rounded-xl border border-[#16C995]/30 bg-[#16C995]/10 p-3">
-                  <div className="text-[10px] font-semibold uppercase tracking-wider text-[#065F46]">Valid Rows</div>
-                  <div className="text-lg font-extrabold font-mono tabular-nums text-[#0E9F6E] mt-0.5">
-                    {stagedImport.rowValidation.validCount.toLocaleString()}
-                  </div>
-                </div>
-                <div className="rounded-xl border border-amber-200 bg-amber-50 p-3">
-                  <div className="text-[10px] font-semibold uppercase tracking-wider text-amber-800">Warnings</div>
-                  <div className="text-lg font-extrabold font-mono tabular-nums text-amber-700 mt-0.5">
-                    {stagedImport.rowValidation.warningCount.toLocaleString()}
-                  </div>
-                </div>
-                <div className="rounded-xl border border-[#FF786B]/40 bg-[#FF786B]/10 p-3">
-                  <div className="text-[10px] font-semibold uppercase tracking-wider text-[#9A2E25]">Errors</div>
-                  <div className="text-lg font-extrabold font-mono tabular-nums text-[#E04F44] mt-0.5">
-                    {stagedImport.rowValidation.errorCount.toLocaleString()}
-                  </div>
-                </div>
-                <div className="rounded-xl border border-purple-100 bg-white p-3">
-                  <div className="text-[10px] font-semibold uppercase tracking-wider text-slate-500">Duplicate IDs</div>
-                  <div className="text-lg font-extrabold font-mono tabular-nums text-[#15152F] mt-0.5">
-                    {(
-                      stagedImport.rowValidation.duplicateCustomerIds +
-                      stagedImport.rowValidation.duplicateTicketIds
-                    ).toLocaleString()}
-                  </div>
-                </div>
-                <div className="rounded-xl border border-purple-100 bg-white p-3">
-                  <div className="text-[10px] font-semibold uppercase tracking-wider text-slate-500">Missing Values</div>
-                  <div className="text-lg font-extrabold font-mono tabular-nums text-[#15152F] mt-0.5">
-                    {stagedImport.rowValidation.missingValuesCount.toLocaleString()}
-                  </div>
-                </div>
-                <div className="rounded-xl border border-purple-100 bg-white p-3">
-                  <div className="text-[10px] font-semibold uppercase tracking-wider text-slate-500">Mapped Cols</div>
-                  <div className="text-lg font-extrabold font-mono tabular-nums text-[#7655E8] mt-0.5">
-                    {stagedImport.rowValidation.mappedFieldsCount}
-                  </div>
-                </div>
-                <div className="rounded-xl border border-purple-100 bg-white p-3">
-                  <div className="text-[10px] font-semibold uppercase tracking-wider text-slate-500">Unmapped Cols</div>
-                  <div className="text-lg font-extrabold font-mono tabular-nums text-slate-700 mt-0.5">
-                    {stagedImport.rowValidation.unmappedColumns.length}
-                  </div>
-                </div>
-              </div>
-
-              {stagedImport.rowValidation.issuesSummary.length > 0 && (
-                <div className="rounded-xl border border-purple-100 bg-[#F5F3FF]/40 p-3.5 text-xs space-y-1.5">
-                  <div className="font-bold text-[#15152F]">Detected Row Validation Checks</div>
-                  <div className="flex flex-wrap gap-x-5 gap-y-1">
-                    {stagedImport.rowValidation.issuesSummary.map((item, idx) => (
-                      <span
-                        key={idx}
-                        className={`font-mono text-[11px] font-semibold ${
-                          item.severity === 'error' ? 'text-[#E04F44]' : 'text-amber-800'
-                        }`}
-                      >
-                        {item.label}: {item.count}
-                      </span>
-                    ))}
-                  </div>
-                </div>
-              )}
-            </div>
-          )}
-
-          {/* Ticket Aggregation & Separate Ticket Validation Summary Card */}
-          {stagedImport.ticketAggregation && (
-            <div className="bg-[#397BFF]/[0.06] border border-[#397BFF]/30 rounded-xl p-4 space-y-3 text-xs text-[#11142B]">
-              <div className="flex items-start gap-3">
-                <LifeBuoy className="w-4 h-4 text-[#397BFF] shrink-0 mt-0.5" />
-                <div className="space-y-1.5 flex-1 min-w-0">
-                  <div className="font-bold flex flex-wrap items-center gap-2">
-                    <span>
-                      {stagedImport.ticketAggregation.source === 'standalone_ticket_upload'
-                        ? 'Standalone Ticket_Data Validation & Linking'
-                        : 'Ticket_Data Worksheet Validated & Linked Separately'}
-                    </span>
-                    <span className="font-mono text-[11px] text-[#397BFF]">
-                      {stagedImport.ticketAggregation.ticketRowsCount} ticket rows ·{' '}
-                      {stagedImport.ticketAggregation.matchedCustomersCount} unique customer(s) linked
-                      {stagedImport.ticketAggregation.duplicateTicketIds > 0
-                        ? ` · ${stagedImport.ticketAggregation.duplicateTicketIds} duplicate Ticket_IDs skipped`
-                        : ''}
-                    </span>
-                  </div>
-                  <p className="text-slate-700 leading-relaxed">
-                    {stagedImport.ticketAggregation.note}{' '}
-                    {stagedImport.ticketAggregation.doubleCountingPrevented
-                      ? 'Multiple tickets per Customer_ID are aggregated cleanly into customer metrics without duplicating customer rows or double-counting.'
-                      : ''}
-                  </p>
-                </div>
-              </div>
-
-              {(typeof stagedImport.ticketAggregation.validTicketRows === 'number' ||
-                (stagedImport.ticketAggregation.unmatchedTicketRowsCount ?? 0) > 0) && (
-                <div className="grid grid-cols-2 sm:grid-cols-5 gap-2 pt-1">
-                  <div className="rounded-lg border border-[#397BFF]/20 bg-white/80 px-3 py-2">
-                    <div className="text-[10px] font-semibold uppercase tracking-wider text-slate-500">
-                      Ticket Rows
-                    </div>
-                    <div className="font-mono font-bold text-sm text-[#15152F]">
-                      {stagedImport.ticketAggregation.ticketRowsCount.toLocaleString()}
-                    </div>
-                  </div>
-                  <div className="rounded-lg border border-[#16C995]/30 bg-[#16C995]/10 px-3 py-2">
-                    <div className="text-[10px] font-semibold uppercase tracking-wider text-[#065F46]">
-                      Clean Tickets
-                    </div>
-                    <div className="font-mono font-bold text-sm text-[#0E9F6E]">
-                      {(stagedImport.ticketAggregation.validTicketRows ?? stagedImport.ticketAggregation.ticketRowsCount).toLocaleString()}
-                    </div>
-                  </div>
-                  <div className="rounded-lg border border-amber-200 bg-amber-50 px-3 py-2">
-                    <div className="text-[10px] font-semibold uppercase tracking-wider text-amber-800">
-                      Ticket Warnings
-                    </div>
-                    <div className="font-mono font-bold text-sm text-amber-700">
-                      {(stagedImport.ticketAggregation.warningTicketRows ?? 0).toLocaleString()}
-                    </div>
-                  </div>
-                  <div className="rounded-lg border border-[#FF786B]/40 bg-[#FF786B]/10 px-3 py-2">
-                    <div className="text-[10px] font-semibold uppercase tracking-wider text-[#9A2E25]">
-                      Ticket Errors
-                    </div>
-                    <div className="font-mono font-bold text-sm text-[#E04F44]">
-                      {(stagedImport.ticketAggregation.errorTicketRows ?? 0).toLocaleString()}
-                    </div>
-                  </div>
-                  <div className="rounded-lg border border-purple-100 bg-white/80 px-3 py-2">
-                    <div className="text-[10px] font-semibold uppercase tracking-wider text-slate-500">
-                      Unmatched Customer_ID
-                    </div>
-                    <div className="font-mono font-bold text-sm text-[#15152F]">
-                      {(stagedImport.ticketAggregation.unmatchedTicketRowsCount ?? 0).toLocaleString()}
-                    </div>
-                  </div>
-                </div>
-              )}
-
-              {stagedImport.ticketAggregation.ticketIssues &&
-                stagedImport.ticketAggregation.ticketIssues.length > 0 && (
-                  <div className="rounded-lg border border-amber-200 bg-amber-50/70 p-3 space-y-1">
-                    <div className="font-bold text-[11px] text-amber-900">
-                      Ticket_Data Validation Findings (First {Math.min(6, stagedImport.ticketAggregation.ticketIssues.length)})
-                    </div>
-                    <ul className="space-y-0.5 text-[11px] text-amber-950 font-mono">
-                      {stagedImport.ticketAggregation.ticketIssues.slice(0, 6).map((ti, i) => (
-                        <li key={i}>
-                          Row {ti.rowIndex} ({ti.customerId}) [{ti.status.toUpperCase()}]:{' '}
-                          <span className="font-sans">{ti.messages.join(' ')}</span>
-                        </li>
-                      ))}
-                    </ul>
-                  </div>
-                )}
-            </div>
-          )}
-
-          {/* Model Compatibility Report for Current Customer Scoring */}
-          {stagedImport.modelCompatibility && (
-            <div
-              className={`border rounded-xl p-4 flex items-start gap-3 text-xs ${
-                stagedImport.modelCompatibility.compatible
-                  ? 'bg-[#16C995]/10 border-[#16C995]/35 text-[#065F46]'
-                  : 'bg-amber-50 border-amber-300 text-amber-950'
-              }`}
-            >
-              <CheckCircle2 className="w-4 h-4 shrink-0 mt-0.5" />
-              <div className="space-y-1">
-                <div className="font-bold">
-                  Model Schema Compatibility
-                  {stagedImport.modelCompatibility.modelName
-                    ? ` · ${stagedImport.modelCompatibility.modelName} (${stagedImport.modelCompatibility.modelVersion})`
-                    : ''}
-                </div>
-                <p className="leading-relaxed">{stagedImport.modelCompatibility.message}</p>
-                {stagedImport.modelCompatibility.missingFeatures.length > 0 && (
-                  <p className="font-mono text-[11px]">
-                    Missing features: {stagedImport.modelCompatibility.missingFeatures.join(', ')}
-                  </p>
-                )}
-              </div>
-            </div>
-          )}
-
-          {stagedImport.readiness?.datasetProfile.classImbalanceWarning && (
-            <div className="bg-amber-50 border border-amber-300 rounded-xl p-4 flex items-start gap-3 text-xs text-amber-950">
-              <AlertTriangle className="w-4 h-4 text-amber-700 shrink-0 mt-0.5" />
-              <div>
-                <div className="font-bold">Class Imbalance Detected</div>
-                <p className="mt-0.5 leading-relaxed">
-                  {stagedImport.readiness.datasetProfile.classImbalanceWarning}
-                </p>
-              </div>
-            </div>
-          )}
-
-          {stagedImport.readiness?.datasetProfile.leakageColumnsExcluded &&
-            stagedImport.readiness.datasetProfile.leakageColumnsExcluded.length > 0 && (
-              <div className="bg-[#F5F3FF] border border-purple-200 rounded-xl p-4 flex items-start gap-3 text-xs text-[#15152F]">
-                <Info className="w-4 h-4 text-[#7655E8] shrink-0 mt-0.5" />
-                <div>
-                  <div className="font-bold">Target Leakage Protection Active</div>
-                  <p className="mt-0.5 leading-relaxed">
-                    Post-outcome columns ({stagedImport.readiness.datasetProfile.leakageColumnsExcluded.join(', ')}) are
-                    preserved for audit visibility and excluded from supervised ML training features.
-                  </p>
-                </div>
-              </div>
-            )}
-
-          {!stagedImport.hasValidChurnLabels &&
-            stagedImport.churnReadinessMessage &&
-            stagedImport.uploadMode !== 'tickets' &&
-            stagedImport.uploadPathway !== 'current_prediction' && (
-              <div className="bg-amber-50 border border-amber-300 rounded-xl p-4 flex items-start gap-3 text-xs text-amber-950">
-                <AlertTriangle className="w-4 h-4 text-amber-700 shrink-0 mt-0.5" />
-                <div>
-                  <div className="font-bold">Churn Label Readiness Notice</div>
-                  <p className="mt-0.5 leading-relaxed">{stagedImport.churnReadinessMessage}</p>
-                </div>
-              </div>
-            )}
-
-          {stagedImport.issues.length > 0 && (
-            <div className="space-y-2">
-              {stagedImport.issues.map((issue, idx) => (
-                <div
-                  key={idx}
-                  className={`border rounded-xl px-3.5 py-2.5 text-xs flex items-start gap-2.5 ${
-                    issue.severity === 'error'
-                      ? 'bg-[#FF786B]/10 border-[#FF786B]/40 text-[#9A2E25]'
-                      : issue.severity === 'warning'
-                        ? 'bg-amber-50 border-amber-200 text-amber-900'
-                        : 'bg-[#F6F3FF] border-purple-200/70 text-[#15152F]'
-                  }`}
-                >
-                  <Info className="w-4 h-4 shrink-0 mt-0.5 opacity-80" />
-                  <span>{issue.message}</span>
-                </div>
-              ))}
-            </div>
-          )}
-
-          {/* Customer Column Mapping Editor (shown for customer uploads, hidden for standalone tickets) */}
-          {stagedImport.uploadMode !== 'tickets' && (
-          <div className="space-y-4">
-            <div>
-              <h3 className="text-sm font-bold text-[#15152F]">
-                1. Verify Suggested Column Mapping ({tmpl.label})
-              </h3>
-              <p className="text-xs text-slate-500">
-                Adjust auto-detected fields so analytics and Customer data preparation reflect your
-                spreadsheet accurately.
-              </p>
-            </div>
-
-            <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-3.5">
-              <div>
-                <label className="block text-xs font-semibold text-[#4C4A6E] mb-1">
-                  Target Churn Column
-                </label>
-                <select
-                  value={stagedMapping.targetColumn}
-                  onChange={(e) => {
-                    const nextTarget = e.target.value;
-                    setStagedMapping((prev) =>
-                      prev
-                        ? {
-                            ...prev,
-                            targetColumn: nextTarget,
-                            featureColumns: prev.featureColumns.filter((c) => c !== nextTarget),
-                          }
-                        : prev
-                    );
-                  }}
-                  className="w-full rounded-xl border border-purple-200 bg-[#F6F3FF]/40 px-3 py-2 text-xs font-medium text-[#15152F]"
-                >
-                  <option value="">None (Descriptive profiling only)</option>
-                  {stagedImport.columns.map((c) => (
-                    <option key={c.name} value={c.name}>
-                      {c.name} ({c.uniqueCount} unique)
-                    </option>
-                  ))}
-                </select>
-              </div>
-
-              <div>
-                <label className="block text-xs font-semibold text-[#4C4A6E] mb-1">
-                  Positive Churn Value
-                </label>
-                {stagedTargetUniqueValues.length >= 2 && stagedTargetUniqueValues.length <= 20 ? (
-                  <select
-                    value={stagedMapping.positiveClassValue}
-                    onChange={(e) =>
-                      setStagedMapping((prev) =>
-                        prev ? { ...prev, positiveClassValue: e.target.value } : prev
-                      )
-                    }
-                    className="w-full rounded-xl border border-purple-200 bg-[#F6F3FF]/40 px-3 py-2 text-xs font-medium text-[#15152F]"
-                  >
-                    {stagedTargetUniqueValues.map((val) => (
-                      <option key={val} value={val}>
-                        {val}
-                      </option>
-                    ))}
-                  </select>
-                ) : (
-                  <input
-                    type="text"
-                    value={stagedMapping.positiveClassValue}
-                    onChange={(e) =>
-                      setStagedMapping((prev) =>
-                        prev ? { ...prev, positiveClassValue: e.target.value } : prev
-                      )
-                    }
-                    placeholder="e.g. Yes, 1, Churned"
-                    className="w-full rounded-xl border border-purple-200 bg-[#F6F3FF]/40 px-3 py-2 text-xs font-medium text-[#15152F]"
-                  />
-                )}
-              </div>
-
-              <div>
-                <label className="block text-xs font-semibold text-[#4C4A6E] mb-1">
-                  {tmpl.entitySingular} ID Column
-                </label>
-                <select
-                  value={stagedMapping.idColumn || ''}
-                  onChange={(e) =>
-                    setStagedMapping((prev) =>
-                      prev ? { ...prev, idColumn: e.target.value || null } : prev
-                    )
-                  }
-                  className="w-full rounded-xl border border-purple-200 bg-[#F6F3FF]/40 px-3 py-2 text-xs font-medium text-[#15152F]"
-                >
-                  <option value="">Auto-generate Row ID</option>
-                  {stagedImport.columns.map((c) => (
-                    <option key={c.name} value={c.name}>
-                      {c.name}
-                    </option>
-                  ))}
-                </select>
-              </div>
-
-              <div>
-                <label className="block text-xs font-semibold text-[#4C4A6E] mb-1">
-                  {tmpl.segmentLabel} Column
-                </label>
-                <select
-                  value={stagedMapping.contractColumn || ''}
-                  onChange={(e) =>
-                    setStagedMapping((prev) =>
-                      prev ? { ...prev, contractColumn: e.target.value || null } : prev
-                    )
-                  }
-                  className="w-full rounded-xl border border-purple-200 bg-[#F6F3FF]/40 px-3 py-2 text-xs font-medium text-[#15152F]"
-                >
-                  <option value="">Not mapped</option>
-                  {stagedImport.columns.map((c) => (
-                    <option key={c.name} value={c.name}>
-                      {c.name}
-                    </option>
-                  ))}
-                </select>
-              </div>
-
-              <div>
-                <label className="block text-xs font-semibold text-[#4C4A6E] mb-1">
-                  {tmpl.tenureLabel} Column
-                </label>
-                <select
-                  value={stagedMapping.tenureColumn || ''}
-                  onChange={(e) =>
-                    setStagedMapping((prev) =>
-                      prev ? { ...prev, tenureColumn: e.target.value || null } : prev
-                    )
-                  }
-                  className="w-full rounded-xl border border-purple-200 bg-[#F6F3FF]/40 px-3 py-2 text-xs font-medium text-[#15152F]"
-                >
-                  <option value="">Not mapped</option>
-                  {stagedImport.columns.map((c) => (
-                    <option key={c.name} value={c.name}>
-                      {c.name}
-                    </option>
-                  ))}
-                </select>
-              </div>
-
-              <div>
-                <label className="block text-xs font-semibold text-[#4C4A6E] mb-1">
-                  {tmpl.revenueLabel} Column
-                </label>
-                <select
-                  value={stagedMapping.monthlyChargesColumn || ''}
-                  onChange={(e) =>
-                    setStagedMapping((prev) =>
-                      prev ? { ...prev, monthlyChargesColumn: e.target.value || null } : prev
-                    )
-                  }
-                  className="w-full rounded-xl border border-purple-200 bg-[#F6F3FF]/40 px-3 py-2 text-xs font-medium text-[#15152F]"
-                >
-                  <option value="">Not mapped</option>
-                  {stagedImport.columns.map((c) => (
-                    <option key={c.name} value={c.name}>
-                      {c.name}
-                    </option>
-                  ))}
-                </select>
-              </div>
-
-              <div>
-                <label className="block text-xs font-semibold text-[#4C4A6E] mb-1">
-                  Date / Timestamp Column
-                </label>
-                <select
-                  value={stagedMapping.dateColumn || ''}
-                  onChange={(e) =>
-                    setStagedMapping((prev) =>
-                      prev ? { ...prev, dateColumn: e.target.value || null } : prev
-                    )
-                  }
-                  className="w-full rounded-xl border border-purple-200 bg-[#F6F3FF]/40 px-3 py-2 text-xs font-medium text-[#15152F]"
-                >
-                  <option value="">Not mapped (Stratified split only)</option>
-                  {stagedImport.columns.map((c) => (
-                    <option key={c.name} value={c.name}>
-                      {c.name} ({c.dataType})
-                    </option>
-                  ))}
-                </select>
-              </div>
-
-              <div>
-                <label className="block text-xs font-semibold text-[#4C4A6E] mb-1">
-                  {tmpl.frequencyLabel} Column
-                </label>
-                <select
-                  value={stagedMapping.frequencyColumn || ''}
-                  onChange={(e) =>
-                    setStagedMapping((prev) =>
-                      prev ? { ...prev, frequencyColumn: e.target.value || null } : prev
-                    )
-                  }
-                  className="w-full rounded-xl border border-purple-200 bg-[#F6F3FF]/40 px-3 py-2 text-xs font-medium text-[#15152F]"
-                >
-                  <option value="">Not mapped</option>
-                  {stagedImport.columns.map((c) => (
-                    <option key={c.name} value={c.name}>
-                      {c.name}
-                    </option>
-                  ))}
-                </select>
-              </div>
-
-              <div>
-                <label className="block text-xs font-semibold text-[#4C4A6E] mb-1">
-                  Customer Status Column (Operational)
-                </label>
-                <select
-                  value={stagedMapping.statusColumn || ''}
-                  onChange={(e) =>
-                    setStagedMapping((prev) =>
-                      prev ? { ...prev, statusColumn: e.target.value || null } : prev
-                    )
-                  }
-                  className="w-full rounded-xl border border-purple-200 bg-[#F6F3FF]/40 px-3 py-2 text-xs font-medium text-[#15152F]"
-                >
-                  <option value="">Not mapped</option>
-                  {stagedImport.columns.map((c) => (
-                    <option key={c.name} value={c.name}>
-                      {c.name}
-                    </option>
-                  ))}
-                </select>
-              </div>
-
-              <div>
-                <label className="block text-xs font-semibold text-[#4C4A6E] mb-1">
-                  Observation Snapshot Date
-                </label>
-                <select
-                  value={stagedMapping.observationDateColumn || ''}
-                  onChange={(e) =>
-                    setStagedMapping((prev) =>
-                      prev ? { ...prev, observationDateColumn: e.target.value || null } : prev
-                    )
-                  }
-                  className="w-full rounded-xl border border-purple-200 bg-[#F6F3FF]/40 px-3 py-2 text-xs font-medium text-[#15152F]"
-                >
-                  <option value="">Not mapped</option>
-                  {stagedImport.columns.map((c) => (
-                    <option key={c.name} value={c.name}>
-                      {c.name}
-                    </option>
-                  ))}
-                </select>
-              </div>
-
-              <div>
-                <label className="block text-xs font-semibold text-[#4C4A6E] mb-1">
-                  Registration / Join Date
-                </label>
-                <select
-                  value={stagedMapping.registrationDateColumn || ''}
-                  onChange={(e) =>
-                    setStagedMapping((prev) =>
-                      prev ? { ...prev, registrationDateColumn: e.target.value || null } : prev
-                    )
-                  }
-                  className="w-full rounded-xl border border-purple-200 bg-[#F6F3FF]/40 px-3 py-2 text-xs font-medium text-[#15152F]"
-                >
-                  <option value="">Not mapped</option>
-                  {stagedImport.columns.map((c) => (
-                    <option key={c.name} value={c.name}>
-                      {c.name}
-                    </option>
-                  ))}
-                </select>
-              </div>
-
-              <div>
-                <label className="block text-xs font-semibold text-[#4C4A6E] mb-1">
-                  Churn / Cancellation Date (Audit Only)
-                </label>
-                <select
-                  value={stagedMapping.churnDateColumn || ''}
-                  onChange={(e) => {
-                    const nextChurnDate = e.target.value || null;
-                    setStagedMapping((prev) =>
-                      prev
-                        ? {
-                            ...prev,
-                            churnDateColumn: nextChurnDate,
-                            featureColumns: nextChurnDate
-                              ? prev.featureColumns.filter((c) => c !== nextChurnDate)
-                              : prev.featureColumns,
-                          }
-                        : prev
-                    );
-                  }}
-                  className="w-full rounded-xl border border-purple-200 bg-[#F6F3FF]/40 px-3 py-2 text-xs font-medium text-[#15152F]"
-                >
-                  <option value="">Not present (safe)</option>
-                  {stagedImport.columns.map((c) => (
-                    <option key={c.name} value={c.name}>
-                      {c.name}
-                    </option>
-                  ))}
-                </select>
-              </div>
-            </div>
-
-            <div>
-              <label className="block text-xs font-semibold text-[#4C4A6E] mb-2">
-                Prepared Customer Attributes ({stagedMapping.featureColumns.length} selected for
-                Customer data preparation — target &amp; post-outcome dates excluded)
-              </label>
-              <div className="flex flex-wrap gap-2">
-                {stagedImport.columns
-                  .filter(
-                    (c) =>
-                      c.name !== stagedMapping.targetColumn &&
-                      c.name !== stagedMapping.idColumn &&
-                      c.name !== stagedMapping.churnDateColumn &&
-                      c.dataType !== 'identifier' &&
-                      c.dataType !== 'date'
-                  )
-                  .map((col) => {
-                    const checked = stagedMapping.featureColumns.includes(col.name);
-                    return (
-                      <label
-                        key={col.name}
-                        className={`inline-flex items-center gap-2 px-3 py-1.5 rounded-xl border text-xs cursor-pointer select-none ${
-                          checked
-                            ? 'bg-[#7655E8]/10 border-[#7655E8]/40 text-[#5B3AD6] font-semibold'
-                            : 'bg-white border-purple-100 text-slate-600'
-                        }`}
-                      >
-                        <input
-                          type="checkbox"
-                          checked={checked}
-                          onChange={() => toggleStagedFeatureColumn(col.name)}
-                          className="rounded border-purple-300 accent-[#7655E8]"
-                        />
-                        <span>{col.name}</span>
-                      </label>
-                    );
-                  })}
-              </div>
-            </div>
-
-            {stagedImport.mappingRationales && stagedImport.mappingRationales.length > 0 && (
-              <div className="rounded-xl border border-purple-100 bg-[#F5F3FF]/50 p-3.5 space-y-2">
-                <div className="text-xs font-bold text-[#15152F]">
-                  Auto-Detection Mapping Confidence &amp; Reasoning
-                </div>
-                <div className="grid grid-cols-1 md:grid-cols-2 gap-2 text-[11px]">
-                  {stagedImport.mappingRationales
-                    .filter((m) => m.field !== 'featureColumns')
-                    .map((m) => (
-                      <div key={String(m.field)} className="flex items-start gap-2 text-slate-700">
-                        <span
-                          className={`font-mono font-bold uppercase shrink-0 ${
-                            m.confidence === 'high'
-                              ? 'text-[#0E9F6E]'
-                              : m.confidence === 'medium'
-                                ? 'text-[#397BFF]'
-                                : 'text-slate-400'
-                          }`}
-                        >
-                          [{m.confidence}]
-                        </span>
-                        <span>{m.reason}</span>
+                    {incompatError && <div className="font-medium">{incompatError}</div>}
+                    {rowErrorCount > 0 && (
+                      <div className="font-medium">
+                        {rowErrorCount.toLocaleString()} row(s) failed validation and can be excluded before importing.
+                      </div>
+                    )}
+                    {errorIssues.map((issue, idx) => (
+                      <div key={`err-${idx}`} className="font-medium">
+                        {issue.message}
                       </div>
                     ))}
-                </div>
-              </div>
-            )}
-          </div>
-          )}
-
-          {/* Churn Definition Builder (Required for Historical/Custom, Optional for Tickets/Current/Cold-Start) */}
-          {stagedImport.uploadMode !== 'tickets' && (
-          <div className="pt-4 border-t border-purple-100 space-y-4">
-            <div className="flex flex-col sm:flex-row sm:items-center sm:justify-between gap-2">
-              <div>
-                <h3 className="text-sm font-bold text-[#15152F]">
-                  2. {canCommitWithoutChurnDef ? 'Workspace Churn Definition (Optional for this upload)' : 'Confirm Business Churn Definition'}
-                </h3>
-                <p className="text-xs text-slate-500">
-                  Defines how churn rate and attrition formulas are explained across reports and KPIs.
-                </p>
-              </div>
-            </div>
-
-            <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-3.5">
-              <div>
-                <label className="block text-xs font-semibold text-[#4C4A6E] mb-1">
-                  Churn Trigger Type
-                </label>
-                <select
-                  value={stagedChurnDef.triggerType}
-                  onChange={(e) =>
-                    setStagedChurnDef((prev) =>
-                      prev
-                        ? {
-                            ...prev,
-                            triggerType: e.target.value as ChurnTriggerType,
-                            inactivityDays:
-                              e.target.value === 'inactivity' ? prev.inactivityDays || 90 : null,
-                          }
-                        : prev
-                    )
-                  }
-                  className="w-full rounded-xl border border-purple-200 bg-[#F6F3FF]/40 px-3 py-2 text-xs font-medium text-[#15152F]"
-                >
-                  {CHURN_TRIGGER_OPTIONS.map((opt) => (
-                    <option key={opt.value} value={opt.value}>
-                      {opt.label}
-                    </option>
-                  ))}
-                </select>
-              </div>
-
-              <div>
-                <label className="block text-xs font-semibold text-[#4C4A6E] mb-1">
-                  Calculation Method
-                </label>
-                <select
-                  value={stagedChurnDef.calculationMethod}
-                  onChange={(e) =>
-                    setStagedChurnDef((prev) =>
-                      prev
-                        ? { ...prev, calculationMethod: e.target.value as ChurnCalculationMethod }
-                        : prev
-                    )
-                  }
-                  className="w-full rounded-xl border border-purple-200 bg-[#F6F3FF]/40 px-3 py-2 text-xs font-medium text-[#15152F]"
-                >
-                  {CALCULATION_METHOD_OPTIONS.map((opt) => (
-                    <option key={opt.value} value={opt.value}>
-                      {opt.label}
-                    </option>
-                  ))}
-                </select>
-              </div>
-
-              <div>
-                <label className="block text-xs font-semibold text-[#4C4A6E] mb-1">
-                  Denominator Population
-                </label>
-                <select
-                  value={stagedChurnDef.denominatorPopulation}
-                  onChange={(e) =>
-                    setStagedChurnDef((prev) =>
-                      prev
-                        ? {
-                            ...prev,
-                            denominatorPopulation: e.target.value as ChurnDenominatorType,
-                          }
-                        : prev
-                    )
-                  }
-                  className="w-full rounded-xl border border-purple-200 bg-[#F6F3FF]/40 px-3 py-2 text-xs font-medium text-[#15152F]"
-                >
-                  {DENOMINATOR_OPTIONS.map((opt) => (
-                    <option key={opt.value} value={opt.value}>
-                      {opt.label}
-                    </option>
-                  ))}
-                </select>
-              </div>
-
-              <div>
-                <label className="block text-xs font-semibold text-[#4C4A6E] mb-1">
-                  Reporting Period
-                </label>
-                <select
-                  value={stagedChurnDef.reportingPeriod}
-                  onChange={(e) =>
-                    setStagedChurnDef((prev) =>
-                      prev ? { ...prev, reportingPeriod: e.target.value as ReportingPeriod } : prev
-                    )
-                  }
-                  className="w-full rounded-xl border border-purple-200 bg-[#F6F3FF]/40 px-3 py-2 text-xs font-medium text-[#15152F]"
-                >
-                  {REPORTING_PERIOD_OPTIONS.map((opt) => (
-                    <option key={opt.value} value={opt.value}>
-                      {opt.label}
-                    </option>
-                  ))}
-                </select>
-              </div>
-
-              {stagedChurnDef.triggerType === 'inactivity' && (
-                <div>
-                  <label className="block text-xs font-semibold text-[#4C4A6E] mb-1">
-                    Inactivity Threshold (Days)
-                  </label>
-                  <input
-                    type="number"
-                    min={1}
-                    max={1095}
-                    value={stagedChurnDef.inactivityDays ?? 90}
-                    onChange={(e) =>
-                      setStagedChurnDef((prev) =>
-                        prev ? { ...prev, inactivityDays: Number(e.target.value) || 90 } : prev
-                      )
-                    }
-                    className="w-full rounded-xl border border-purple-200 bg-[#F6F3FF]/40 px-3 py-2 text-xs font-mono text-[#15152F]"
-                  />
-                </div>
-              )}
-
-              <div
-                className={
-                  stagedChurnDef.triggerType === 'inactivity' ? 'sm:col-span-3' : 'sm:col-span-4'
-                }
-              >
-                <label className="block text-xs font-semibold text-[#4C4A6E] mb-1">
-                  Churn Event Description
-                </label>
-                <input
-                  type="text"
-                  value={stagedChurnDef.churnEventDescription}
-                  onChange={(e) =>
-                    setStagedChurnDef((prev) =>
-                      prev ? { ...prev, churnEventDescription: e.target.value } : prev
-                    )
-                  }
-                  className="w-full rounded-xl border border-purple-200 bg-[#F6F3FF]/40 px-3 py-2 text-xs text-[#15152F]"
-                />
-              </div>
-
-              <div className="sm:col-span-2">
-                <label className="block text-xs font-semibold text-[#4C4A6E] mb-1">
-                  Expected Churn Status Column Hint (Optional)
-                </label>
-                <input
-                  type="text"
-                  value={stagedChurnDef.churnStatusColumnHint || ''}
-                  onChange={(e) =>
-                    setStagedChurnDef((prev) =>
-                      prev ? { ...prev, churnStatusColumnHint: e.target.value } : prev
-                    )
-                  }
-                  placeholder="e.g. churn_status, exited, discontinued"
-                  className="w-full rounded-xl border border-purple-200 bg-[#F6F3FF]/40 px-3 py-2 text-xs font-mono text-[#15152F]"
-                />
-              </div>
-
-              <div className="sm:col-span-2">
-                <label className="block text-xs font-semibold text-[#4C4A6E] mb-1">
-                  Cancellation / Churn Date Column Hint (Optional)
-                </label>
-                <input
-                  type="text"
-                  value={stagedChurnDef.cancellationDateColumnHint || ''}
-                  onChange={(e) =>
-                    setStagedChurnDef((prev) =>
-                      prev ? { ...prev, cancellationDateColumnHint: e.target.value } : prev
-                    )
-                  }
-                  placeholder="e.g. churn_date, cancellation_date"
-                  className="w-full rounded-xl border border-purple-200 bg-[#F6F3FF]/40 px-3 py-2 text-xs font-mono text-[#15152F]"
-                />
-              </div>
-            </div>
-
-            <div className="bg-[#F5F3FF] border border-purple-200/80 rounded-xl p-3.5 text-xs text-[#15152F] space-y-2">
-              <div className="font-semibold text-[#5B3AD6]">Live Churn Formula Preview</div>
-              <div className="font-mono text-[11px] text-slate-700">
-                {formatChurnCalculationExplanation(stagedChurnDef, 25, stagedImport.rowCount)}
-              </div>
-            </div>
-
-            {!canCommitWithoutChurnDef && (
-              <label className="flex items-start gap-2.5 text-xs text-[#15152F] cursor-pointer pt-1">
-                <input
-                  type="checkbox"
-                  checked={stagedChurnDef.confirmedByUser}
-                  onChange={(e) =>
-                    setStagedChurnDef((prev) =>
-                      prev ? { ...prev, confirmedByUser: e.target.checked } : prev
-                    )
-                  }
-                  className="mt-0.5 rounded border-purple-300 accent-[#7655E8]"
-                />
-                <span className="font-semibold">
-                  I confirm this churn definition and column mapping accurately represent our
-                  organization&apos;s dataset.
-                </span>
-              </label>
-            )}
-          </div>
-          )}
-
-          {/* Customer-Centric Staged Validation Preview Table */}
-          {stagedImport.rowValidation && stagedImport.rowValidation.previewRecords.length > 0 ? (
-            <div className="pt-4 border-t border-purple-100 space-y-2">
-              <div className="flex items-center justify-between gap-2">
-                <div className="text-xs font-bold text-[#15152F]">
-                  Customer Validation Preview (First {stagedImport.rowValidation.previewRecords.length} Records)
-                </div>
-                <span className="text-[11px] font-mono text-slate-500">
-                  Scale: {satisfactionScale.toUpperCase()}
-                </span>
-              </div>
-              <div className="overflow-x-auto border border-purple-100 rounded-xl">
-                <table className="w-full text-left border-collapse text-xs">
-                  <thead className="bg-[#F5F3FF] text-[#4C4A6E] border-b border-purple-100">
-                    <tr>
-                      <th className="py-2 px-3 whitespace-nowrap font-semibold">Customer ID</th>
-                      <th className="py-2 px-3 whitespace-nowrap font-semibold">Customer Name</th>
-                      <th className="py-2 px-3 whitespace-nowrap font-semibold">Status</th>
-                      <th className="py-2 px-3 whitespace-nowrap font-semibold text-right">Tenure</th>
-                      <th className="py-2 px-3 whitespace-nowrap font-semibold text-right">Satisfaction</th>
-                      <th className="py-2 px-3 whitespace-nowrap font-semibold text-right">Complaints</th>
-                      <th className="py-2 px-3 whitespace-nowrap font-semibold text-right">Tickets</th>
-                      <th className="py-2 px-3 whitespace-nowrap font-semibold text-right">Avg Resolution</th>
-                      <th className="py-2 px-3 whitespace-nowrap font-semibold text-right">Revenue</th>
-                      <th className="py-2 px-3 whitespace-nowrap font-semibold">Churn Status</th>
-                      <th className="py-2 px-3 whitespace-nowrap font-semibold">Validation</th>
-                      <th className="py-2 px-3 whitespace-nowrap font-semibold">Notes</th>
-                    </tr>
-                  </thead>
-                  <tbody className="divide-y divide-purple-50 font-mono tabular-nums">
-                    {stagedImport.rowValidation.previewRecords.map((rec) => {
-                      const statusColor =
-                        rec.validationStatus === 'Error'
-                          ? 'text-[#E04F44] font-bold'
-                          : rec.validationStatus === 'Warning'
-                            ? 'text-amber-700 font-bold'
-                            : 'text-[#0E9F6E] font-semibold';
-                      return (
-                        <tr key={`${rec.rowIndex}-${rec.customerId}`} className="hover:bg-[#F5F3FF]/50">
-                          <td className="py-2 px-3 whitespace-nowrap font-semibold text-[#15152F]">{rec.customerId}</td>
-                          <td className="py-2 px-3 whitespace-nowrap font-sans text-slate-700">{rec.customerName}</td>
-                          <td className="py-2 px-3 whitespace-nowrap font-sans text-slate-700">{rec.subscriptionStatus}</td>
-                          <td className="py-2 px-3 whitespace-nowrap text-right text-slate-700">{rec.tenure}</td>
-                          <td className="py-2 px-3 whitespace-nowrap text-right text-slate-700">{rec.satisfactionScore}</td>
-                          <td className="py-2 px-3 whitespace-nowrap text-right text-slate-700">{rec.complaints}</td>
-                          <td className="py-2 px-3 whitespace-nowrap text-right text-slate-700">{rec.ticketsRaised}</td>
-                          <td className="py-2 px-3 whitespace-nowrap text-right text-slate-700">{rec.avgResolutionTime}</td>
-                          <td className="py-2 px-3 whitespace-nowrap text-right text-slate-700">{rec.revenue}</td>
-                          <td className="py-2 px-3 whitespace-nowrap font-sans text-slate-700">{rec.churnStatus}</td>
-                          <td className={`py-2 px-3 whitespace-nowrap font-sans ${statusColor}`}>
-                            {rec.validationStatus}
-                          </td>
-                          <td className="py-2 px-3 font-sans text-[11px] text-slate-600 min-w-[200px]">
-                            {rec.validationNotes.length > 0 ? rec.validationNotes.join('; ') : 'Passed'}
-                          </td>
-                        </tr>
-                      );
-                    })}
-                  </tbody>
-                </table>
-              </div>
-            </div>
-          ) : stagedImport.previewRows.length > 0 ? (
-            <div className="pt-4 border-t border-purple-100 space-y-2">
-              <div className="text-xs font-bold text-[#15152F]">
-                Sample Preview (First {Math.min(5, stagedImport.previewRows.length)} Rows)
-              </div>
-              <div className="overflow-x-auto border border-purple-100 rounded-xl">
-                <table className="w-full text-left border-collapse text-xs">
-                  <thead className="bg-[#F5F3FF] text-[#4C4A6E]">
-                    <tr>
-                      {stagedImport.columns.slice(0, 7).map((c) => (
-                        <th key={c.name} className="py-2 px-3 whitespace-nowrap font-semibold">
-                          {c.name}
-                        </th>
-                      ))}
-                    </tr>
-                  </thead>
-                  <tbody className="divide-y divide-purple-50 font-mono">
-                    {stagedImport.previewRows.slice(0, 5).map((r, i) => (
-                      <tr key={i}>
-                        {stagedImport.columns.slice(0, 7).map((c) => (
-                          <td key={c.name} className="py-1.5 px-3 whitespace-nowrap text-slate-700">
-                            {r[c.name] || <span className="text-amber-600 italic">empty</span>}
-                          </td>
-                        ))}
-                      </tr>
+                    {actionableWarnings.slice(0, 3).map((msg, idx) => (
+                      <div key={`warn-${idx}`} className="flex items-start gap-2">
+                        <AlertTriangle className="w-3.5 h-3.5 text-amber-700 shrink-0 mt-0.5" />
+                        <span>{msg}</span>
+                      </div>
                     ))}
-                  </tbody>
-                </table>
+                    {rowWarningCount > 0 && actionableWarnings.length === 0 && !hasBlockingErrors && rowErrorCount === 0 && (
+                      <div className="flex items-start gap-2">
+                        <AlertTriangle className="w-3.5 h-3.5 text-amber-700 shrink-0 mt-0.5" />
+                        <span>
+                          {rowWarningCount.toLocaleString()} row(s) have minor data quality warnings. Click View Details to inspect.
+                        </span>
+                      </div>
+                    )}
+                  </div>
+                )}
+
+                <div className="flex flex-wrap items-center justify-between gap-2">
+                  <button
+                    type="button"
+                    onClick={() => setShowStagedValidationDetails((prev) => !prev)}
+                    className="px-3 py-1.5 rounded-lg border border-purple-200 bg-white hover:bg-[#F5F3FF] text-xs font-semibold text-[#5B3AD6] cursor-pointer"
+                  >
+                    {showStagedValidationDetails ? 'Hide Details' : 'View Details'}
+                  </button>
+
+                  {stagedImport.rowValidation?.hasRejectedRowsCsv && (
+                    <button
+                      type="button"
+                      onClick={() => {
+                        downloadProtectedCsv(
+                          '/api/dataset/staged-rejected-csv',
+                          `rejected_rows_${stagedImport.stagedId}.csv`
+                        ).catch((err: unknown) => {
+                          setUploadError(
+                            err instanceof Error
+                              ? err.message
+                              : 'Failed to download rejected rows CSV.'
+                          );
+                        });
+                      }}
+                      className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-lg border border-[#FF786B]/50 bg-white hover:bg-[#FF786B]/10 text-xs font-semibold text-[#9A2E25] cursor-pointer whitespace-nowrap"
+                    >
+                      <Download className="w-3.5 h-3.5" />
+                      <span>Rejected Rows CSV</span>
+                    </button>
+                  )}
+                </div>
+
+                {/* Collapsible Technical Validation Details (Collapsed by Default) */}
+                {showStagedValidationDetails && (
+                  <div className="space-y-4 rounded-xl border border-purple-100 bg-[#F5F3FF]/30 p-4">
+                    {stagedImport.rowValidation && (
+                      <div className="space-y-3">
+                        <div className="grid grid-cols-2 sm:grid-cols-4 lg:grid-cols-8 gap-2.5">
+                          <div className="rounded-xl border border-purple-100 bg-white p-2.5">
+                            <div className="text-[10px] font-semibold uppercase tracking-wider text-slate-500">Total Rows</div>
+                            <div className="text-base font-extrabold font-mono tabular-nums text-[#15152F] mt-0.5">
+                              {stagedImport.rowValidation.totalRows.toLocaleString()}
+                            </div>
+                          </div>
+                          <div className="rounded-xl border border-[#16C995]/30 bg-[#16C995]/10 p-2.5">
+                            <div className="text-[10px] font-semibold uppercase tracking-wider text-[#065F46]">Valid</div>
+                            <div className="text-base font-extrabold font-mono tabular-nums text-[#0E9F6E] mt-0.5">
+                              {stagedImport.rowValidation.validCount.toLocaleString()}
+                            </div>
+                          </div>
+                          <div className="rounded-xl border border-amber-200 bg-amber-50 p-2.5">
+                            <div className="text-[10px] font-semibold uppercase tracking-wider text-amber-800">Warnings</div>
+                            <div className="text-base font-extrabold font-mono tabular-nums text-amber-700 mt-0.5">
+                              {stagedImport.rowValidation.warningCount.toLocaleString()}
+                            </div>
+                          </div>
+                          <div className="rounded-xl border border-[#FF786B]/40 bg-[#FF786B]/10 p-2.5">
+                            <div className="text-[10px] font-semibold uppercase tracking-wider text-[#9A2E25]">Errors</div>
+                            <div className="text-base font-extrabold font-mono tabular-nums text-[#E04F44] mt-0.5">
+                              {stagedImport.rowValidation.errorCount.toLocaleString()}
+                            </div>
+                          </div>
+                          <div className="rounded-xl border border-purple-100 bg-white p-2.5">
+                            <div className="text-[10px] font-semibold uppercase tracking-wider text-slate-500">Duplicate IDs</div>
+                            <div className="text-base font-extrabold font-mono tabular-nums text-[#15152F] mt-0.5">
+                              {(
+                                stagedImport.rowValidation.duplicateCustomerIds +
+                                stagedImport.rowValidation.duplicateTicketIds
+                              ).toLocaleString()}
+                            </div>
+                          </div>
+                          <div className="rounded-xl border border-purple-100 bg-white p-2.5">
+                            <div className="text-[10px] font-semibold uppercase tracking-wider text-slate-500">Missing</div>
+                            <div className="text-base font-extrabold font-mono tabular-nums text-[#15152F] mt-0.5">
+                              {stagedImport.rowValidation.missingValuesCount.toLocaleString()}
+                            </div>
+                          </div>
+                          <div className="rounded-xl border border-purple-100 bg-white p-2.5">
+                            <div className="text-[10px] font-semibold uppercase tracking-wider text-slate-500">Mapped</div>
+                            <div className="text-base font-extrabold font-mono tabular-nums text-[#7655E8] mt-0.5">
+                              {stagedImport.rowValidation.mappedFieldsCount}
+                            </div>
+                          </div>
+                          <div className="rounded-xl border border-purple-100 bg-white p-2.5">
+                            <div className="text-[10px] font-semibold uppercase tracking-wider text-slate-500">Unmapped</div>
+                            <div className="text-base font-extrabold font-mono tabular-nums text-slate-700 mt-0.5">
+                              {stagedImport.rowValidation.unmappedColumns.length}
+                            </div>
+                          </div>
+                        </div>
+
+                        {stagedImport.rowValidation.issuesSummary.length > 0 && (
+                          <div className="rounded-xl border border-purple-100 bg-white p-3 text-xs space-y-1">
+                            <div className="font-bold text-[#15152F]">Row Check Breakdown</div>
+                            <div className="flex flex-wrap gap-x-5 gap-y-1">
+                              {stagedImport.rowValidation.issuesSummary.map((item, idx) => (
+                                <span
+                                  key={idx}
+                                  className={`font-mono text-[11px] font-semibold ${
+                                    item.severity === 'error' ? 'text-[#E04F44]' : 'text-amber-800'
+                                  }`}
+                                >
+                                  {item.label}: {item.count}
+                                </span>
+                              ))}
+                            </div>
+                          </div>
+                        )}
+                      </div>
+                    )}
+
+                    {/* Missing Values & Imputation */}
+                    <div className="bg-white border border-purple-100 rounded-xl p-3.5 space-y-1.5 text-xs text-[#15152F]">
+                      <div className="font-bold">Missing Values &amp; Imputation</div>
+                      <p className="text-slate-600">
+                        Numeric fields with missing values use training median imputation; categorical fields use training mode imputation.
+                      </p>
+                      {columnsWithMissing.length > 0 ? (
+                        <div className="flex flex-wrap gap-x-4 gap-y-1 font-mono text-[11px] text-slate-700 pt-1">
+                          {columnsWithMissing.map((c) => (
+                            <span key={c.name}>
+                              {c.name}: {c.missingCount} ({c.missingPercent}%)
+                            </span>
+                          ))}
+                        </div>
+                      ) : (
+                        <div className="text-[11px] text-[#0E9F6E] font-medium">
+                          No missing cells detected.
+                        </div>
+                      )}
+                    </div>
+
+                    {/* Excluded Columns & Target Leakage Protection */}
+                    {excludedLeakageCols.length > 0 && (
+                      <div className="bg-white border border-purple-100 rounded-xl p-3.5 text-xs text-[#15152F]">
+                        <span className="font-bold">Excluded Columns &amp; Target Leakage Protection: </span>
+                        Post-outcome columns ({excludedLeakageCols.join(', ')}) are preserved for reporting and excluded from ML prediction features.
+                      </div>
+                    )}
+
+                    {/* Ticket Linking Details */}
+                    {stagedImport.ticketAggregation && (
+                      <div className="bg-white border border-[#397BFF]/25 rounded-xl p-3.5 space-y-2 text-xs text-[#11142B]">
+                        <div className="flex items-center gap-2 font-bold">
+                          <LifeBuoy className="w-4 h-4 text-[#397BFF] shrink-0" />
+                          <span>
+                            Ticket Linking: {stagedImport.ticketAggregation.ticketRowsCount} rows ·{' '}
+                            {stagedImport.ticketAggregation.matchedCustomersCount} customer(s)
+                          </span>
+                        </div>
+                        <p className="text-slate-600">{stagedImport.ticketAggregation.note}</p>
+                        {stagedImport.ticketAggregation.ticketIssues &&
+                          stagedImport.ticketAggregation.ticketIssues.length > 0 && (
+                            <ul className="space-y-0.5 text-[11px] text-amber-950 font-mono">
+                              {stagedImport.ticketAggregation.ticketIssues.slice(0, 6).map((ti, i) => (
+                                <li key={i}>
+                                  Row {ti.rowIndex} ({ti.customerId}): {ti.messages.join(' ')}
+                                </li>
+                              ))}
+                            </ul>
+                          )}
+                      </div>
+                    )}
+
+                    {stagedImport.modelCompatibility && (
+                      <div className="bg-white border border-purple-100 rounded-xl p-3 text-xs text-[#15152F]">
+                        <span className="font-bold">Model Compatibility: </span>
+                        {stagedImport.modelCompatibility.message}
+                      </div>
+                    )}
+
+                    {/* Column Validation Results */}
+                    {stagedImport.issues.length > 0 && (
+                      <div className="bg-white border border-purple-100 rounded-xl p-3.5 space-y-1.5">
+                        <div className="text-xs font-bold text-[#15152F]">Column Validation Results</div>
+                        {stagedImport.issues.map((issue, idx) => (
+                          <div key={idx} className="text-xs text-slate-700 flex items-start gap-2">
+                            <Info className="w-3.5 h-3.5 shrink-0 mt-0.5 text-slate-400" />
+                            <span>{issue.message}</span>
+                          </div>
+                        ))}
+                      </div>
+                    )}
+
+                    {/* Row-Level Validation Preview */}
+                    {stagedImport.rowValidation && stagedImport.rowValidation.previewRecords.length > 0 && (
+                      <div className="space-y-2">
+                        <div className="text-xs font-bold text-[#15152F]">
+                          Row-Level Validation Preview (First {stagedImport.rowValidation.previewRecords.length} Records)
+                        </div>
+                        <div className="overflow-x-auto border border-purple-100 rounded-xl bg-white">
+                          <table className="w-full text-left border-collapse text-xs">
+                            <thead className="bg-[#F5F3FF] text-[#4C4A6E] border-b border-purple-100">
+                              <tr>
+                                <th className="py-2 px-3 whitespace-nowrap font-semibold">Customer ID</th>
+                                <th className="py-2 px-3 whitespace-nowrap font-semibold">Customer Name</th>
+                                <th className="py-2 px-3 whitespace-nowrap font-semibold">Status</th>
+                                <th className="py-2 px-3 whitespace-nowrap font-semibold text-right">Tenure</th>
+                                <th className="py-2 px-3 whitespace-nowrap font-semibold text-right">Satisfaction</th>
+                                <th className="py-2 px-3 whitespace-nowrap font-semibold text-right">Complaints</th>
+                                <th className="py-2 px-3 whitespace-nowrap font-semibold text-right">Tickets</th>
+                                <th className="py-2 px-3 whitespace-nowrap font-semibold text-right">Avg Resolution</th>
+                                <th className="py-2 px-3 whitespace-nowrap font-semibold text-right">Revenue</th>
+                                <th className="py-2 px-3 whitespace-nowrap font-semibold">Churn Status</th>
+                                <th className="py-2 px-3 whitespace-nowrap font-semibold">Validation</th>
+                                <th className="py-2 px-3 whitespace-nowrap font-semibold">Notes</th>
+                              </tr>
+                            </thead>
+                            <tbody className="divide-y divide-purple-50 font-mono tabular-nums">
+                              {stagedImport.rowValidation.previewRecords.map((rec) => {
+                                const statusColor =
+                                  rec.validationStatus === 'Error'
+                                    ? 'text-[#E04F44] font-bold'
+                                    : rec.validationStatus === 'Warning'
+                                      ? 'text-amber-700 font-bold'
+                                      : 'text-[#0E9F6E] font-semibold';
+                                return (
+                                  <tr key={`${rec.rowIndex}-${rec.customerId}`} className="hover:bg-[#F5F3FF]/50">
+                                    <td className="py-2 px-3 whitespace-nowrap font-semibold text-[#15152F]">{rec.customerId}</td>
+                                    <td className="py-2 px-3 whitespace-nowrap font-sans text-slate-700">{rec.customerName}</td>
+                                    <td className="py-2 px-3 whitespace-nowrap font-sans text-slate-700">{rec.subscriptionStatus}</td>
+                                    <td className="py-2 px-3 whitespace-nowrap text-right text-slate-700">
+                                      {formatDuration(rec.tenure, 'month')}
+                                    </td>
+                                    <td className="py-2 px-3 whitespace-nowrap text-right text-slate-700">
+                                      {formatScore(rec.satisfactionScore, 'customer_satisfaction_score', {
+                                        company,
+                                        satisfactionScale,
+                                      })}
+                                    </td>
+                                    <td className="py-2 px-3 whitespace-nowrap text-right text-slate-700">
+                                      {formatAttributeValue('complaints', rec.complaints, { company })}
+                                    </td>
+                                    <td className="py-2 px-3 whitespace-nowrap text-right text-slate-700">
+                                      {formatAttributeValue('total_tickets_raised', rec.ticketsRaised, { company })}
+                                    </td>
+                                    <td className="py-2 px-3 whitespace-nowrap text-right text-slate-700">
+                                      {formatDuration(rec.avgResolutionTime, 'day')}
+                                    </td>
+                                    <td className="py-2 px-3 whitespace-nowrap text-right text-slate-700">
+                                      {formatCurrencyUSD(rec.revenue)}
+                                    </td>
+                                    <td className="py-2 px-3 whitespace-nowrap font-sans text-slate-700">{rec.churnStatus}</td>
+                                    <td className={`py-2 px-3 whitespace-nowrap font-sans ${statusColor}`}>
+                                      {rec.validationStatus}
+                                    </td>
+                                    <td className="py-2 px-3 font-sans text-[11px] text-slate-600 min-w-[200px]">
+                                      {rec.validationNotes.length > 0 ? rec.validationNotes.join('; ') : 'Passed'}
+                                    </td>
+                                  </tr>
+                                );
+                              })}
+                            </tbody>
+                          </table>
+                        </div>
+                      </div>
+                    )}
+                  </div>
+                )}
               </div>
-            </div>
-          ) : null}
+            );
+          })()}
+
+          {/* Simplified Column Mapping Editor (shown for customer uploads, hidden for standalone tickets) */}
+          {stagedImport.uploadMode !== 'tickets' && (() => {
+            const targetColValid =
+              !stagedMapping.targetColumn ||
+              stagedImport.columns.some((c) => c.name === stagedMapping.targetColumn);
+            const mappingValid = targetColValid && stagedMapping.featureColumns.length > 0;
+
+            return (
+              <div className="pt-2 border-t border-purple-100 space-y-3.5">
+                <div className="flex flex-col sm:flex-row sm:items-center sm:justify-between gap-2">
+                  <h3 className="text-sm font-bold text-[#15152F]">
+                    1. Column Mapping
+                  </h3>
+                  {mappingValid && (
+                    <span className="inline-flex items-center gap-1.5 text-xs font-semibold text-[#065F46] bg-[#16C995]/12 border border-[#16C995]/30 rounded-lg px-3 py-1 self-start sm:self-auto">
+                      <CheckCircle2 className="w-3.5 h-3.5 text-[#0E9F6E]" />
+                      <span>
+                        {stagedMapping.targetColumn
+                          ? 'Column mapping is valid'
+                          : 'Mapping valid (unlabeled mode)'}
+                      </span>
+                    </span>
+                  )}
+                </div>
+
+                <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-3">
+                  <div>
+                    <label className="block text-xs font-semibold text-[#4C4A6E] mb-1">
+                      Target Churn Column
+                    </label>
+                    <select
+                      value={stagedMapping.targetColumn}
+                      onChange={(e) => {
+                        const nextTarget = e.target.value;
+                        setStagedMapping((prev) =>
+                          prev
+                            ? {
+                                ...prev,
+                                targetColumn: nextTarget,
+                                featureColumns: prev.featureColumns.filter((c) => c !== nextTarget),
+                              }
+                            : prev
+                        );
+                      }}
+                      className="w-full rounded-xl border border-purple-200 bg-[#F6F3FF]/40 px-3 py-2 text-xs font-medium text-[#15152F]"
+                    >
+                      <option value="">None (Unlabeled)</option>
+                      {stagedImport.columns.map((c) => (
+                        <option key={c.name} value={c.name}>
+                          {c.name}
+                        </option>
+                      ))}
+                    </select>
+                  </div>
+
+                  <div>
+                    <label className="block text-xs font-semibold text-[#4C4A6E] mb-1">
+                      Positive Churn Value
+                    </label>
+                    {stagedTargetUniqueValues.length >= 2 && stagedTargetUniqueValues.length <= 20 ? (
+                      <select
+                        value={stagedMapping.positiveClassValue}
+                        onChange={(e) =>
+                          setStagedMapping((prev) =>
+                            prev ? { ...prev, positiveClassValue: e.target.value } : prev
+                          )
+                        }
+                        className="w-full rounded-xl border border-purple-200 bg-[#F6F3FF]/40 px-3 py-2 text-xs font-medium text-[#15152F]"
+                      >
+                        {stagedTargetUniqueValues.map((val) => (
+                          <option key={val} value={val}>
+                            {val}
+                          </option>
+                        ))}
+                      </select>
+                    ) : (
+                      <input
+                        type="text"
+                        value={stagedMapping.positiveClassValue}
+                        onChange={(e) =>
+                          setStagedMapping((prev) =>
+                            prev ? { ...prev, positiveClassValue: e.target.value } : prev
+                          )
+                        }
+                        placeholder="e.g. Yes, 1, Churned"
+                        className="w-full rounded-xl border border-purple-200 bg-[#F6F3FF]/40 px-3 py-2 text-xs font-medium text-[#15152F]"
+                      />
+                    )}
+                  </div>
+
+                  <div>
+                    <label className="block text-xs font-semibold text-[#4C4A6E] mb-1">
+                      {tmpl.entitySingular} ID Column
+                    </label>
+                    <select
+                      value={stagedMapping.idColumn || ''}
+                      onChange={(e) =>
+                        setStagedMapping((prev) =>
+                          prev ? { ...prev, idColumn: e.target.value || null } : prev
+                        )
+                      }
+                      className="w-full rounded-xl border border-purple-200 bg-[#F6F3FF]/40 px-3 py-2 text-xs font-medium text-[#15152F]"
+                    >
+                      <option value="">Auto-generate ID</option>
+                      {stagedImport.columns.map((c) => (
+                        <option key={c.name} value={c.name}>
+                          {c.name}
+                        </option>
+                      ))}
+                    </select>
+                  </div>
+
+                  <div>
+                    <label className="block text-xs font-semibold text-[#4C4A6E] mb-1">
+                      {tmpl.segmentLabel} Column
+                    </label>
+                    <select
+                      value={stagedMapping.contractColumn || ''}
+                      onChange={(e) =>
+                        setStagedMapping((prev) =>
+                          prev ? { ...prev, contractColumn: e.target.value || null } : prev
+                        )
+                      }
+                      className="w-full rounded-xl border border-purple-200 bg-[#F6F3FF]/40 px-3 py-2 text-xs font-medium text-[#15152F]"
+                    >
+                      <option value="">Not mapped</option>
+                      {stagedImport.columns.map((c) => (
+                        <option key={c.name} value={c.name}>
+                          {c.name}
+                        </option>
+                      ))}
+                    </select>
+                  </div>
+
+                  <div>
+                    <label className="block text-xs font-semibold text-[#4C4A6E] mb-1">
+                      {tmpl.tenureLabel} Column
+                    </label>
+                    <select
+                      value={stagedMapping.tenureColumn || ''}
+                      onChange={(e) =>
+                        setStagedMapping((prev) =>
+                          prev ? { ...prev, tenureColumn: e.target.value || null } : prev
+                        )
+                      }
+                      className="w-full rounded-xl border border-purple-200 bg-[#F6F3FF]/40 px-3 py-2 text-xs font-medium text-[#15152F]"
+                    >
+                      <option value="">Not mapped</option>
+                      {stagedImport.columns.map((c) => (
+                        <option key={c.name} value={c.name}>
+                          {c.name}
+                        </option>
+                      ))}
+                    </select>
+                  </div>
+
+                  <div>
+                    <label className="block text-xs font-semibold text-[#4C4A6E] mb-1">
+                      {tmpl.revenueLabel} Column
+                    </label>
+                    <select
+                      value={stagedMapping.monthlyChargesColumn || ''}
+                      onChange={(e) =>
+                        setStagedMapping((prev) =>
+                          prev ? { ...prev, monthlyChargesColumn: e.target.value || null } : prev
+                        )
+                      }
+                      className="w-full rounded-xl border border-purple-200 bg-[#F6F3FF]/40 px-3 py-2 text-xs font-medium text-[#15152F]"
+                    >
+                      <option value="">Not mapped</option>
+                      {stagedImport.columns.map((c) => (
+                        <option key={c.name} value={c.name}>
+                          {c.name}
+                        </option>
+                      ))}
+                    </select>
+                  </div>
+
+                  <div>
+                    <label className="block text-xs font-semibold text-[#4C4A6E] mb-1">
+                      Date Column
+                    </label>
+                    <select
+                      value={stagedMapping.dateColumn || ''}
+                      onChange={(e) =>
+                        setStagedMapping((prev) =>
+                          prev ? { ...prev, dateColumn: e.target.value || null } : prev
+                        )
+                      }
+                      className="w-full rounded-xl border border-purple-200 bg-[#F6F3FF]/40 px-3 py-2 text-xs font-medium text-[#15152F]"
+                    >
+                      <option value="">Not mapped</option>
+                      {stagedImport.columns.map((c) => (
+                        <option key={c.name} value={c.name}>
+                          {c.name}
+                        </option>
+                      ))}
+                    </select>
+                  </div>
+
+                  <div>
+                    <label className="block text-xs font-semibold text-[#4C4A6E] mb-1">
+                      Customer Status Column
+                    </label>
+                    <select
+                      value={stagedMapping.statusColumn || ''}
+                      onChange={(e) =>
+                        setStagedMapping((prev) =>
+                          prev ? { ...prev, statusColumn: e.target.value || null } : prev
+                        )
+                      }
+                      className="w-full rounded-xl border border-purple-200 bg-[#F6F3FF]/40 px-3 py-2 text-xs font-medium text-[#15152F]"
+                    >
+                      <option value="">Not mapped</option>
+                      {stagedImport.columns.map((c) => (
+                        <option key={c.name} value={c.name}>
+                          {c.name}
+                        </option>
+                      ))}
+                    </select>
+                  </div>
+                </div>
+
+                <div>
+                  <button
+                    type="button"
+                    onClick={() => setShowStagedAdvancedMapping((prev) => !prev)}
+                    className="text-xs font-semibold text-[#7655E8] hover:text-[#E84FA8] cursor-pointer"
+                  >
+                    {showStagedAdvancedMapping
+                      ? 'Hide Advanced Fields & Attributes'
+                      : `Advanced Fields & Attributes (${stagedMapping.featureColumns.length} selected)`}
+                  </button>
+
+                  {showStagedAdvancedMapping && (
+                    <div className="mt-3 space-y-4 rounded-xl border border-purple-100 bg-[#F5F3FF]/30 p-4">
+                      <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-3">
+                        <div>
+                          <label className="block text-xs font-semibold text-[#4C4A6E] mb-1">
+                            {tmpl.frequencyLabel} Column
+                          </label>
+                          <select
+                            value={stagedMapping.frequencyColumn || ''}
+                            onChange={(e) =>
+                              setStagedMapping((prev) =>
+                                prev ? { ...prev, frequencyColumn: e.target.value || null } : prev
+                              )
+                            }
+                            className="w-full rounded-xl border border-purple-200 bg-white px-3 py-2 text-xs font-medium text-[#15152F]"
+                          >
+                            <option value="">Not mapped</option>
+                            {stagedImport.columns.map((c) => (
+                              <option key={c.name} value={c.name}>
+                                {c.name}
+                              </option>
+                            ))}
+                          </select>
+                        </div>
+
+                        <div>
+                          <label className="block text-xs font-semibold text-[#4C4A6E] mb-1">
+                            Observation Snapshot Date
+                          </label>
+                          <select
+                            value={stagedMapping.observationDateColumn || ''}
+                            onChange={(e) =>
+                              setStagedMapping((prev) =>
+                                prev
+                                  ? { ...prev, observationDateColumn: e.target.value || null }
+                                  : prev
+                              )
+                            }
+                            className="w-full rounded-xl border border-purple-200 bg-white px-3 py-2 text-xs font-medium text-[#15152F]"
+                          >
+                            <option value="">Not mapped</option>
+                            {stagedImport.columns.map((c) => (
+                              <option key={c.name} value={c.name}>
+                                {c.name}
+                              </option>
+                            ))}
+                          </select>
+                        </div>
+
+                        <div>
+                          <label className="block text-xs font-semibold text-[#4C4A6E] mb-1">
+                            Registration Date
+                          </label>
+                          <select
+                            value={stagedMapping.registrationDateColumn || ''}
+                            onChange={(e) =>
+                              setStagedMapping((prev) =>
+                                prev
+                                  ? { ...prev, registrationDateColumn: e.target.value || null }
+                                  : prev
+                              )
+                            }
+                            className="w-full rounded-xl border border-purple-200 bg-white px-3 py-2 text-xs font-medium text-[#15152F]"
+                          >
+                            <option value="">Not mapped</option>
+                            {stagedImport.columns.map((c) => (
+                              <option key={c.name} value={c.name}>
+                                {c.name}
+                              </option>
+                            ))}
+                          </select>
+                        </div>
+
+                        <div>
+                          <label className="block text-xs font-semibold text-[#4C4A6E] mb-1">
+                            Churn Date Column
+                          </label>
+                          <select
+                            value={stagedMapping.churnDateColumn || ''}
+                            onChange={(e) => {
+                              const nextChurnDate = e.target.value || null;
+                              setStagedMapping((prev) =>
+                                prev
+                                  ? {
+                                      ...prev,
+                                      churnDateColumn: nextChurnDate,
+                                      featureColumns: nextChurnDate
+                                        ? prev.featureColumns.filter((c) => c !== nextChurnDate)
+                                        : prev.featureColumns,
+                                    }
+                                  : prev
+                              );
+                            }}
+                            className="w-full rounded-xl border border-purple-200 bg-white px-3 py-2 text-xs font-medium text-[#15152F]"
+                          >
+                            <option value="">Not mapped</option>
+                            {stagedImport.columns.map((c) => (
+                              <option key={c.name} value={c.name}>
+                                {c.name}
+                              </option>
+                            ))}
+                          </select>
+                        </div>
+                      </div>
+
+                      <div>
+                        <label className="block text-xs font-semibold text-[#4C4A6E] mb-2">
+                          Included Attributes ({stagedMapping.featureColumns.length} selected)
+                        </label>
+                        <div className="flex flex-wrap gap-2">
+                          {stagedImport.columns
+                            .filter(
+                              (c) =>
+                                c.name !== stagedMapping.targetColumn &&
+                                c.name !== stagedMapping.idColumn &&
+                                c.name !== stagedMapping.churnDateColumn &&
+                                c.dataType !== 'identifier' &&
+                                c.dataType !== 'date'
+                            )
+                            .map((col) => {
+                              const checked = stagedMapping.featureColumns.includes(col.name);
+                              return (
+                                <label
+                                  key={col.name}
+                                  className={`inline-flex items-center gap-2 px-3 py-1.5 rounded-xl border text-xs cursor-pointer select-none ${
+                                    checked
+                                      ? 'bg-[#7655E8]/10 border-[#7655E8]/40 text-[#5B3AD6] font-semibold'
+                                      : 'bg-white border-purple-100 text-slate-600'
+                                  }`}
+                                >
+                                  <input
+                                    type="checkbox"
+                                    checked={checked}
+                                    onChange={() => toggleStagedFeatureColumn(col.name)}
+                                    className="rounded border-purple-300 accent-[#7655E8]"
+                                  />
+                                  <span>{col.name}</span>
+                                </label>
+                              );
+                            })}
+                        </div>
+                      </div>
+
+                      {stagedImport.mappingRationales && stagedImport.mappingRationales.length > 0 && (
+                        <div className="space-y-2">
+                          <button
+                            type="button"
+                            onClick={() => setShowStagedMappingRationales((prev) => !prev)}
+                            className="text-xs font-semibold text-[#7655E8] hover:text-[#E84FA8] cursor-pointer"
+                          >
+                            {showStagedMappingRationales ? 'Hide Auto-Mapping Log' : 'View Auto-Mapping Log'}
+                          </button>
+                          {showStagedMappingRationales && (
+                            <div className="rounded-xl border border-purple-100 bg-white p-3 space-y-1.5 text-[11px]">
+                              {stagedImport.mappingRationales
+                                .filter((m) => m.field !== 'featureColumns')
+                                .map((m) => (
+                                  <div key={String(m.field)} className="flex items-start gap-2 text-slate-700">
+                                    <span
+                                      className={`font-mono font-bold uppercase shrink-0 ${
+                                        m.confidence === 'high'
+                                          ? 'text-[#0E9F6E]'
+                                          : m.confidence === 'medium'
+                                            ? 'text-[#397BFF]'
+                                            : 'text-slate-400'
+                                      }`}
+                                    >
+                                      [{m.confidence}]
+                                    </span>
+                                    <span>{m.reason}</span>
+                                  </div>
+                                ))}
+                            </div>
+                          )}
+                        </div>
+                      )}
+                    </div>
+                  )}
+                </div>
+              </div>
+            );
+          })()}
+
+          {/* Simplified Churn Definition Builder */}
+          {stagedImport.uploadMode !== 'tickets' && (() => {
+            const stagedProfile = stagedImport.readiness?.datasetProfile;
+            const previewChurned = stagedProfile?.churnedCount ?? 0;
+            const previewDenominator =
+              stagedProfile && stagedProfile.labeledRows > 0
+                ? stagedProfile.labeledRows
+                : stagedImport.rowCount;
+            const previewRate =
+              previewDenominator > 0 ? ((previewChurned / previewDenominator) * 100).toFixed(1) : '0.0';
+
+            return (
+              <div className="pt-4 border-t border-purple-100 space-y-3.5">
+                <div className="flex flex-col sm:flex-row sm:items-center sm:justify-between gap-2">
+                  <h3 className="text-sm font-bold text-[#15152F]">
+                    2. {canCommitWithoutChurnDef ? 'Churn Definition (Optional)' : 'Churn Definition'}
+                  </h3>
+                  <div className="text-xs font-mono text-[#5B3AD6] bg-[#F5F3FF] border border-purple-200/80 rounded-lg px-3 py-1 self-start sm:self-auto">
+                    {stagedImport.hasValidChurnLabels
+                      ? `Churn rate preview: ${previewRate}% (${previewChurned.toLocaleString()} of ${previewDenominator.toLocaleString()})`
+                      : 'Churn rate preview: Pending outcome labels'}
+                  </div>
+                </div>
+
+                <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-3">
+                  <div>
+                    <label className="block text-xs font-semibold text-[#4C4A6E] mb-1">
+                      Churn Trigger
+                    </label>
+                    <select
+                      value={stagedChurnDef.triggerType}
+                      onChange={(e) =>
+                        setStagedChurnDef((prev) =>
+                          prev
+                            ? {
+                                ...prev,
+                                triggerType: e.target.value as ChurnTriggerType,
+                                inactivityDays:
+                                  e.target.value === 'inactivity' ? prev.inactivityDays || 90 : null,
+                              }
+                            : prev
+                        )
+                      }
+                      className="w-full rounded-xl border border-purple-200 bg-[#F6F3FF]/40 px-3 py-2 text-xs font-medium text-[#15152F]"
+                    >
+                      {CHURN_TRIGGER_OPTIONS.map((opt) => (
+                        <option key={opt.value} value={opt.value}>
+                          {opt.label}
+                        </option>
+                      ))}
+                    </select>
+                  </div>
+
+                  <div>
+                    <label className="block text-xs font-semibold text-[#4C4A6E] mb-1">
+                      Calculation Method
+                    </label>
+                    <select
+                      value={stagedChurnDef.calculationMethod}
+                      onChange={(e) =>
+                        setStagedChurnDef((prev) =>
+                          prev
+                            ? { ...prev, calculationMethod: e.target.value as ChurnCalculationMethod }
+                            : prev
+                        )
+                      }
+                      className="w-full rounded-xl border border-purple-200 bg-[#F6F3FF]/40 px-3 py-2 text-xs font-medium text-[#15152F]"
+                    >
+                      {CALCULATION_METHOD_OPTIONS.map((opt) => (
+                        <option key={opt.value} value={opt.value}>
+                          {opt.label}
+                        </option>
+                      ))}
+                    </select>
+                  </div>
+
+                  <div>
+                    <label className="block text-xs font-semibold text-[#4C4A6E] mb-1">
+                      Customer Base
+                    </label>
+                    <select
+                      value={stagedChurnDef.denominatorPopulation}
+                      onChange={(e) =>
+                        setStagedChurnDef((prev) =>
+                          prev
+                            ? {
+                                ...prev,
+                                denominatorPopulation: e.target.value as ChurnDenominatorType,
+                              }
+                            : prev
+                        )
+                      }
+                      className="w-full rounded-xl border border-purple-200 bg-[#F6F3FF]/40 px-3 py-2 text-xs font-medium text-[#15152F]"
+                    >
+                      {DENOMINATOR_OPTIONS.map((opt) => (
+                        <option key={opt.value} value={opt.value}>
+                          {opt.label}
+                        </option>
+                      ))}
+                    </select>
+                  </div>
+
+                  <div>
+                    <label className="block text-xs font-semibold text-[#4C4A6E] mb-1">
+                      Reporting Period
+                    </label>
+                    <select
+                      value={stagedChurnDef.reportingPeriod}
+                      onChange={(e) =>
+                        setStagedChurnDef((prev) =>
+                          prev ? { ...prev, reportingPeriod: e.target.value as ReportingPeriod } : prev
+                        )
+                      }
+                      className="w-full rounded-xl border border-purple-200 bg-[#F6F3FF]/40 px-3 py-2 text-xs font-medium text-[#15152F]"
+                    >
+                      {REPORTING_PERIOD_OPTIONS.map((opt) => (
+                        <option key={opt.value} value={opt.value}>
+                          {opt.label}
+                        </option>
+                      ))}
+                    </select>
+                  </div>
+
+                  {stagedChurnDef.triggerType === 'inactivity' && (
+                    <div>
+                      <label className="block text-xs font-semibold text-[#4C4A6E] mb-1">
+                        Inactivity Threshold (Days)
+                      </label>
+                      <input
+                        type="number"
+                        min={1}
+                        max={1095}
+                        value={stagedChurnDef.inactivityDays ?? 90}
+                        onChange={(e) =>
+                          setStagedChurnDef((prev) =>
+                            prev ? { ...prev, inactivityDays: Number(e.target.value) || 90 } : prev
+                          )
+                        }
+                        className="w-full rounded-xl border border-purple-200 bg-[#F6F3FF]/40 px-3 py-2 text-xs font-mono text-[#15152F]"
+                      />
+                    </div>
+                  )}
+                </div>
+
+                <div>
+                  <button
+                    type="button"
+                    onClick={() => setShowStagedChurnOptionalHints((prev) => !prev)}
+                    className="text-xs font-semibold text-[#7655E8] hover:text-[#E84FA8] cursor-pointer"
+                  >
+                    {showStagedChurnOptionalHints ? 'Hide Optional Details' : 'Optional Details'}
+                  </button>
+
+                  {showStagedChurnOptionalHints && (
+                    <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-3.5 mt-3">
+                      <div>
+                        <label className="block text-xs font-semibold text-[#4C4A6E] mb-1">
+                          Churn Event Note
+                        </label>
+                        <input
+                          type="text"
+                          value={stagedChurnDef.churnEventDescription}
+                          onChange={(e) =>
+                            setStagedChurnDef((prev) =>
+                              prev ? { ...prev, churnEventDescription: e.target.value } : prev
+                            )
+                          }
+                          className="w-full rounded-xl border border-purple-200 bg-[#F6F3FF]/40 px-3 py-2 text-xs text-[#15152F]"
+                        />
+                      </div>
+
+                      <div>
+                        <label className="block text-xs font-semibold text-[#4C4A6E] mb-1">
+                          Churn Status Column Hint
+                        </label>
+                        <input
+                          type="text"
+                          value={stagedChurnDef.churnStatusColumnHint || ''}
+                          onChange={(e) =>
+                            setStagedChurnDef((prev) =>
+                              prev ? { ...prev, churnStatusColumnHint: e.target.value } : prev
+                            )
+                          }
+                          placeholder="e.g. churn_status, exited"
+                          className="w-full rounded-xl border border-purple-200 bg-[#F6F3FF]/40 px-3 py-2 text-xs font-mono text-[#15152F]"
+                        />
+                      </div>
+
+                      <div>
+                        <label className="block text-xs font-semibold text-[#4C4A6E] mb-1">
+                          Cancellation Date Column Hint
+                        </label>
+                        <input
+                          type="text"
+                          value={stagedChurnDef.cancellationDateColumnHint || ''}
+                          onChange={(e) =>
+                            setStagedChurnDef((prev) =>
+                              prev ? { ...prev, cancellationDateColumnHint: e.target.value } : prev
+                            )
+                          }
+                          placeholder="e.g. churn_date"
+                          className="w-full rounded-xl border border-purple-200 bg-[#F6F3FF]/40 px-3 py-2 text-xs font-mono text-[#15152F]"
+                        />
+                      </div>
+                    </div>
+                  )}
+                </div>
+
+                {!canCommitWithoutChurnDef && (
+                  <label className="flex items-start gap-2.5 text-xs text-[#15152F] cursor-pointer pt-1">
+                    <input
+                      type="checkbox"
+                      checked={stagedChurnDef.confirmedByUser}
+                      onChange={(e) =>
+                        setStagedChurnDef((prev) =>
+                          prev ? { ...prev, confirmedByUser: e.target.checked } : prev
+                        )
+                      }
+                      className="mt-0.5 rounded border-purple-300 accent-[#7655E8]"
+                    />
+                    <span className="font-semibold">
+                      Confirm churn definition and column mapping before importing.
+                    </span>
+                  </label>
+                )}
+              </div>
+            );
+          })()}
 
           {/* Duplicate Customer_ID Conflict Handling */}
           {stagedImport.uploadMode !== 'tickets' &&
@@ -2908,30 +2981,16 @@ export const CustomerDataView: React.FC<CustomerDataViewProps> = ({
             onNavigate={onNavigate}
           />
 
-          {/* Validation & Data Quality Report */}
+          {/* Compact Data Validation Summary */}
           <div className="bg-white border border-purple-100/90 rounded-2xl shadow-sm shadow-purple-950/[0.04] p-5 sm:p-6 space-y-4 min-w-0">
             <div className="flex flex-col sm:flex-row sm:items-center sm:justify-between gap-3">
               <div className="min-w-0 flex-1">
                 <h2 className="text-base font-bold text-[#15152F]">
-                  Data Validation & Quality Report
+                  Data Validation Summary
                 </h2>
                 <p className="text-xs text-slate-500 mt-0.5 font-mono tabular-nums">
                   {dataset.fileName}
-                  {dataset.isSample ? ' (Demonstration Data)' : ''} ·{' '}
-                  {dataset.rowCount.toLocaleString()} rows · {dataset.columnCount} columns
-                  {typeof dataset.duplicateCount === 'number'
-                    ? ` · ${dataset.duplicateCount} duplicates`
-                    : ''}
-                  {typeof dataset.missingCellCount === 'number'
-                    ? ` · ${dataset.missingCellCount} missing`
-                    : ''}
-                  {typeof dataset.invalidDateCount === 'number' && dataset.invalidDateCount > 0
-                    ? ` · ${dataset.invalidDateCount} invalid dates`
-                    : ''}
-                  {typeof dataset.inconsistentCategoryCount === 'number' &&
-                  dataset.inconsistentCategoryCount > 0
-                    ? ` · ${dataset.inconsistentCategoryCount} inconsistent categories`
-                    : ''}
+                  {dataset.isSample ? ' (Demo)' : ''}
                 </p>
               </div>
               <div className="flex flex-wrap items-center gap-2 self-start sm:self-auto">
@@ -2941,7 +3000,7 @@ export const CustomerDataView: React.FC<CustomerDataViewProps> = ({
                     onClick={() => onNavigate('predictions')}
                     className="inline-flex items-center gap-1.5 px-3.5 py-2 bg-[#11142B] hover:bg-[#1C2147] text-white text-xs font-semibold rounded-xl transition-colors cursor-pointer"
                   >
-                    <span>View Churn Predictions</span>
+                    <span>View Predictions</span>
                   </button>
                 )}
                 {canUploadAndAnalyse && (
@@ -2951,451 +3010,647 @@ export const CustomerDataView: React.FC<CustomerDataViewProps> = ({
                     className="inline-flex items-center gap-1.5 px-3.5 py-2 bg-[#F6F3FF] hover:bg-purple-100 text-[#7655E8] border border-purple-200/80 text-xs font-semibold rounded-xl transition-colors cursor-pointer"
                   >
                     <SlidersHorizontal className="w-3.5 h-3.5" />
-                    <span>{showMapper ? 'Hide Column Mapping' : 'Configure Column Mapping'}</span>
+                    <span>{showMapper ? 'Hide Mapping' : 'Column Mapping'}</span>
                   </button>
                 )}
+                <button
+                  type="button"
+                  onClick={() => setShowPostUploadValidationDetails((prev) => !prev)}
+                  className="px-3 py-2 border border-purple-200 rounded-xl text-xs font-semibold text-[#5B3AD6] hover:bg-[#F5F3FF] cursor-pointer"
+                >
+                  {showPostUploadValidationDetails ? 'Hide Details' : 'View Details'}
+                </button>
               </div>
             </div>
 
-            {dataset.hasValidChurnLabels === false && dataset.churnReadinessMessage && (
-              <div className="bg-amber-50 border border-amber-300 rounded-xl px-4 py-3 flex items-start gap-2.5 text-xs text-amber-950">
-                <AlertTriangle className="w-4 h-4 text-amber-700 shrink-0 mt-0.5" />
-                <div>
-                  <span className="font-bold">Churn Outcome Warning: </span>
-                  {dataset.churnReadinessMessage}
-                </div>
-              </div>
-            )}
+            {(() => {
+              const activeUploadedEntry = uploadedDatasets.find(
+                (d) => d.datasetId === dataset.datasetId
+              );
+              const linkedTicketsCount =
+                dataset.ticketAggregation?.ticketRowsCount ??
+                activeUploadedEntry?.ticketCount ??
+                0;
 
-            {dataset.issues.length === 0 ? (
-              <div className="flex items-center gap-2.5 text-sm text-[#065F46] bg-[#16C995]/12 border border-[#16C995]/35 rounded-xl px-4 py-3">
-                <CheckCircle2 className="w-4 h-4 text-[#16C995] shrink-0" />
-                <span>
-                  All columns and rows passed validation with zero missing values. Data is ready for
-                  Business Analytics and Managed prediction setup.
-                </span>
-              </div>
-            ) : (
-              <div className="space-y-2">
-                {dataset.issues.map((issue, idx) => {
-                  const style =
-                    issue.severity === 'error'
-                      ? 'bg-[#FF786B]/10 border-[#FF786B]/40 text-[#9A2E25]'
-                      : issue.severity === 'warning'
-                        ? 'bg-amber-50 border-amber-200 text-amber-900'
-                        : 'bg-[#F6F3FF] border-purple-200/70 text-[#15152F]';
+              const postErrors = dataset.issues.filter((i) => i.severity === 'error');
+              const actionablePostWarnings: string[] = [];
+              for (const w of dataset.issues.filter((i) => i.severity === 'warning')) {
+                if (
+                  !isTechnicalValidationInfo(w.message) &&
+                  !actionablePostWarnings.includes(w.message)
+                ) {
+                  actionablePostWarnings.push(w.message);
+                }
+              }
+              if (
+                dataset.hasValidChurnLabels === false &&
+                dataset.churnReadinessMessage &&
+                !actionablePostWarnings.includes(dataset.churnReadinessMessage)
+              ) {
+                actionablePostWarnings.push(dataset.churnReadinessMessage);
+              }
 
-                  return (
-                    <div
-                      key={idx}
-                      className={`border rounded-xl px-3.5 py-2.5 text-xs flex items-start gap-2.5 ${style}`}
-                    >
-                      <Info className="w-4 h-4 shrink-0 mt-0.5 opacity-80" />
-                      <span>{issue.message}</span>
+              const hasErrors = postErrors.length > 0 || !dataset.isValid;
+              const hasWarnings =
+                actionablePostWarnings.length > 0 ||
+                (dataset.rowValidation?.warningCount ?? 0) > 0;
+              const isPartial = activeUploadedEntry?.importStatus === 'Partial (Errors Excluded)';
+
+              const dataQualityLabel = hasErrors
+                ? 'Failed'
+                : hasWarnings
+                  ? 'Warnings'
+                  : 'Passed';
+              const importStatusLabel = hasErrors
+                ? 'Failed'
+                : hasWarnings || isPartial
+                  ? 'Needs Attention'
+                  : 'Successful';
+
+              const columnsWithMissing = dataset.columns.filter((c) => c.missingCount > 0);
+              const excludedLeakageCols =
+                dataset.readiness?.datasetProfile.leakageColumnsExcluded ?? [];
+
+              return (
+                <div className="space-y-3">
+                  {/* 4-Metric Compact Summary */}
+                  <div className="grid grid-cols-2 lg:grid-cols-4 gap-3">
+                    <div className="rounded-xl border border-purple-100 bg-[#F5F3FF]/40 px-4 py-3">
+                      <div className="text-[11px] font-medium text-slate-500">Customers imported</div>
+                      <div className="text-lg font-bold font-mono tabular-nums text-[#15152F] mt-0.5">
+                        {dataset.rowCount.toLocaleString()}
+                      </div>
                     </div>
-                  );
-                })}
-              </div>
-            )}
-
-            {/* Flexible Column Mapping Panel */}
-            {showMapper && (
-              <div className="pt-4 border-t border-purple-100 space-y-4">
-                <div>
-                  <h3 className="text-sm font-bold text-[#15152F]">Flexible Column Mapping</h3>
-                  <p className="text-xs text-slate-500">
-                    Map spreadsheet columns to your {tmpl.label} schema below.
-                  </p>
-                </div>
-
-                <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-4">
-                  <div>
-                    <label className="block text-xs font-semibold text-[#4C4A6E] mb-1">
-                      Target Churn Column
-                    </label>
-                    <select
-                      value={dataset.mapping.targetColumn}
-                      onChange={(e) => onUpdateMapping({ targetColumn: e.target.value })}
-                      className="w-full rounded-xl border border-purple-200 bg-[#F6F3FF]/40 px-3 py-2 text-sm text-[#15152F] focus:outline-none focus:border-[#7655E8]"
-                    >
-                      <option value="">None (Unlabeled)</option>
-                      {dataset.columns.map((c) => (
-                        <option key={c.name} value={c.name}>
-                          {c.name} ({c.uniqueCount} unique)
-                        </option>
-                      ))}
-                    </select>
+                    <div className="rounded-xl border border-purple-100 bg-[#F5F3FF]/40 px-4 py-3">
+                      <div className="text-[11px] font-medium text-slate-500">Tickets linked</div>
+                      <div className="text-lg font-bold font-mono tabular-nums text-[#15152F] mt-0.5">
+                        {linkedTicketsCount.toLocaleString()}
+                      </div>
+                    </div>
+                    <div className="rounded-xl border border-purple-100 bg-[#F5F3FF]/40 px-4 py-3">
+                      <div className="text-[11px] font-medium text-slate-500">Data quality</div>
+                      <div
+                        className={`text-lg font-bold mt-0.5 ${
+                          dataQualityLabel === 'Failed'
+                            ? 'text-[#E04F44]'
+                            : dataQualityLabel === 'Warnings'
+                              ? 'text-amber-700'
+                              : 'text-[#0E9F6E]'
+                        }`}
+                      >
+                        {dataQualityLabel}
+                      </div>
+                    </div>
+                    <div className="rounded-xl border border-purple-100 bg-[#F5F3FF]/40 px-4 py-3">
+                      <div className="text-[11px] font-medium text-slate-500">Import status</div>
+                      <div
+                        className={`text-lg font-bold mt-0.5 ${
+                          importStatusLabel === 'Failed'
+                            ? 'text-[#E04F44]'
+                            : importStatusLabel === 'Needs Attention'
+                              ? 'text-amber-700'
+                              : 'text-[#0E9F6E]'
+                        }`}
+                      >
+                        {importStatusLabel}
+                      </div>
+                    </div>
                   </div>
 
-                  <div>
-                    <label className="block text-xs font-semibold text-[#4C4A6E] mb-1">
-                      Positive Churn Value
-                    </label>
-                    {dataset.targetUniqueValues &&
-                    dataset.targetUniqueValues.length >= 2 &&
-                    dataset.targetUniqueValues.length <= 20 ? (
-                      <select
-                        value={dataset.mapping.positiveClassValue}
-                        onChange={(e) => onUpdateMapping({ positiveClassValue: e.target.value })}
-                        className="w-full rounded-xl border border-purple-200 bg-[#F6F3FF]/40 px-3 py-2 text-sm text-[#15152F] focus:outline-none focus:border-[#7655E8]"
-                      >
-                        {dataset.targetUniqueValues.map((val) => (
-                          <option key={val} value={val}>
-                            {val}
-                          </option>
-                        ))}
-                      </select>
-                    ) : (
-                      <input
-                        type="text"
-                        value={dataset.mapping.positiveClassValue}
-                        onChange={(e) => onUpdateMapping({ positiveClassValue: e.target.value })}
-                        className="w-full rounded-xl border border-purple-200 bg-[#F6F3FF]/40 px-3 py-2 text-sm text-[#15152F] focus:outline-none focus:border-[#7655E8]"
-                        placeholder="e.g. Yes or 1"
-                      />
+                  {/* Critical Errors & Important Actionable Warnings Only */}
+                  {(postErrors.length > 0 ||
+                    actionablePostWarnings.length > 0 ||
+                    (dataset.rowValidation?.warningCount ?? 0) > 0) && (
+                    <div className="space-y-2">
+                      {postErrors.map((issue, idx) => (
+                        <div
+                          key={`err-${idx}`}
+                          className="border rounded-xl px-3.5 py-2.5 text-xs flex items-start gap-2.5 bg-[#FF786B]/10 border-[#FF786B]/40 text-[#9A2E25]"
+                        >
+                          <AlertCircle className="w-4 h-4 shrink-0 mt-0.5" />
+                          <span>{issue.message}</span>
+                        </div>
+                      ))}
+
+                      {actionablePostWarnings.slice(0, 3).map((msg, idx) => (
+                        <div
+                          key={`warn-${idx}`}
+                          className="border rounded-xl px-3.5 py-2.5 text-xs flex items-start gap-2.5 bg-amber-50 border-amber-200 text-amber-900"
+                        >
+                          <AlertTriangle className="w-4 h-4 text-amber-700 shrink-0 mt-0.5" />
+                          <span>{msg}</span>
+                        </div>
+                      ))}
+
+                      {(dataset.rowValidation?.warningCount ?? 0) > 0 &&
+                        actionablePostWarnings.length === 0 &&
+                        postErrors.length === 0 && (
+                          <div className="border rounded-xl px-3.5 py-2.5 text-xs flex items-start gap-2.5 bg-amber-50 border-amber-200 text-amber-900">
+                            <AlertTriangle className="w-4 h-4 text-amber-700 shrink-0 mt-0.5" />
+                            <span>
+                              {dataset.rowValidation!.warningCount.toLocaleString()} row(s) flagged with data quality warnings. Click View Details to inspect.
+                            </span>
+                          </div>
+                        )}
+                    </div>
+                  )}
+
+                  {/* Collapsible View Details (Collapsed by Default) */}
+                  {showPostUploadValidationDetails && (
+                    <div className="rounded-xl border border-purple-100 bg-[#F5F3FF]/35 p-4 space-y-4 text-xs text-slate-700">
+                      <div className="flex flex-wrap gap-x-5 gap-y-1 font-mono text-[11px]">
+                        <span>Columns: {dataset.columnCount}</span>
+                        <span>Duplicates: {dataset.duplicateCount ?? 0}</span>
+                        <span>Missing cells: {dataset.missingCellCount ?? 0}</span>
+                        <span>Invalid dates: {dataset.invalidDateCount ?? 0}</span>
+                        <span>Inconsistent categories: {dataset.inconsistentCategoryCount ?? 0}</span>
+                      </div>
+
+                      {/* Missing Values & Imputation */}
+                      <div className="bg-white border border-purple-100 rounded-xl p-3.5 space-y-1.5">
+                        <div className="font-bold text-[#15152F]">Missing Values &amp; Imputation</div>
+                        <p className="text-slate-600">
+                          Numeric fields use training median imputation; categorical fields use training mode imputation.
+                        </p>
+                        {columnsWithMissing.length > 0 ? (
+                          <div className="flex flex-wrap gap-x-4 gap-y-1 font-mono text-[11px] pt-1">
+                            {columnsWithMissing.map((c) => (
+                              <span key={c.name}>
+                                {c.name}: {c.missingCount} ({c.missingPercent}%)
+                              </span>
+                            ))}
+                          </div>
+                        ) : (
+                          <div className="text-[11px] text-[#0E9F6E] font-medium">
+                            No missing values detected.
+                          </div>
+                        )}
+                      </div>
+
+                      {/* Excluded Columns & Target Leakage Protection */}
+                      {excludedLeakageCols.length > 0 && (
+                        <div className="bg-white border border-purple-100 rounded-xl p-3.5 text-[#15152F]">
+                          <span className="font-bold">Excluded Columns &amp; Target Leakage Protection: </span>
+                          Post-outcome columns ({excludedLeakageCols.join(', ')}) are excluded from ML prediction features.
+                        </div>
+                      )}
+
+                      {/* Ticket Linking Details */}
+                      {dataset.ticketAggregation && (
+                        <div className="bg-white border border-[#397BFF]/25 rounded-xl p-3.5 space-y-1.5 text-[#11142B]">
+                          <div className="flex items-center gap-2 font-bold">
+                            <LifeBuoy className="w-4 h-4 text-[#397BFF] shrink-0" />
+                            <span>
+                              Ticket Linking Details: {dataset.ticketAggregation.ticketRowsCount} ticket(s) ·{' '}
+                              {dataset.ticketAggregation.matchedCustomersCount} customer(s)
+                            </span>
+                          </div>
+                          <p className="text-slate-600">{dataset.ticketAggregation.note}</p>
+                        </div>
+                      )}
+
+                      {/* Full Validation Messages */}
+                      {dataset.issues.length > 0 && (
+                        <div className="bg-white border border-purple-100 rounded-xl p-3.5 space-y-1.5">
+                          <div className="font-bold text-[#15152F]">Validation &amp; Hygiene Log</div>
+                          {dataset.issues.map((issue, idx) => (
+                            <div key={`detail-${idx}`} className="flex items-start gap-2">
+                              <Info className="w-3.5 h-3.5 shrink-0 mt-0.5 text-slate-400" />
+                              <span>{issue.message}</span>
+                            </div>
+                          ))}
+                        </div>
+                      )}
+
+                      {/* Column Schema & Validation Results Table */}
+                      <div className="bg-white border border-purple-100 rounded-xl p-4 space-y-3">
+                        <div>
+                          <h3 className="text-xs font-bold text-[#15152F]">
+                            Column Validation Results ({dataset.columnCount} columns)
+                          </h3>
+                        </div>
+                        <div className="overflow-x-auto">
+                          <table className="w-full text-left border-collapse">
+                            <thead>
+                              <tr className="border-b border-purple-100 text-xs font-semibold text-[#4C4A6E]">
+                                <th className="py-2 pr-4">Column Name</th>
+                                <th className="py-2 px-3">Type</th>
+                                <th className="py-2 px-3">Role</th>
+                                <th className="py-2 px-3 text-right">Unique</th>
+                                <th className="py-2 px-3 text-right">Missing</th>
+                                <th className="py-2 px-3">Hygiene</th>
+                                <th className="py-2 pl-3">Sample</th>
+                              </tr>
+                            </thead>
+                            <tbody className="divide-y divide-purple-50 text-xs">
+                              {dataset.columns.map((col) => {
+                                const hygieneFlags: string[] = [];
+                                if ((col.invalidDateCount || 0) > 0) {
+                                  hygieneFlags.push(`${col.invalidDateCount} invalid date(s)`);
+                                }
+                                if ((col.inconsistentCategoryCount || 0) > 0) {
+                                  hygieneFlags.push(`${col.inconsistentCategoryCount} case/trim variant(s)`);
+                                }
+                                if (col.invalidNumericCount > 0 && col.dataType === 'numeric') {
+                                  hygieneFlags.push(`${col.invalidNumericCount} non-numeric`);
+                                }
+                                return (
+                                  <tr key={col.name} className="hover:bg-[#F6F3FF]/60 transition-colors">
+                                    <td className="py-2 pr-4 font-semibold text-[#15152F]">
+                                      {col.name}
+                                      {col.name === dataset.mapping.targetColumn && (
+                                        <span className="ml-2 text-[11px] font-bold text-[#7655E8]">(Target)</span>
+                                      )}
+                                    </td>
+                                    <td className="py-2 px-3 font-mono text-[#397BFF] font-medium">
+                                      {col.dataType}
+                                    </td>
+                                    <td className="py-2 px-3 font-mono text-slate-600">
+                                      {col.semanticRole || 'other'}
+                                    </td>
+                                    <td className="py-2 px-3 text-right font-mono tabular-nums text-slate-700">
+                                      {col.uniqueCount}
+                                    </td>
+                                    <td className="py-2 px-3 text-right font-mono tabular-nums">
+                                      <span
+                                        className={
+                                          col.missingCount > 0
+                                            ? 'text-[#D97706] font-semibold'
+                                            : 'text-[#0E9F6E] font-medium'
+                                        }
+                                      >
+                                        {col.missingCount} ({col.missingPercent}%)
+                                      </span>
+                                    </td>
+                                    <td className="py-2 px-3">
+                                      {hygieneFlags.length > 0 ? (
+                                        <span className="text-[#D97706] font-medium">
+                                          {hygieneFlags.join(' · ')}
+                                        </span>
+                                      ) : (
+                                        <span className="text-[#0E9F6E]">Clean</span>
+                                      )}
+                                    </td>
+                                    <td className="py-2 pl-3 text-slate-500 truncate max-w-[200px]">
+                                      {col.sampleValues.join(', ') || '—'}
+                                    </td>
+                                  </tr>
+                                );
+                              })}
+                            </tbody>
+                          </table>
+                        </div>
+                      </div>
+                    </div>
+                  )}
+                </div>
+              );
+            })()}
+
+            {/* Simplified Column Mapping Panel */}
+            {showMapper && (() => {
+              const postTargetValid =
+                !dataset.mapping.targetColumn ||
+                dataset.columns.some((c) => c.name === dataset.mapping.targetColumn);
+              const postMappingValid = postTargetValid && dataset.mapping.featureColumns.length > 0;
+
+              return (
+                <div className="pt-4 border-t border-purple-100 space-y-4">
+                  <div className="flex flex-col sm:flex-row sm:items-center sm:justify-between gap-2">
+                    <h3 className="text-sm font-bold text-[#15152F]">Column Mapping</h3>
+                    {postMappingValid && (
+                      <span className="inline-flex items-center gap-1.5 text-xs font-semibold text-[#065F46] bg-[#16C995]/12 border border-[#16C995]/30 rounded-lg px-3 py-1 self-start sm:self-auto">
+                        <CheckCircle2 className="w-3.5 h-3.5 text-[#0E9F6E]" />
+                        <span>
+                          {dataset.mapping.targetColumn
+                            ? 'Column mapping is valid'
+                            : 'Mapping valid (unlabeled mode)'}
+                        </span>
+                      </span>
                     )}
                   </div>
 
-                  <div>
-                    <label className="block text-xs font-semibold text-[#4C4A6E] mb-1">
-                      {tmpl.entitySingular} ID Column (Optional)
-                    </label>
-                    <select
-                      value={dataset.mapping.idColumn || ''}
-                      onChange={(e) =>
-                        onUpdateMapping({ idColumn: e.target.value ? e.target.value : null })
-                      }
-                      className="w-full rounded-xl border border-purple-200 bg-[#F6F3FF]/40 px-3 py-2 text-sm text-[#15152F] focus:outline-none focus:border-[#7655E8]"
-                    >
-                      <option value="">None (Auto-generate ID)</option>
-                      {dataset.columns.map((c) => (
-                        <option key={c.name} value={c.name}>
-                          {c.name}
-                        </option>
-                      ))}
-                    </select>
+                  <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-3.5">
+                    <div>
+                      <label className="block text-xs font-semibold text-[#4C4A6E] mb-1">
+                        Target Churn Column
+                      </label>
+                      <select
+                        value={dataset.mapping.targetColumn}
+                        onChange={(e) => onUpdateMapping({ targetColumn: e.target.value })}
+                        className="w-full rounded-xl border border-purple-200 bg-[#F6F3FF]/40 px-3 py-2 text-xs font-medium text-[#15152F] focus:outline-none focus:border-[#7655E8]"
+                      >
+                        <option value="">None (Unlabeled)</option>
+                        {dataset.columns.map((c) => (
+                          <option key={c.name} value={c.name}>
+                            {c.name}
+                          </option>
+                        ))}
+                      </select>
+                    </div>
+
+                    <div>
+                      <label className="block text-xs font-semibold text-[#4C4A6E] mb-1">
+                        Positive Churn Value
+                      </label>
+                      {dataset.targetUniqueValues &&
+                      dataset.targetUniqueValues.length >= 2 &&
+                      dataset.targetUniqueValues.length <= 20 ? (
+                        <select
+                          value={dataset.mapping.positiveClassValue}
+                          onChange={(e) => onUpdateMapping({ positiveClassValue: e.target.value })}
+                          className="w-full rounded-xl border border-purple-200 bg-[#F6F3FF]/40 px-3 py-2 text-xs font-medium text-[#15152F] focus:outline-none focus:border-[#7655E8]"
+                        >
+                          {dataset.targetUniqueValues.map((val) => (
+                            <option key={val} value={val}>
+                              {val}
+                            </option>
+                          ))}
+                        </select>
+                      ) : (
+                        <input
+                          type="text"
+                          value={dataset.mapping.positiveClassValue}
+                          onChange={(e) => onUpdateMapping({ positiveClassValue: e.target.value })}
+                          className="w-full rounded-xl border border-purple-200 bg-[#F6F3FF]/40 px-3 py-2 text-xs font-medium text-[#15152F] focus:outline-none focus:border-[#7655E8]"
+                          placeholder="e.g. Yes or 1"
+                        />
+                      )}
+                    </div>
+
+                    <div>
+                      <label className="block text-xs font-semibold text-[#4C4A6E] mb-1">
+                        {tmpl.entitySingular} ID Column
+                      </label>
+                      <select
+                        value={dataset.mapping.idColumn || ''}
+                        onChange={(e) =>
+                          onUpdateMapping({ idColumn: e.target.value ? e.target.value : null })
+                        }
+                        className="w-full rounded-xl border border-purple-200 bg-[#F6F3FF]/40 px-3 py-2 text-xs font-medium text-[#15152F] focus:outline-none focus:border-[#7655E8]"
+                      >
+                        <option value="">Auto-generate ID</option>
+                        {dataset.columns.map((c) => (
+                          <option key={c.name} value={c.name}>
+                            {c.name}
+                          </option>
+                        ))}
+                      </select>
+                    </div>
+
+                    <div>
+                      <label className="block text-xs font-semibold text-[#4C4A6E] mb-1">
+                        {tmpl.segmentLabel} Column
+                      </label>
+                      <select
+                        value={dataset.mapping.contractColumn || ''}
+                        onChange={(e) =>
+                          onUpdateMapping({
+                            contractColumn: e.target.value ? e.target.value : null,
+                          })
+                        }
+                        className="w-full rounded-xl border border-purple-200 bg-[#F6F3FF]/40 px-3 py-2 text-xs font-medium text-[#15152F] focus:outline-none focus:border-[#7655E8]"
+                      >
+                        <option value="">Not mapped</option>
+                        {dataset.columns.map((c) => (
+                          <option key={c.name} value={c.name}>
+                            {c.name}
+                          </option>
+                        ))}
+                      </select>
+                    </div>
+
+                    <div>
+                      <label className="block text-xs font-semibold text-[#4C4A6E] mb-1">
+                        {tmpl.tenureLabel} Column
+                      </label>
+                      <select
+                        value={dataset.mapping.tenureColumn || ''}
+                        onChange={(e) =>
+                          onUpdateMapping({ tenureColumn: e.target.value ? e.target.value : null })
+                        }
+                        className="w-full rounded-xl border border-purple-200 bg-[#F6F3FF]/40 px-3 py-2 text-xs font-medium text-[#15152F] focus:outline-none focus:border-[#7655E8]"
+                      >
+                        <option value="">Not mapped</option>
+                        {dataset.columns.map((c) => (
+                          <option key={c.name} value={c.name}>
+                            {c.name}
+                          </option>
+                        ))}
+                      </select>
+                    </div>
+
+                    <div>
+                      <label className="block text-xs font-semibold text-[#4C4A6E] mb-1">
+                        {tmpl.revenueLabel} Column
+                      </label>
+                      <select
+                        value={dataset.mapping.monthlyChargesColumn || ''}
+                        onChange={(e) =>
+                          onUpdateMapping({
+                            monthlyChargesColumn: e.target.value ? e.target.value : null,
+                          })
+                        }
+                        className="w-full rounded-xl border border-purple-200 bg-[#F6F3FF]/40 px-3 py-2 text-xs font-medium text-[#15152F] focus:outline-none focus:border-[#7655E8]"
+                      >
+                        <option value="">Not mapped</option>
+                        {dataset.columns.map((c) => (
+                          <option key={c.name} value={c.name}>
+                            {c.name}
+                          </option>
+                        ))}
+                      </select>
+                    </div>
+
+                    <div>
+                      <label className="block text-xs font-semibold text-[#4C4A6E] mb-1">
+                        Date Column
+                      </label>
+                      <select
+                        value={dataset.mapping.dateColumn || ''}
+                        onChange={(e) =>
+                          onUpdateMapping({ dateColumn: e.target.value ? e.target.value : null })
+                        }
+                        className="w-full rounded-xl border border-purple-200 bg-[#F6F3FF]/40 px-3 py-2 text-xs font-medium text-[#15152F] focus:outline-none focus:border-[#7655E8]"
+                      >
+                        <option value="">Not mapped</option>
+                        {dataset.columns.map((c) => (
+                          <option key={c.name} value={c.name}>
+                            {c.name}
+                          </option>
+                        ))}
+                      </select>
+                    </div>
+
+                    <div>
+                      <label className="block text-xs font-semibold text-[#4C4A6E] mb-1">
+                        Customer Status Column
+                      </label>
+                      <select
+                        value={dataset.mapping.statusColumn || ''}
+                        onChange={(e) =>
+                          onUpdateMapping({
+                            statusColumn: e.target.value ? e.target.value : null,
+                          })
+                        }
+                        className="w-full rounded-xl border border-purple-200 bg-[#F6F3FF]/40 px-3 py-2 text-xs font-medium text-[#15152F] focus:outline-none focus:border-[#7655E8]"
+                      >
+                        <option value="">Not mapped</option>
+                        {dataset.columns.map((c) => (
+                          <option key={c.name} value={c.name}>
+                            {c.name}
+                          </option>
+                        ))}
+                      </select>
+                    </div>
                   </div>
 
                   <div>
-                    <label className="block text-xs font-semibold text-[#4C4A6E] mb-1">
-                      {tmpl.segmentLabel} Column (Optional)
-                    </label>
-                    <select
-                      value={dataset.mapping.contractColumn || ''}
-                      onChange={(e) =>
-                        onUpdateMapping({
-                          contractColumn: e.target.value ? e.target.value : null,
-                        })
-                      }
-                      className="w-full rounded-xl border border-purple-200 bg-[#F6F3FF]/40 px-3 py-2 text-sm text-[#15152F] focus:outline-none focus:border-[#7655E8]"
+                    <button
+                      type="button"
+                      onClick={() => setShowPostAdvancedMapping((prev) => !prev)}
+                      className="text-xs font-semibold text-[#7655E8] hover:text-[#E84FA8] cursor-pointer"
                     >
-                      <option value="">Not available</option>
-                      {dataset.columns.map((c) => (
-                        <option key={c.name} value={c.name}>
-                          {c.name}
-                        </option>
-                      ))}
-                    </select>
-                  </div>
+                      {showPostAdvancedMapping
+                        ? 'Hide Advanced Fields & Attributes'
+                        : `Advanced Fields & Attributes (${dataset.mapping.featureColumns.length} selected)`}
+                    </button>
 
-                  <div>
-                    <label className="block text-xs font-semibold text-[#4C4A6E] mb-1">
-                      {tmpl.tenureLabel} Column (Optional)
-                    </label>
-                    <select
-                      value={dataset.mapping.tenureColumn || ''}
-                      onChange={(e) =>
-                        onUpdateMapping({ tenureColumn: e.target.value ? e.target.value : null })
-                      }
-                      className="w-full rounded-xl border border-purple-200 bg-[#F6F3FF]/40 px-3 py-2 text-sm text-[#15152F] focus:outline-none focus:border-[#7655E8]"
-                    >
-                      <option value="">Not available</option>
-                      {dataset.columns.map((c) => (
-                        <option key={c.name} value={c.name}>
-                          {c.name}
-                        </option>
-                      ))}
-                    </select>
-                  </div>
+                    {showPostAdvancedMapping && (
+                      <div className="mt-3 space-y-4 rounded-xl border border-purple-100 bg-[#F5F3FF]/30 p-4">
+                        <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-3.5">
+                          <div>
+                            <label className="block text-xs font-semibold text-[#4C4A6E] mb-1">
+                              {tmpl.frequencyLabel} Column
+                            </label>
+                            <select
+                              value={dataset.mapping.frequencyColumn || ''}
+                              onChange={(e) =>
+                                onUpdateMapping({
+                                  frequencyColumn: e.target.value ? e.target.value : null,
+                                })
+                              }
+                              className="w-full rounded-xl border border-purple-200 bg-white px-3 py-2 text-xs font-medium text-[#15152F]"
+                            >
+                              <option value="">Not mapped</option>
+                              {dataset.columns.map((c) => (
+                                <option key={c.name} value={c.name}>
+                                  {c.name}
+                                </option>
+                              ))}
+                            </select>
+                          </div>
 
-                  <div>
-                    <label className="block text-xs font-semibold text-[#4C4A6E] mb-1">
-                      {tmpl.revenueLabel} Column (Optional)
-                    </label>
-                    <select
-                      value={dataset.mapping.monthlyChargesColumn || ''}
-                      onChange={(e) =>
-                        onUpdateMapping({
-                          monthlyChargesColumn: e.target.value ? e.target.value : null,
-                        })
-                      }
-                      className="w-full rounded-xl border border-purple-200 bg-[#F6F3FF]/40 px-3 py-2 text-sm text-[#15152F] focus:outline-none focus:border-[#7655E8]"
-                    >
-                      <option value="">Not available</option>
-                      {dataset.columns.map((c) => (
-                        <option key={c.name} value={c.name}>
-                          {c.name}
-                        </option>
-                      ))}
-                    </select>
-                  </div>
+                          <div>
+                            <label className="block text-xs font-semibold text-[#4C4A6E] mb-1">
+                              Observation Snapshot Date
+                            </label>
+                            <select
+                              value={dataset.mapping.observationDateColumn || ''}
+                              onChange={(e) =>
+                                onUpdateMapping({
+                                  observationDateColumn: e.target.value ? e.target.value : null,
+                                })
+                              }
+                              className="w-full rounded-xl border border-purple-200 bg-white px-3 py-2 text-xs font-medium text-[#15152F]"
+                            >
+                              <option value="">Not mapped</option>
+                              {dataset.columns.map((c) => (
+                                <option key={c.name} value={c.name}>
+                                  {c.name}
+                                </option>
+                              ))}
+                            </select>
+                          </div>
 
-                  <div>
-                    <label className="block text-xs font-semibold text-[#4C4A6E] mb-1">
-                      Date / Timestamp Column (Optional)
-                    </label>
-                    <select
-                      value={dataset.mapping.dateColumn || ''}
-                      onChange={(e) =>
-                        onUpdateMapping({ dateColumn: e.target.value ? e.target.value : null })
-                      }
-                      className="w-full rounded-xl border border-purple-200 bg-[#F6F3FF]/40 px-3 py-2 text-sm text-[#15152F] focus:outline-none focus:border-[#7655E8]"
-                    >
-                      <option value="">Not available</option>
-                      {dataset.columns.map((c) => (
-                        <option key={c.name} value={c.name}>
-                          {c.name}
-                        </option>
-                      ))}
-                    </select>
-                  </div>
+                          <div>
+                            <label className="block text-xs font-semibold text-[#4C4A6E] mb-1">
+                              Registration Date
+                            </label>
+                            <select
+                              value={dataset.mapping.registrationDateColumn || ''}
+                              onChange={(e) =>
+                                onUpdateMapping({
+                                  registrationDateColumn: e.target.value ? e.target.value : null,
+                                })
+                              }
+                              className="w-full rounded-xl border border-purple-200 bg-white px-3 py-2 text-xs font-medium text-[#15152F]"
+                            >
+                              <option value="">Not mapped</option>
+                              {dataset.columns.map((c) => (
+                                <option key={c.name} value={c.name}>
+                                  {c.name}
+                                </option>
+                              ))}
+                            </select>
+                          </div>
 
-                  <div>
-                    <label className="block text-xs font-semibold text-[#4C4A6E] mb-1">
-                      {tmpl.frequencyLabel} Column (Optional)
-                    </label>
-                    <select
-                      value={dataset.mapping.frequencyColumn || ''}
-                      onChange={(e) =>
-                        onUpdateMapping({
-                          frequencyColumn: e.target.value ? e.target.value : null,
-                        })
-                      }
-                      className="w-full rounded-xl border border-purple-200 bg-[#F6F3FF]/40 px-3 py-2 text-sm text-[#15152F] focus:outline-none focus:border-[#7655E8]"
-                    >
-                      <option value="">Not available</option>
-                      {dataset.columns.map((c) => (
-                        <option key={c.name} value={c.name}>
-                          {c.name}
-                        </option>
-                      ))}
-                    </select>
-                  </div>
+                          <div>
+                            <label className="block text-xs font-semibold text-[#4C4A6E] mb-1">
+                              Churn Date Column
+                            </label>
+                            <select
+                              value={dataset.mapping.churnDateColumn || ''}
+                              onChange={(e) =>
+                                onUpdateMapping({
+                                  churnDateColumn: e.target.value ? e.target.value : null,
+                                })
+                              }
+                              className="w-full rounded-xl border border-purple-200 bg-white px-3 py-2 text-xs font-medium text-[#15152F]"
+                            >
+                              <option value="">Not mapped</option>
+                              {dataset.columns.map((c) => (
+                                <option key={c.name} value={c.name}>
+                                  {c.name}
+                                </option>
+                              ))}
+                            </select>
+                          </div>
+                        </div>
 
-                  <div>
-                    <label className="block text-xs font-semibold text-[#4C4A6E] mb-1">
-                      Customer Status Column (Operational)
-                    </label>
-                    <select
-                      value={dataset.mapping.statusColumn || ''}
-                      onChange={(e) =>
-                        onUpdateMapping({
-                          statusColumn: e.target.value ? e.target.value : null,
-                        })
-                      }
-                      className="w-full rounded-xl border border-purple-200 bg-[#F6F3FF]/40 px-3 py-2 text-sm text-[#15152F] focus:outline-none focus:border-[#7655E8]"
-                    >
-                      <option value="">Not mapped</option>
-                      {dataset.columns.map((c) => (
-                        <option key={c.name} value={c.name}>
-                          {c.name}
-                        </option>
-                      ))}
-                    </select>
-                  </div>
-
-                  <div>
-                    <label className="block text-xs font-semibold text-[#4C4A6E] mb-1">
-                      Observation Snapshot Date
-                    </label>
-                    <select
-                      value={dataset.mapping.observationDateColumn || ''}
-                      onChange={(e) =>
-                        onUpdateMapping({
-                          observationDateColumn: e.target.value ? e.target.value : null,
-                        })
-                      }
-                      className="w-full rounded-xl border border-purple-200 bg-[#F6F3FF]/40 px-3 py-2 text-sm text-[#15152F] focus:outline-none focus:border-[#7655E8]"
-                    >
-                      <option value="">Not mapped</option>
-                      {dataset.columns.map((c) => (
-                        <option key={c.name} value={c.name}>
-                          {c.name}
-                        </option>
-                      ))}
-                    </select>
-                  </div>
-
-                  <div>
-                    <label className="block text-xs font-semibold text-[#4C4A6E] mb-1">
-                      Registration Date
-                    </label>
-                    <select
-                      value={dataset.mapping.registrationDateColumn || ''}
-                      onChange={(e) =>
-                        onUpdateMapping({
-                          registrationDateColumn: e.target.value ? e.target.value : null,
-                        })
-                      }
-                      className="w-full rounded-xl border border-purple-200 bg-[#F6F3FF]/40 px-3 py-2 text-sm text-[#15152F] focus:outline-none focus:border-[#7655E8]"
-                    >
-                      <option value="">Not mapped</option>
-                      {dataset.columns.map((c) => (
-                        <option key={c.name} value={c.name}>
-                          {c.name}
-                        </option>
-                      ))}
-                    </select>
-                  </div>
-
-                  <div>
-                    <label className="block text-xs font-semibold text-[#4C4A6E] mb-1">
-                      Churn / Cancellation Date (Audit Only)
-                    </label>
-                    <select
-                      value={dataset.mapping.churnDateColumn || ''}
-                      onChange={(e) =>
-                        onUpdateMapping({
-                          churnDateColumn: e.target.value ? e.target.value : null,
-                        })
-                      }
-                      className="w-full rounded-xl border border-purple-200 bg-[#F6F3FF]/40 px-3 py-2 text-sm text-[#15152F] focus:outline-none focus:border-[#7655E8]"
-                    >
-                      <option value="">Not present (safe)</option>
-                      {dataset.columns.map((c) => (
-                        <option key={c.name} value={c.name}>
-                          {c.name}
-                        </option>
-                      ))}
-                    </select>
-                  </div>
-                </div>
-
-                <div>
-                  <label className="block text-xs font-semibold text-[#4C4A6E] mb-2">
-                    Prepared Customer Attributes ({dataset.mapping.featureColumns.length}{' '}
-                    selected for Customer data preparation — target &amp; post-outcome dates excluded)
-                  </label>
-                  <div className="flex flex-wrap gap-2">
-                    {dataset.columns
-                      .filter(
-                        (c) =>
-                          c.name !== dataset.mapping.targetColumn &&
-                          c.name !== dataset.mapping.idColumn &&
-                          c.name !== dataset.mapping.churnDateColumn &&
-                          c.dataType !== 'identifier' &&
-                          c.dataType !== 'date'
-                      )
-                      .map((col) => {
-                        const checked = dataset.mapping.featureColumns.includes(col.name);
-                        return (
-                          <label
-                            key={col.name}
-                            className={`inline-flex items-center gap-2 px-3 py-1.5 rounded-xl border text-xs cursor-pointer select-none transition-colors ${
-                              checked
-                                ? 'bg-[#7655E8]/10 border-[#7655E8]/40 text-[#5B3AD6] font-semibold'
-                                : 'bg-white border-purple-100 text-slate-600 hover:bg-[#F6F3FF]'
-                            }`}
-                          >
-                            <input
-                              type="checkbox"
-                              checked={checked}
-                              onChange={() => toggleFeatureColumn(col.name)}
-                              className="rounded border-purple-300 text-[#7655E8] accent-[#7655E8]"
-                            />
-                            <span>{col.name}</span>
+                        <div>
+                          <label className="block text-xs font-semibold text-[#4C4A6E] mb-2">
+                            Included Attributes ({dataset.mapping.featureColumns.length} selected)
                           </label>
-                        );
-                      })}
+                          <div className="flex flex-wrap gap-2">
+                            {dataset.columns
+                              .filter(
+                                (c) =>
+                                  c.name !== dataset.mapping.targetColumn &&
+                                  c.name !== dataset.mapping.idColumn &&
+                                  c.name !== dataset.mapping.churnDateColumn &&
+                                  c.dataType !== 'identifier' &&
+                                  c.dataType !== 'date'
+                              )
+                              .map((col) => {
+                                const checked = dataset.mapping.featureColumns.includes(col.name);
+                                return (
+                                  <label
+                                    key={col.name}
+                                    className={`inline-flex items-center gap-2 px-3 py-1.5 rounded-xl border text-xs cursor-pointer select-none transition-colors ${
+                                      checked
+                                        ? 'bg-[#7655E8]/10 border-[#7655E8]/40 text-[#5B3AD6] font-semibold'
+                                        : 'bg-white border-purple-100 text-slate-600 hover:bg-[#F6F3FF]'
+                                    }`}
+                                  >
+                                    <input
+                                      type="checkbox"
+                                      checked={checked}
+                                      onChange={() => toggleFeatureColumn(col.name)}
+                                      className="rounded border-purple-300 text-[#7655E8] accent-[#7655E8]"
+                                    />
+                                    <span>{col.name}</span>
+                                  </label>
+                                );
+                              })}
+                          </div>
+                        </div>
+                      </div>
+                    )}
                   </div>
                 </div>
-              </div>
-            )}
-          </div>
-
-          {/* Column Schema Summary */}
-          <div className="bg-white border border-purple-100/90 rounded-2xl shadow-sm shadow-purple-950/[0.04] p-5 sm:p-6 space-y-4 min-w-0">
-            <div>
-              <h2 className="text-base font-bold text-[#15152F]">
-                Detected Column Schema & Missing Values
-              </h2>
-              <p className="text-xs text-slate-500 mt-0.5">
-                Automatic type inference and semantic profiling across all {dataset.columnCount}{' '}
-                columns
-              </p>
-            </div>
-
-            <div className="overflow-x-auto">
-              <table className="w-full text-left border-collapse">
-                <thead>
-                  <tr className="border-b border-purple-100 text-xs font-semibold text-[#4C4A6E]">
-                    <th className="py-2.5 pr-4">Column Name</th>
-                    <th className="py-2.5 px-4">Detected Type</th>
-                    <th className="py-2.5 px-4">Semantic Role</th>
-                    <th className="py-2.5 px-4 text-right">Unique Values</th>
-                    <th className="py-2.5 px-4 text-right">Missing Values</th>
-                    <th className="py-2.5 px-4">Data Hygiene</th>
-                    <th className="py-2.5 pl-4">Sample Values</th>
-                  </tr>
-                </thead>
-                <tbody className="divide-y divide-purple-50 text-sm">
-                  {dataset.columns.map((col) => {
-                    const hygieneFlags: string[] = [];
-                    if ((col.invalidDateCount || 0) > 0) {
-                      hygieneFlags.push(`${col.invalidDateCount} invalid date(s)`);
-                    }
-                    if ((col.inconsistentCategoryCount || 0) > 0) {
-                      hygieneFlags.push(`${col.inconsistentCategoryCount} case/trim variant(s)`);
-                    }
-                    if (col.invalidNumericCount > 0 && col.dataType === 'numeric') {
-                      hygieneFlags.push(`${col.invalidNumericCount} non-numeric`);
-                    }
-                    return (
-                      <tr key={col.name} className="hover:bg-[#F6F3FF]/60 transition-colors">
-                        <td className="py-2.5 pr-4 font-semibold text-[#15152F]">
-                          {col.name}
-                          {col.name === dataset.mapping.targetColumn && (
-                            <span className="ml-2 text-xs font-bold text-[#7655E8]">(Target)</span>
-                          )}
-                        </td>
-                        <td className="py-2.5 px-4 text-xs font-mono text-[#397BFF] font-medium">
-                          {col.dataType}
-                        </td>
-                        <td className="py-2.5 px-4 text-xs font-mono text-slate-600">
-                          {col.semanticRole || 'other'}
-                        </td>
-                        <td className="py-2.5 px-4 text-right font-mono tabular-nums text-slate-700">
-                          {col.uniqueCount}
-                        </td>
-                        <td className="py-2.5 px-4 text-right font-mono tabular-nums">
-                          <span
-                            className={
-                              col.missingCount > 0
-                                ? 'text-[#D97706] font-semibold'
-                                : 'text-[#0E9F6E] font-medium'
-                            }
-                          >
-                            {col.missingCount} ({col.missingPercent}%)
-                          </span>
-                        </td>
-                        <td className="py-2.5 px-4 text-xs">
-                          {hygieneFlags.length > 0 ? (
-                            <span className="text-[#D97706] font-medium">
-                              {hygieneFlags.join(' · ')}
-                            </span>
-                          ) : (
-                            <span className="text-[#0E9F6E]">Clean</span>
-                          )}
-                        </td>
-                        <td className="py-2.5 pl-4 text-xs text-slate-500 truncate max-w-[220px]">
-                          {col.sampleValues.join(', ') || '—'}
-                        </td>
-                      </tr>
-                    );
-                  })}
-                </tbody>
-              </table>
-            </div>
+              );
+            })()}
           </div>
 
           {/* Customer Records Table */}
@@ -3434,8 +3689,8 @@ export const CustomerDataView: React.FC<CustomerDataViewProps> = ({
                   <thead>
                     <tr className="border-b border-purple-100 text-xs font-semibold text-[#4C4A6E]">
                       {visibleHeaders.map((h) => (
-                        <th key={h} className="py-2.5 px-3 whitespace-nowrap">
-                          {h}
+                        <th key={h} className="py-2.5 px-3 whitespace-nowrap" title={h}>
+                          {getHumanReadableFieldLabel(h, { dataset, company })}
                         </th>
                       ))}
                       <th className="py-2.5 pl-3 text-right">Details</th>
@@ -3477,7 +3732,11 @@ export const CustomerDataView: React.FC<CustomerDataViewProps> = ({
                               key={h}
                               className="py-2.5 px-3 text-slate-700 whitespace-nowrap font-mono text-xs tabular-nums"
                             >
-                              {row[h] ? row[h] : <span className="text-[#D97706] italic">missing</span>}
+                              {row[h] ? (
+                                formatAttributeValue(h, row[h], { dataset, company })
+                              ) : (
+                                <span className="text-[#D97706] italic">missing</span>
+                              )}
                             </td>
                           ))}
                           <td className="py-2.5 pl-3 text-right">
@@ -3555,16 +3814,16 @@ export const CustomerDataView: React.FC<CustomerDataViewProps> = ({
                 <table className="w-full text-left border-collapse text-xs">
                   <thead className="bg-[#F5F3FF] text-[#4C4A6E] border-b border-purple-100">
                     <tr>
-                      <th className="py-2.5 px-3 whitespace-nowrap">customer_id</th>
-                      <th className="py-2.5 px-3 whitespace-nowrap">customer_name</th>
-                      <th className="py-2.5 px-3 whitespace-nowrap">customer_status</th>
-                      <th className="py-2.5 px-3 whitespace-nowrap text-right">tenure_months</th>
-                      <th className="py-2.5 px-3 whitespace-nowrap text-right">satisfaction</th>
-                      <th className="py-2.5 px-3 whitespace-nowrap text-right">complaints</th>
-                      <th className="py-2.5 px-3 whitespace-nowrap text-right">tickets</th>
-                      <th className="py-2.5 px-3 whitespace-nowrap text-right">avg_res_days</th>
-                      <th className="py-2.5 px-3 whitespace-nowrap text-right">total_revenue</th>
-                      <th className="py-2.5 px-3 whitespace-nowrap">churn_status</th>
+                      <th className="py-2.5 px-3 whitespace-nowrap" title="customer_id">Customer ID</th>
+                      <th className="py-2.5 px-3 whitespace-nowrap" title="customer_name">Customer Name</th>
+                      <th className="py-2.5 px-3 whitespace-nowrap" title="customer_status">Customer Status</th>
+                      <th className="py-2.5 px-3 whitespace-nowrap text-right" title="tenure_months">Tenure</th>
+                      <th className="py-2.5 px-3 whitespace-nowrap text-right" title="customer_satisfaction_score">Satisfaction</th>
+                      <th className="py-2.5 px-3 whitespace-nowrap text-right" title="total_complaints">Complaints</th>
+                      <th className="py-2.5 px-3 whitespace-nowrap text-right" title="total_tickets_raised">Support Tickets</th>
+                      <th className="py-2.5 px-3 whitespace-nowrap text-right" title="average_resolution_days">Avg. Resolution Time</th>
+                      <th className="py-2.5 px-3 whitespace-nowrap text-right" title="total_revenue">Total Revenue</th>
+                      <th className="py-2.5 px-3 whitespace-nowrap" title="churn_status">Churn Status</th>
                     </tr>
                   </thead>
                   <tbody className="divide-y divide-purple-50 font-mono tabular-nums">
@@ -3573,12 +3832,12 @@ export const CustomerDataView: React.FC<CustomerDataViewProps> = ({
                         <td className="py-2 px-3 font-semibold text-[#15152F]">{row.customer_id}</td>
                         <td className="py-2 px-3 font-sans text-slate-700">{row.customer_name}</td>
                         <td className="py-2 px-3 font-sans text-slate-700">{row.customer_status}</td>
-                        <td className="py-2 px-3 text-right">{row.tenure_months}</td>
-                        <td className="py-2 px-3 text-right">{row.customer_satisfaction_score}</td>
-                        <td className="py-2 px-3 text-right">{row.total_complaints}</td>
-                        <td className="py-2 px-3 text-right">{row.total_tickets_raised}</td>
-                        <td className="py-2 px-3 text-right">{row.average_resolution_days}</td>
-                        <td className="py-2 px-3 text-right">${row.total_revenue}</td>
+                        <td className="py-2 px-3 text-right">{formatDuration(row.tenure_months, 'month')}</td>
+                        <td className="py-2 px-3 text-right">{formatScore(row.customer_satisfaction_score, '1-5')}</td>
+                        <td className="py-2 px-3 text-right">{formatAttributeValue('total_complaints', row.total_complaints)}</td>
+                        <td className="py-2 px-3 text-right">{formatAttributeValue('total_tickets_raised', row.total_tickets_raised)}</td>
+                        <td className="py-2 px-3 text-right">{formatDuration(row.average_resolution_days, 'day')}</td>
+                        <td className="py-2 px-3 text-right">{formatCurrencyUSD(row.total_revenue)}</td>
                         <td className="py-2 px-3 font-sans font-semibold">{row.churn_status}</td>
                       </tr>
                     ))}
@@ -3676,9 +3935,15 @@ export const CustomerDataView: React.FC<CustomerDataViewProps> = ({
             <div className="p-6 overflow-y-auto divide-y divide-purple-50 text-sm">
               {Object.entries(selectedRow).map(([key, val]) => (
                 <div key={key} className="py-2.5 flex items-center justify-between gap-4">
-                  <span className="text-slate-500 font-medium">{key}</span>
-                  <span className="font-mono text-xs font-semibold text-[#15152F] text-right">
-                    {val ? val : <span className="text-[#D97706] italic">missing</span>}
+                  <span className="text-slate-500 font-medium" title={key}>
+                    {getHumanReadableFieldLabel(key, { dataset, company })}
+                  </span>
+                  <span className="font-mono text-xs font-semibold text-[#15152F] text-right tabular-nums">
+                    {val ? (
+                      formatAttributeValue(key, val, { dataset, company })
+                    ) : (
+                      <span className="text-[#D97706] italic">missing</span>
+                    )}
                   </span>
                 </div>
               ))}

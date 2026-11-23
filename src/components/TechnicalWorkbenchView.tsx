@@ -718,7 +718,11 @@ export const TechnicalWorkbenchView: React.FC<TechnicalWorkbenchViewProps> = ({
                     : 'Relative share (%) of total Gini impurity reduction across splits'}
                 </p>
               </div>
-              <FeatureImportanceChart importances={activeModel.featureImportances} />
+              <FeatureImportanceChart
+                importances={activeModel.featureImportances}
+                dataset={dataset}
+                company={company}
+              />
             </div>
           </div>
 

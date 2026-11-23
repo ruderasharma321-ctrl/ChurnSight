@@ -20,6 +20,12 @@ import type {
 } from '../types/churn';
 import { apiFetch } from '../utils/apiClient';
 import {
+  formatAttributeValue,
+  formatCategoricalValue,
+  formatReadableDate,
+  getHumanReadableFieldLabel,
+} from '../utils/formatters';
+import {
   getIndustryDataTemplateColumns,
   getIndustryTemplate,
 } from '../utils/industryConfig';
@@ -158,13 +164,15 @@ export const CustomerDirectorySection: React.FC<CustomerDirectorySectionProps> =
     setPage(1);
   }, [statusFilter, searchQuery, monthFilter, viewMode, dataset?.datasetId]);
 
+  const formatCtx = useMemo(() => ({ dataset, company }), [dataset, company]);
+
   const formFields = useMemo(() => {
     if (dataset && dataset.columns.length > 0) {
       return dataset.columns.map((col) => {
         const spec = templateSpecs.find((s) => s.name === col.name);
         return {
           name: col.name,
-          label: spec?.displayName || col.name.replace(/_/g, ' '),
+          label: getHumanReadableFieldLabel(col.name, formatCtx),
           dataType: col.dataType,
           categories: col.categories,
           placeholder: spec?.exampleValue || (col.sampleValues[0] ?? ''),
@@ -289,11 +297,24 @@ export const CustomerDirectorySection: React.FC<CustomerDirectorySectionProps> =
       Object.values(row).find((v) => v && v.trim()) ||
       `Row #${idx + 1}`;
 
-    const segmentVal = (segmentCol && row[segmentCol]?.trim()) || tmpl.shortLabel;
-    const tenureVal = tenureCol && row[tenureCol]?.trim() ? row[tenureCol].trim() : 'N/A';
-    const revenueVal = revenueCol && row[revenueCol]?.trim() ? row[revenueCol].trim() : 'N/A';
-    const dateVal = dateCol && row[dateCol]?.trim() ? row[dateCol].trim() : 'N/A';
-    const freqVal = freqCol && row[freqCol]?.trim() ? row[freqCol].trim() : null;
+    const segmentVal =
+      segmentCol && row[segmentCol]?.trim()
+        ? formatCategoricalValue(segmentCol, row[segmentCol].trim())
+        : tmpl.shortLabel;
+    const tenureVal =
+      tenureCol && row[tenureCol]?.trim()
+        ? formatAttributeValue(tenureCol, row[tenureCol], formatCtx)
+        : '—';
+    const revenueVal =
+      revenueCol && row[revenueCol]?.trim()
+        ? formatAttributeValue(revenueCol, row[revenueCol], formatCtx)
+        : '—';
+    const dateVal =
+      dateCol && row[dateCol]?.trim() ? formatReadableDate(row[dateCol]) : '—';
+    const freqVal =
+      freqCol && row[freqCol]?.trim()
+        ? formatAttributeValue(freqCol, row[freqCol], formatCtx)
+        : null;
 
     const targetRaw = targetCol ? (row[targetCol] || '').trim() : '';
     let resolvedStatus: CustomerActualStatus = apiStatus || 'Unknown';
@@ -616,7 +637,7 @@ export const CustomerDirectorySection: React.FC<CustomerDirectorySectionProps> =
 
                     <div className="py-2.5 flex items-center justify-between gap-3">
                       <span className="text-slate-500">
-                        {dateCol ? dateCol.replace(/_/g, ' ') : 'Date'}
+                        {dateCol ? getHumanReadableFieldLabel(dateCol, formatCtx) : 'Date'}
                       </span>
                       <span className="font-semibold font-mono tabular-nums text-[#11142B]">
                         {info.dateVal}
@@ -649,11 +670,11 @@ export const CustomerDirectorySection: React.FC<CustomerDirectorySectionProps> =
                     {!risk &&
                       info.extraPairs.map(([k, v]) => (
                         <div key={k} className="py-2.5 flex items-center justify-between gap-3">
-                          <span className="text-slate-500 capitalize truncate">
-                            {k.replace(/_/g, ' ')}
+                          <span className="text-slate-500 truncate" title={k}>
+                            {getHumanReadableFieldLabel(k, formatCtx)}
                           </span>
-                          <span className="font-semibold text-[#11142B] truncate max-w-[150px]">
-                            {v}
+                          <span className="font-semibold font-mono tabular-nums text-[#11142B] truncate max-w-[150px]">
+                            {formatAttributeValue(k, v, formatCtx)}
                           </span>
                         </div>
                       ))}
@@ -727,7 +748,7 @@ export const CustomerDirectorySection: React.FC<CustomerDirectorySectionProps> =
                   <th className="py-3 px-4 text-right whitespace-nowrap">{tmpl.tenureLabel}</th>
                   <th className="py-3 px-4 text-right whitespace-nowrap">{tmpl.revenueLabel}</th>
                   <th className="py-3 px-4 whitespace-nowrap">
-                    {dateCol ? dateCol.replace(/_/g, ' ') : 'Date'}
+                    {dateCol ? getHumanReadableFieldLabel(dateCol, formatCtx) : 'Date'}
                   </th>
                   <th className="py-3 px-4 whitespace-nowrap">Status</th>
                   {activeModel && <th className="py-3 px-4 text-right whitespace-nowrap">Risk</th>}
@@ -1023,9 +1044,11 @@ export const CustomerDirectorySection: React.FC<CustomerDirectorySectionProps> =
             <div className="p-6 overflow-y-auto divide-y divide-slate-100 text-xs">
               {Object.entries(inspectTarget.row).map(([k, v]) => (
                 <div key={k} className="py-2.5 flex items-center justify-between gap-4">
-                  <span className="text-slate-500 capitalize">{k.replace(/_/g, ' ')}</span>
-                  <span className="font-semibold font-mono text-[#11142B] text-right">
-                    {v && v.trim() !== '' ? v : '—'}
+                  <span className="text-slate-500" title={k}>
+                    {getHumanReadableFieldLabel(k, formatCtx)}
+                  </span>
+                  <span className="font-semibold font-mono tabular-nums text-[#11142B] text-right">
+                    {formatAttributeValue(k, v, formatCtx)}
                   </span>
                 </div>
               ))}

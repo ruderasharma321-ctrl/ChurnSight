@@ -1,4 +1,4 @@
-import React from 'react';
+import React, { useState } from 'react';
 import {
   AlertTriangle,
   CalendarRange,
@@ -26,6 +26,7 @@ import type {
   HistoricalChurnPerformance,
   ActiveCustomerRiskSummary,
 } from '../types/churn';
+import { formatCurrencyUSD } from '../utils/formatters';
 
 interface ChurnSeparationOverviewProps {
   analytics: AnalyticsSummary | null;
@@ -52,6 +53,8 @@ export const ChurnSeparationOverview: React.FC<ChurnSeparationOverviewProps> = (
   onPeriodChange,
   compact = false,
 }) => {
+  const [showDetails, setShowDetails] = useState(false);
+
   if (!analytics) return null;
 
   const hp: HistoricalChurnPerformance = analytics.historicalPerformance || {
@@ -93,7 +96,7 @@ export const ChurnSeparationOverview: React.FC<ChurnSeparationOverviewProps> = (
                 Historical Churn Performance
               </h2>
               <p className="text-xs text-slate-600">
-                <strong className="text-[#DC2626]">Already Churned</strong> · From confirmed historical records only.
+                Already left (confirmed historical records)
               </p>
             </div>
 
@@ -174,29 +177,46 @@ export const ChurnSeparationOverview: React.FC<ChurnSeparationOverviewProps> = (
               </div>
             </div>
 
-            <div className="rounded-lg bg-slate-50 border border-slate-200/80 px-3.5 py-2 text-[11px] font-mono text-slate-600">
-              {hp.formulaDescription}
-            </div>
-
             {hp.inconsistentRecordsCount > 0 && (
-              <div className="rounded-xl border border-amber-300 bg-amber-50/80 p-3.5 space-y-2 text-xs text-amber-950">
-                <div className="flex items-center justify-between gap-2 font-bold">
-                  <span className="inline-flex items-center gap-1.5">
-                    <AlertTriangle className="w-4 h-4 text-amber-700" />
-                    <span>
-                      {hp.inconsistentRecordsCount} Conflicting Status Record
-                      {hp.inconsistentRecordsCount === 1 ? '' : 's'} Flagged
-                    </span>
+              <div className="rounded-xl border border-amber-300 bg-amber-50/80 px-3.5 py-2.5 flex flex-wrap items-center justify-between gap-2 text-xs text-amber-950">
+                <span className="inline-flex items-center gap-1.5 font-semibold">
+                  <AlertTriangle className="w-4 h-4 text-amber-700 shrink-0" />
+                  <span>
+                    {hp.inconsistentRecordsCount} conflicting status record
+                    {hp.inconsistentRecordsCount === 1 ? '' : 's'} excluded from historical rates.
                   </span>
-                  <span className="text-[10px] font-semibold uppercase tracking-wider text-amber-800">
-                    Excluded from clean rate
-                  </span>
+                </span>
+                {!compact && (
+                  <button
+                    type="button"
+                    onClick={() => setShowDetails((prev) => !prev)}
+                    className="text-xs font-semibold text-[#5B3AD6] hover:text-[#E84FA8] cursor-pointer whitespace-nowrap"
+                  >
+                    {showDetails ? 'Hide Details' : 'View Details'}
+                  </button>
+                )}
+              </div>
+            )}
+
+            {!compact && hp.inconsistentRecordsCount === 0 && (
+              <div className="flex justify-end">
+                <button
+                  type="button"
+                  onClick={() => setShowDetails((prev) => !prev)}
+                  className="text-xs font-semibold text-[#7655E8] hover:text-[#E84FA8] cursor-pointer"
+                >
+                  {showDetails ? 'Hide Details' : 'View Details'}
+                </button>
+              </div>
+            )}
+
+            {!compact && showDetails && (
+              <div className="rounded-xl border border-slate-200 bg-slate-50/80 p-3.5 space-y-2.5 text-xs">
+                <div className="font-mono text-[11px] text-slate-600">
+                  {hp.formulaDescription}
                 </div>
-                <p className="text-[11px] text-amber-900">
-                  Records with conflicting labels or dates are marked <strong className="font-mono">Inconsistent</strong> and excluded from rates.
-                </p>
-                {!compact && hp.inconsistentRecordsSample.length > 0 && (
-                  <div className="max-h-28 overflow-y-auto divide-y divide-amber-200/70 border-t border-amber-200/70 pt-1.5">
+                {hp.inconsistentRecordsCount > 0 && hp.inconsistentRecordsSample.length > 0 && (
+                  <div className="max-h-28 overflow-y-auto divide-y divide-amber-200/70 border-t border-slate-200 pt-2">
                     {hp.inconsistentRecordsSample.slice(0, 6).map((rec) => (
                       <div key={`${rec.rowIndex}-${rec.customerId}`} className="py-1 flex items-start gap-2 text-[11px]">
                         <span className="font-mono font-bold text-amber-950 shrink-0">
@@ -267,7 +287,7 @@ export const ChurnSeparationOverview: React.FC<ChurnSeparationOverviewProps> = (
                 Active Customer Risk
               </h2>
               <p className="text-xs text-slate-600">
-                <strong className="text-[#EA580C]">At Risk of Churning</strong> · Forward risk for <strong className="text-[#059669]">Active</strong> {entityPlural.toLowerCase()} only.
+                Predicted risk (currently active {entityPlural.toLowerCase()} only)
               </p>
             </div>
 
@@ -348,9 +368,7 @@ export const ChurnSeparationOverview: React.FC<ChurnSeparationOverviewProps> = (
                       {activeRisk.highValueActiveAtRiskRevenue !== null &&
                         activeRisk.highValueActiveAtRiskRevenue !== undefined && (
                           <span className="font-mono font-bold text-[#7655E8]">
-                            ${activeRisk.highValueActiveAtRiskRevenue.toLocaleString(undefined, {
-                              maximumFractionDigits: 0,
-                            })}{' '}
+                            {formatCurrencyUSD(activeRisk.highValueActiveAtRiskRevenue)}{' '}
                             annualized exposure
                           </span>
                         )}

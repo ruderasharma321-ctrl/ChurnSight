@@ -25,6 +25,14 @@ import {
   RiskCategory,
 } from '../types/churn';
 import { apiFetch, downloadProtectedCsv } from '../utils/apiClient';
+import {
+  formatAttributeValue,
+  formatCategoricalValue,
+  formatFeatureDisplayName,
+  getFieldUnitHint,
+  getHumanReadableFieldLabel,
+  parseFeatureIdentifier,
+} from '../utils/formatters';
 import { getIndustryTemplate } from '../utils/industryConfig';
 import { exportCustomerRiskPdf } from '../utils/reportExporter';
 import { getSubscriptionPlanSpec } from '../utils/subscriptionPlans';
@@ -446,25 +454,17 @@ export const ChurnPredictionView: React.FC<ChurnPredictionViewProps> = ({
     );
   };
 
+  const formatCtx = useMemo(() => ({ dataset, company }), [dataset, company]);
+
   const resolveCustomerAttrForFeature = (
     featureName: string,
     attrs: Record<string, string>
-  ): { baseCol: string; attrValue: string; matchesCategory: boolean } => {
-    const eqIndex = featureName.indexOf(' = ');
-    if (eqIndex > 0) {
-      const baseCol = featureName.slice(0, eqIndex);
-      const targetCat = featureName.slice(eqIndex + 3);
-      const actualVal = attrs[baseCol] || '—';
-      return {
-        baseCol,
-        attrValue: actualVal,
-        matchesCategory: actualVal === targetCat,
-      };
-    }
+  ): { baseCol: string; attrValue: string } => {
+    const parsed = parseFeatureIdentifier(featureName);
+    const rawVal = attrs[parsed.baseField];
     return {
-      baseCol: featureName,
-      attrValue: attrs[featureName] || '—',
-      matchesCategory: true,
+      baseCol: parsed.baseField,
+      attrValue: formatAttributeValue(parsed.baseField, rawVal, formatCtx),
     };
   };
 
@@ -477,85 +477,45 @@ export const ChurnPredictionView: React.FC<ChurnPredictionViewProps> = ({
     const maxImportance = Math.max(1, ...topFeatures.map((f) => f.importance));
 
     return (
-      <div className="space-y-4">
-        <div className="flex items-center justify-between border-b border-slate-200/80 pb-2.5">
-          <div>
-            <div className="text-[11px] font-semibold uppercase tracking-[0.18em] text-[#7655E8]">
-              KEY CHURN DRIVERS
-            </div>
-            <div className="text-xs text-slate-500 mt-0.5">
-              Top signals shaping this retention estimate
-            </div>
+      <div className="space-y-3.5">
+        <div className="border-b border-slate-200/80 pb-2.5">
+          <div className="text-[11px] font-semibold uppercase tracking-[0.18em] text-[#7655E8]">
+            KEY CHURN DRIVERS
           </div>
-          <span className="text-[11px] font-mono text-slate-400">TOP {topFeatures.length}</span>
         </div>
 
-        <div className="space-y-3">
+        <div className="space-y-2.5">
           {topFeatures.map((item, idx) => {
-            const { attrValue, matchesCategory } = resolveCustomerAttrForFeature(
-              item.feature,
-              attrs
-            );
-            const isIncrease = item.direction === 'increases_churn';
-            const isDecrease = item.direction === 'decreases_churn';
-            const directionLabel = isIncrease
-              ? 'Increases Risk'
-              : isDecrease
-                ? 'Reduces Risk'
-                : 'Key Influence';
-            const directionTextClass = isIncrease
-              ? 'text-[#B84DE0]'
-              : isDecrease
-                ? 'text-[#0C7D99]'
-                : 'text-[#7655E8]';
-            const barClass = isIncrease
-              ? 'bg-[#B84DE0]'
-              : isDecrease
-                ? 'bg-[#35C5E8]'
-                : 'bg-[#7655E8]';
+            const { attrValue } = resolveCustomerAttrForFeature(item.feature, attrs);
+            const displayFeature = formatFeatureDisplayName(item.feature, formatCtx);
+            const barClass =
+              item.direction === 'increases_churn'
+                ? 'bg-[#B84DE0]'
+                : item.direction === 'decreases_churn'
+                  ? 'bg-[#35C5E8]'
+                  : 'bg-[#7655E8]';
             const barWidth = Math.max(8, (item.importance / maxImportance) * 100);
 
             return (
               <div
                 key={item.feature}
-                className="group border border-slate-200/80 hover:border-[#7655E8]/40 rounded-lg bg-[#F5F3FF]/35 hover:bg-white p-3 transition-all duration-150"
+                className="border border-slate-200/80 hover:border-[#7655E8]/40 rounded-lg bg-[#F5F3FF]/35 hover:bg-white p-3 transition-all duration-150"
               >
-                <div className="flex items-start justify-between gap-3">
-                  <div className="min-w-0">
-                    <div
-                      className="text-xs font-semibold text-[#11142B] truncate"
-                      title={item.feature}
-                    >
-                      {item.feature}
-                    </div>
-                    <div className="mt-1 flex flex-wrap items-center gap-x-2 gap-y-0.5 text-[11px]">
-                      <span className={`font-semibold ${directionTextClass}`}>
-                        {directionLabel}
-                      </span>
-                      <span className="text-slate-300">·</span>
-                      <span className="text-slate-500">
-                        Value:{' '}
-                        <span className="font-mono font-semibold text-[#11142B]">
-                          {attrValue}
-                        </span>
-                        {item.feature.includes(' = ') && (
-                          <span className="ml-1 text-slate-400">
-                            ({matchesCategory ? 'active' : 'inactive'})
-                          </span>
-                        )}
-                      </span>
-                    </div>
-                  </div>
-
-                  <div className="text-right shrink-0">
-                    <div className="font-mono text-xs font-bold tabular-nums text-[#11142B]">
-                      {item.importance.toFixed(1)}%
-                    </div>
-                    <div className="text-[10px] text-slate-400">Impact share</div>
-                  </div>
+                <div
+                  className="text-xs font-semibold text-[#11142B] truncate"
+                  title={displayFeature}
+                >
+                  {displayFeature}
+                </div>
+                <div className="mt-1 text-xs text-slate-600 tabular-nums">
+                  <span className="font-semibold text-[#11142B]">{attrValue}</span>
+                  <span className="mx-1.5 text-slate-400">·</span>
+                  <span className="font-mono font-medium text-[#7655E8]">
+                    {item.importance.toFixed(1)}% impact
+                  </span>
                 </div>
 
-                <div className="mt-2.5 h-1.5 w-full rounded-full bg-slate-200/80 overflow-hidden">
+                <div className="mt-2 h-1.5 w-full rounded-full bg-slate-200/80 overflow-hidden">
                   <motion.div
                     initial={{ width: 0 }}
                     animate={{ width: `${barWidth}%` }}
@@ -615,7 +575,7 @@ export const ChurnPredictionView: React.FC<ChurnPredictionViewProps> = ({
               Churn Predictions
             </h1>
             <p className="text-sm text-slate-300 leading-relaxed max-w-xl">
-              Inspect account churn risk, simulate retention scenarios, and score new customer batches.
+              Account churn risk, scenarios, and batch scoring.
             </p>
             <div className="flex flex-wrap items-center gap-4 pt-1">
               {predictionsReady && (
@@ -624,7 +584,7 @@ export const ChurnPredictionView: React.FC<ChurnPredictionViewProps> = ({
                   onClick={() => onNavigate('performance')}
                   className="text-xs font-semibold text-[#35C5E8] hover:text-white transition-colors cursor-pointer"
                 >
-                  View Model Performance ({activeModel?.accuracy.toFixed(1)}%) →
+                  Performance ({activeModel?.accuracy.toFixed(1)}%) →
                 </button>
               )}
               <button
@@ -632,7 +592,7 @@ export const ChurnPredictionView: React.FC<ChurnPredictionViewProps> = ({
                 onClick={() => onNavigate('technical')}
                 className="text-xs font-semibold text-indigo-200 hover:text-white transition-colors cursor-pointer"
               >
-                Open Technical ML Studio →
+                ML Studio →
               </button>
             </div>
           </div>
@@ -917,22 +877,22 @@ export const ChurnPredictionView: React.FC<ChurnPredictionViewProps> = ({
 
                   <div className="rounded-lg border border-slate-200/80 bg-[#F5F3FF]/35 divide-y divide-slate-200/70 text-xs">
                     <div className="px-3.5 py-2.5 flex items-center justify-between">
-                      <span className="text-[10px] font-semibold uppercase tracking-[0.14em] text-slate-500">
-                        IDENTIFIER
+                      <span className="text-[11px] font-semibold text-slate-500">
+                        Customer ID
                       </span>
                       <span className="font-mono font-bold text-[#11142B]">
                         {selectedPrediction.customerId}
                       </span>
                     </div>
                     <div className="px-3.5 py-2.5 flex items-center justify-between">
-                      <span className="text-[10px] font-semibold uppercase tracking-[0.14em] text-slate-500">
-                        ACTUAL CUSTOMER STATUS
+                      <span className="text-[11px] font-semibold text-slate-500">
+                        Customer Status
                       </span>
                       {renderActualStatusBadge(getEffectiveActualStatus(selectedPrediction))}
                     </div>
                     <div className="px-3.5 py-2.5 flex items-center justify-between">
-                      <span className="text-[10px] font-semibold uppercase tracking-[0.14em] text-slate-500">
-                        VALIDATION SAMPLE
+                      <span className="text-[11px] font-semibold text-slate-500">
+                        Sample Group
                       </span>
                       <span
                         className={`font-semibold ${
@@ -942,8 +902,8 @@ export const ChurnPredictionView: React.FC<ChurnPredictionViewProps> = ({
                         }`}
                       >
                         {selectedPrediction.split === 'Unseen Test'
-                          ? 'Held-out Quality Check'
-                          : 'Historical Reference'}
+                          ? 'Test Set'
+                          : 'Reference Set'}
                       </span>
                     </div>
                   </div>
@@ -952,13 +912,24 @@ export const ChurnPredictionView: React.FC<ChurnPredictionViewProps> = ({
                     <div className="text-[10px] font-semibold uppercase tracking-[0.18em] text-slate-500">
                       ATTRIBUTES
                     </div>
-                    <div className="max-h-[260px] overflow-y-auto pr-1 divide-y divide-slate-100 text-xs border-t border-slate-200/80">
+                    <div className="max-h-[260px] overflow-y-auto pr-1 pt-2.5 border-t border-slate-200/80 grid grid-cols-1 sm:grid-cols-2 gap-2 text-xs">
                       {Object.entries(selectedPrediction.attributes).map(([k, v]) => (
-                        <div key={k} className="py-2 flex items-center justify-between gap-3">
-                          <span className="text-slate-500 truncate">{k}</span>
-                          <span className="font-mono font-semibold text-[#11142B] text-right">
-                            {v || '—'}
-                          </span>
+                        <div
+                          key={k}
+                          className="rounded-lg border border-slate-100 bg-slate-50/70 px-2.5 py-2 min-w-0"
+                        >
+                          <div
+                            className="text-[10px] font-medium text-slate-500 truncate"
+                            title={k}
+                          >
+                            {getHumanReadableFieldLabel(k, formatCtx)}
+                          </div>
+                          <div
+                            className="font-mono font-semibold text-[#11142B] mt-0.5 truncate tabular-nums"
+                            title={formatAttributeValue(k, v, formatCtx)}
+                          >
+                            {formatAttributeValue(k, v, formatCtx)}
+                          </div>
                         </div>
                       ))}
                     </div>
@@ -1007,7 +978,7 @@ export const ChurnPredictionView: React.FC<ChurnPredictionViewProps> = ({
                   <div className="rounded-lg border border-slate-200/80 bg-white/90 px-3.5 py-2.5 flex items-center gap-2 text-[11px] text-slate-500">
                     <Info className="w-3.5 h-3.5 text-[#397BFF] shrink-0" />
                     <span>
-                      Scored by{' '}
+                      Model:{' '}
                       <strong className="text-[#11142B]">
                         {activeModel.modelName} ({activeModel.version})
                       </strong>{' '}
@@ -1045,11 +1016,21 @@ export const ChurnPredictionView: React.FC<ChurnPredictionViewProps> = ({
                         colProfile?.dataType === 'categorical' &&
                         colProfile.categories &&
                         colProfile.categories.length > 0;
+                      const unitHint = getFieldUnitHint(colName, formatCtx);
+                      const readableLabel = getHumanReadableFieldLabel(colName, formatCtx);
 
                       return (
                         <div key={colName}>
-                          <label className="block text-[10px] font-semibold uppercase tracking-[0.12em] text-slate-500 mb-1 truncate">
-                            {colName}
+                          <label
+                            className="block text-[10px] font-semibold uppercase tracking-[0.08em] text-slate-500 mb-1 truncate"
+                            title={colName}
+                          >
+                            {readableLabel}
+                            {unitHint ? (
+                              <span className="ml-1 font-normal normal-case text-slate-400">
+                                ({unitHint})
+                              </span>
+                            ) : null}
                           </label>
                           {hasSelectOptions ? (
                             <select
@@ -1061,7 +1042,7 @@ export const ChurnPredictionView: React.FC<ChurnPredictionViewProps> = ({
                             >
                               {colProfile.categories!.map((cat) => (
                                 <option key={cat} value={cat}>
-                                  {cat}
+                                  {formatCategoricalValue(colName, cat)}
                                 </option>
                               ))}
                             </select>
@@ -1374,8 +1355,7 @@ export const ChurnPredictionView: React.FC<ChurnPredictionViewProps> = ({
                   </h2>
                   <span className="text-xs font-mono text-slate-500 tabular-nums">
                     {filteredPredictions.length.toLocaleString()} of{' '}
-                    {activeModel.predictions.length.toLocaleString()} accounts · Click any row to
-                    inspect
+                    {activeModel.predictions.length.toLocaleString()} accounts
                   </span>
                 </div>
               </div>
@@ -1387,9 +1367,9 @@ export const ChurnPredictionView: React.FC<ChurnPredictionViewProps> = ({
                     type="text"
                     value={searchId}
                     onChange={(e) => setSearchId(e.target.value)}
-                    placeholder="Search by Customer ID or Name..."
+                    placeholder="Search customer..."
                     aria-label="Search by Customer ID or Name"
-                    className="pl-8 pr-3 py-1.5 text-xs border border-slate-200 rounded-lg bg-[#F5F3FF]/45 text-[#11142B] w-36 focus:outline-none focus:border-[#7655E8]"
+                    className="pl-8 pr-3 py-1.5 text-xs border border-slate-200 rounded-lg bg-[#F5F3FF]/45 text-[#11142B] w-40 focus:outline-none focus:border-[#7655E8]"
                   />
                 </div>
 
@@ -1416,9 +1396,9 @@ export const ChurnPredictionView: React.FC<ChurnPredictionViewProps> = ({
                   className="rounded-lg border border-slate-200 bg-[#F5F3FF]/45 px-2.5 py-1.5 text-xs text-[#11142B] focus:outline-none focus:border-[#7655E8]"
                 >
                   <option value="ALL">All Statuses</option>
-                  <option value="Active">Active Customers</option>
-                  <option value="Churned">Already Churned</option>
-                  <option value="Inconsistent">Inconsistent Status</option>
+                  <option value="Active">Active</option>
+                  <option value="Churned">Churned</option>
+                  <option value="Inconsistent">Inconsistent</option>
                 </select>
 
                 <select
@@ -1428,9 +1408,9 @@ export const ChurnPredictionView: React.FC<ChurnPredictionViewProps> = ({
                   className="rounded-lg border border-slate-200 bg-[#F5F3FF]/45 px-2.5 py-1.5 text-xs text-[#11142B] focus:outline-none focus:border-[#7655E8]"
                 >
                   <option value="ALL">All Risk Tiers</option>
-                  <option value="Higher Estimated Churn Risk">Active: High Risk</option>
-                  <option value="Moderate Estimated Churn Risk">Active: Medium Risk</option>
-                  <option value="Low Estimated Churn Risk">Active: Low Risk</option>
+                  <option value="Higher Estimated Churn Risk">High Risk</option>
+                  <option value="Moderate Estimated Churn Risk">Medium Risk</option>
+                  <option value="Low Estimated Churn Risk">Low Risk</option>
                 </select>
 
                 <button
@@ -1468,20 +1448,20 @@ export const ChurnPredictionView: React.FC<ChurnPredictionViewProps> = ({
               <table className="w-full text-left border-collapse">
                 <thead className="sticky top-0 bg-[#F5F3FF]/95 backdrop-blur-xs border-b border-slate-200 text-[10px] font-semibold uppercase tracking-[0.14em] text-slate-500">
                   <tr>
-                    <th className="py-3 pl-6 pr-3">Row</th>
-                    <th className="py-3 px-3 min-w-[200px] whitespace-nowrap">
-                      {tmpl.entitySingular} ID / Customer Name
+                    <th className="py-3 pl-6 pr-3 min-w-[220px] whitespace-nowrap">
+                      {tmpl.entitySingular} Name
                     </th>
-                    <th className="py-3 px-3">Sample Group</th>
-                    <th className="py-3 px-3">Actual Customer Status</th>
-                    <th className="py-3 px-3 text-right">Predicted Churn Probability</th>
-                    <th className="py-3 pl-3 pr-6">Predicted Risk Classification</th>
+                    <th className="py-3 px-3 whitespace-nowrap">Customer Status</th>
+                    <th className="py-3 px-3 text-right whitespace-nowrap">
+                      Predicted Churn Probability
+                    </th>
+                    <th className="py-3 pl-3 pr-6 whitespace-nowrap">Risk Classification</th>
                   </tr>
                 </thead>
                 <tbody className="divide-y divide-slate-100 text-xs">
                   {filteredPredictions.length === 0 ? (
                     <tr>
-                      <td colSpan={6} className="py-10 text-center text-slate-500">
+                      <td colSpan={4} className="py-10 text-center text-slate-500">
                         <div className="space-y-2">
                           <div>No customers found</div>
                           <button
@@ -1523,30 +1503,18 @@ export const ChurnPredictionView: React.FC<ChurnPredictionViewProps> = ({
                               : 'hover:bg-[#F5F3FF]/60'
                           }`}
                         >
-                          <td className="py-2.5 pl-6 pr-3 font-mono tabular-nums text-slate-400">
-                            {p.rowIndex}
-                          </td>
-                          <td className="py-2.5 px-3 min-w-[200px]">
-                            <div className="font-mono font-bold text-[#11142B] leading-tight">
-                              {p.customerId}
-                            </div>
+                          <td className="py-2.5 pl-6 pr-3 min-w-[220px]">
                             <div
-                              className={`font-sans text-[11px] leading-snug mt-0.5 truncate max-w-[240px] ${
-                                customerName
-                                  ? 'text-slate-500 font-normal'
-                                  : 'text-slate-400 font-normal'
-                              }`}
-                              title={customerName || 'Name unavailable'}
+                              className="font-semibold text-[#11142B] leading-tight truncate max-w-[260px]"
+                              title={customerName || p.customerId}
                             >
-                              {customerName || 'Name unavailable'}
+                              {customerName || p.customerId}
                             </div>
-                          </td>
-                          <td
-                            className={`py-2.5 px-3 font-medium ${
-                              p.split === 'Unseen Test' ? 'text-[#397BFF]' : 'text-slate-500'
-                            }`}
-                          >
-                            {p.split === 'Unseen Test' ? 'Validation Sample' : 'Reference Sample'}
+                            {customerName && (
+                              <div className="font-mono text-[11px] text-slate-400 leading-snug mt-0.5">
+                                {p.customerId}
+                              </div>
+                            )}
                           </td>
                           <td className="py-2.5 px-3">
                             {renderActualStatusBadge(actualStatus)}

@@ -68,8 +68,11 @@ export const AnimatedNumber: React.FC<AnimatedNumberProps> = ({
 
   const formatted =
     decimals > 0
-      ? displayValue.toFixed(decimals)
-      : Math.round(displayValue).toLocaleString();
+      ? displayValue.toLocaleString('en-US', {
+          minimumFractionDigits: decimals,
+          maximumFractionDigits: decimals,
+        })
+      : Math.round(displayValue).toLocaleString('en-US');
 
   return (
     <span className="tabular-nums">
